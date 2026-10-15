@@ -1,0 +1,13 @@
+# Спичка: с этих адресов нода начинает обход.
+# Строки с # пропускаются. Дальше она читает robots.txt, sitemap и /llms.txt.
+# На другие домены по ссылкам с этих сайтов она пойдёт только с --follow-external.
+
+https://dartalab.ru/
+https://tehnoveles.ru/
+https://magaicrm.ru/
+https://magwww.ru/
+https://magtask.ru/
+https://katuar.ru/
+https://tident.ru/
+https://stident.ru/
+https://rvelektro.ru/

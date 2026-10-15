@@ -1,0 +1,18 @@
+[package]
+name = "mds-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[[bin]]
+name = "mds"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+mds-crawl = { workspace = true }
+mds-node = { workspace = true }
+mds-update = { workspace = true }
+tokio = { workspace = true }

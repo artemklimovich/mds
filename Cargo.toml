@@ -1,0 +1,46 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/mds-types",
+    "crates/mds-wire",
+    "crates/mds-dht",
+    "crates/mds-crawl",
+    "crates/mds-embed",
+    "crates/mds-index",
+    "crates/mds-rank",
+    "crates/mds-node",
+    "crates/mds-update",
+    "crates/mds-cli",
+    "apps/mds-web",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+publish = false
+
+[workspace.dependencies]
+mds-types = { path = "crates/mds-types" }
+mds-wire = { path = "crates/mds-wire" }
+mds-dht = { path = "crates/mds-dht" }
+mds-crawl = { path = "crates/mds-crawl" }
+mds-embed = { path = "crates/mds-embed" }
+mds-index = { path = "crates/mds-index" }
+mds-rank = { path = "crates/mds-rank" }
+mds-node = { path = "crates/mds-node" }
+mds-update = { path = "crates/mds-update" }
+mds-web = { path = "apps/mds-web" }
+anyhow = "1"
+axum = "0.8"
+blake3 = "1"
+clap = { version = "4", features = ["derive"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "charset", "http2", "gzip"] }
+rusqlite = { version = "0.37", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "time", "rt"] }
+tower-http = { version = "0.6", features = ["fs"] }
+url = "2"
+fastembed = { version = "4", default-features = false, features = ["ort-load-dynamic", "hf-hub-rustls-tls"] }

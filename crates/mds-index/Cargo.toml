@@ -1,0 +1,12 @@
+[package]
+name = "mds-index"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+mds-crawl = { workspace = true }
+mds-types = { workspace = true }
+rusqlite = { workspace = true }
+thiserror = { workspace = true }

@@ -1,0 +1,10 @@
+[package]
+name = "mds-rank"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+mds-index = { workspace = true }
+mds-types = { workspace = true }
