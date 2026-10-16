@@ -1,7 +1,13 @@
+mod admit;
 pub mod discover;
+mod hygiene;
+mod kind;
 mod markdown;
 mod signals;
 pub mod spa;
+
+pub use admit::{check_site, CheckLine, SiteCheck};
+pub use hygiene::{is_broken_url, is_not_found, resolve_href, strip_banner_nodes, strip_boilerplate};
 
 pub use discover::{discover_ct_domains, parse_crt_json};
 
@@ -37,6 +43,13 @@ pub struct FetchedPage {
     pub simhash: u64,
     pub links: Vec<String>,
     pub indexable: bool,
+    pub kind: u32,
+    pub media_url: Option<String>,
+    pub feed_url: Option<String>,
+    pub price: Option<String>,
+    pub docs: Vec<FetchedPage>,
+    /// До 100 адресов своего сайта из llms.txt или llms.md. Пусто, если карточка их не назвала.
+    pub priority: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -68,6 +81,7 @@ pub struct Crawler {
     sitemaps_seen: HashSet<String>,
     site_cards: HashMap<String, String>,
     spa_bundles: HashMap<String, spa::SpaBundleExtract>,
+    gone: Vec<String>,
 }
 
 impl Crawler {
@@ -86,10 +100,22 @@ impl Crawler {
             sitemaps_seen: HashSet::new(),
             site_cards: HashMap::new(),
             spa_bundles: HashMap::new(),
+            gone: Vec::new(),
         })
     }
 
+    pub fn take_gone(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.gone)
+    }
+
+    fn note_gone(&mut self, url: &str) {
+        if !url.is_empty() && !self.gone.iter().any(|known| known == url) {
+            self.gone.push(url.to_string());
+        }
+    }
+
     pub async fn crawl(&mut self, seeds: &[String]) -> Result<Vec<FetchedPage>, CrawlError> {
+        self.gone.clear();
         let mut queue: VecDeque<String> = seeds.iter().cloned().collect();
         let mut seen = HashSet::new();
         let mut pages = Vec::new();
@@ -100,9 +126,15 @@ impl Crawler {
                 continue;
             }
             let Some(parsed) = Url::parse(&url).ok() else {
+                self.note_gone(&url);
                 continue;
             };
+            if is_broken_url(&url) {
+                self.note_gone(&url);
+                continue;
+            }
             if parsed.scheme() != "http" && parsed.scheme() != "https" {
+                self.note_gone(&url);
                 continue;
             }
             let origin = origin_of(&parsed);
@@ -119,6 +151,10 @@ impl Crawler {
                 Err(_) => continue,
             };
             if !response.status().is_success() {
+                if response.status().as_u16() == 404 || response.status().as_u16() == 410 {
+                    self.note_gone(&url);
+                    self.note_gone(response.url().as_str());
+                }
                 if parsed.path().eq_ignore_ascii_case("/llms.txt") {
                     self.enqueue_locs(&mut queue, &[format!("{origin}/llms.md")]);
                 }
@@ -159,8 +195,12 @@ impl Crawler {
                 if !header_nofollow {
                     self.enqueue_links(&mut queue, &host, &page.links);
                 }
-                if page.indexable && !header_noindex {
-                    pages.push(page);
+                if page.indexable && !header_noindex && !is_not_found(&page.title, &page.text) && !is_broken_url(&page.url)
+                {
+                    push_page(&mut pages, page);
+                } else {
+                    self.note_gone(&url);
+                    self.note_gone(&page.url);
                 }
                 continue;
             }
@@ -182,12 +222,17 @@ impl Crawler {
             let mut page = page_from_html(&response_url(&final_url, &body), &host, &body);
             if page.text.chars().count() < 160 {
                 self.enrich_from_spa_bundles(final_url.as_str(), &body, &mut page).await;
+                page.text = strip_boilerplate(&page.text);
             }
             if !header_nofollow {
                 self.enqueue_links(&mut queue, &host, &page.links);
             }
-            if page.indexable && !header_noindex {
-                pages.push(page);
+            if page.indexable && !header_noindex && !is_not_found(&page.title, &page.text) && !is_broken_url(&page.url)
+            {
+                push_page(&mut pages, page);
+            } else {
+                self.note_gone(&url);
+                self.note_gone(&page.url);
             }
         }
         self.attach_site_cards(&mut pages);
@@ -255,6 +300,9 @@ impl Crawler {
         for link in links {
             if queue.len() >= self.policy.max_pages.saturating_mul(4) {
                 break;
+            }
+            if is_broken_url(link) {
+                continue;
             }
             if let Ok(linked) = Url::parse(link) {
                 if linked.path().to_ascii_lowercase().ends_with(".mdx") {
@@ -423,13 +471,14 @@ pub fn page_from_html(url: &str, host: &str, html: &str) -> FetchedPage {
             read.title_hint.clone()
         }
     };
-    let mut text = extract_text(html);
+    let mut text = extract_text(&strip_banner_nodes(html));
     if !read.extra_text.is_empty() {
         if !text.is_empty() {
             text.push(' ');
         }
         text.push_str(&read.extra_text);
     }
+    text = strip_boilerplate(&text);
     let mut links = if read.follow {
         extract_links(url, html)
     } else {
@@ -438,7 +487,7 @@ pub fn page_from_html(url: &str, host: &str, html: &str) -> FetchedPage {
     if read.follow {
         if let Ok(base) = Url::parse(url) {
             for route in &read.spa_routes {
-                if let Ok(joined) = base.join(route) {
+                if let Some(joined) = resolve_href(&base, route) {
                     let full = joined.to_string();
                     if !links.contains(&full) {
                         links.push(full);
@@ -448,19 +497,36 @@ pub fn page_from_html(url: &str, host: &str, html: &str) -> FetchedPage {
         }
     }
     let stored_url = same_host_canonical(url, host, read.canonical.as_deref());
+    let indexable = read.indexable && !is_not_found(&title, &text) && !is_broken_url(&stored_url);
+    let title = if title.is_empty() {
+        text.chars().take(80).collect()
+    } else {
+        title
+    };
+    let classified = kind::classify_html(&stored_url, host, &title, &text, html);
+    kind::drop_shop_products(&mut links, mds_types::is_webshop(&title, &text));
+    links.retain(|url| !mds_types::is_document_url(url));
     FetchedPage {
         url: stored_url,
         host: host.to_string(),
-        title: if title.is_empty() {
-            text.chars().take(80).collect()
-        } else {
-            title
-        },
+        title,
         simhash: simhash(&text),
         text,
         links,
-        indexable: read.indexable,
+        indexable,
+        kind: classified.kind,
+        media_url: classified.media_url,
+        feed_url: classified.feed_url,
+        price: classified.price,
+        docs: classified.docs,
+        priority: Vec::new(),
     }
+}
+
+fn push_page(pages: &mut Vec<FetchedPage>, mut page: FetchedPage) {
+    let docs = std::mem::take(&mut page.docs);
+    pages.push(page);
+    pages.extend(docs);
 }
 
 fn extract_title(html: &str) -> String {
@@ -565,13 +631,8 @@ fn extract_links(base: &str, html: &str) -> Vec<String> {
         if !is_anchor_href(html, href_at) || anchor_nofollow(html, href_at) {
             continue;
         }
-        if raw.starts_with('#') || raw.starts_with("mailto:") || raw.starts_with("javascript:") {
-            continue;
-        }
-        if let Ok(joined) = base.join(raw) {
-            if joined.scheme() == "http" || joined.scheme() == "https" {
-                links.push(joined.to_string());
-            }
+        if let Some(joined) = resolve_href(&base, raw) {
+            links.push(joined.to_string());
         }
     }
     links
@@ -654,6 +715,28 @@ mod tests {
         assert!(!path_allowed(robots, USER_AGENT, "/secret.html"));
         assert!(path_allowed(robots, USER_AGENT, "/secret-public"));
         assert!(path_allowed(robots, USER_AGENT, "/vet.html"));
+    }
+
+    #[test]
+    fn banner_missing_page_and_glued_link_do_not_enter() {
+        let html = r#"<html><title>Мёд</title><div class="cookie-notice">Мы используем cookie. Нажмите принять.</div><p>Настоящий мёд с пасеки в Камышине, стеклянная банка три литра.</p><p>Наша форма -- наш webhook CRM.</p><a href="www.thelivecoffee.ru">сайт</a></html>"#;
+        let page = page_from_html("https://rusprodsoyuz.ru/participants/", "rusprodsoyuz.ru", html);
+        assert!(page.indexable, "{}", page.text);
+        assert!(page.text.contains("мёд"), "{}", page.text);
+        assert!(!page.text.to_lowercase().contains("cookie"), "{}", page.text);
+        assert!(!page.text.to_lowercase().contains("webhook"), "{}", page.text);
+        assert!(
+            page.links.iter().any(|link| link.contains("://www.thelivecoffee.ru")),
+            "{:?}",
+            page.links
+        );
+        assert!(page.links.iter().all(|link| !link.contains("rusprodsoyuz.ru/www")));
+        let missing = page_from_html(
+            "https://tehnoveles.ru/project/x",
+            "tehnoveles.ru",
+            "<html><title>Проект не найден</title><p>Проект не найден</p></html>",
+        );
+        assert!(!missing.indexable);
     }
 
     #[test]

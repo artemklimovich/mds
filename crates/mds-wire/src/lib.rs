@@ -19,6 +19,16 @@ pub struct SearchHit {
     pub adult: bool,
     #[serde(default)]
     pub volunteer: bool,
+    #[serde(default)]
+    pub region: Option<String>,
+    #[serde(default)]
+    pub kind: u32,
+    #[serde(default)]
+    pub media_url: Option<String>,
+    #[serde(default)]
+    pub feed_url: Option<String>,
+    #[serde(default)]
+    pub price: Option<String>,
 }
 
 impl From<Hit> for SearchHit {
@@ -32,6 +42,11 @@ impl From<Hit> for SearchHit {
             via_meaning: hit.via_meaning,
             adult: hit.adult,
             volunteer: hit.volunteer,
+            region: hit.region,
+            kind: hit.kind,
+            media_url: hit.media_url,
+            feed_url: hit.feed_url,
+            price: hit.price,
         }
     }
 }

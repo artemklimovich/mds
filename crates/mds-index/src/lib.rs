@@ -1,7 +1,11 @@
+use std::collections::HashMap;
 use std::path::Path;
 
-use mds_crawl::{is_near_duplicate, FetchedPage};
-use mds_types::{cosine, QuantVector, EMBED_DIMS};
+use mds_crawl::{is_broken_url, is_near_duplicate, is_not_found, strip_boilerplate, FetchedPage};
+use mds_types::{
+    bare_host, host_of_url, is_channel_host, is_press_front, is_press_host, is_product_url, kind_from_stored, cosine,
+    QuantVector, EMBED_DIMS, HOST_PAGE_CAP, KIND_CHANNEL, KIND_NEWS, KIND_VIDEO,
+};
 use rusqlite::{params, Connection};
 use thiserror::Error;
 
@@ -50,6 +54,11 @@ pub struct PageRow {
     pub title: String,
     pub host: String,
     pub text: String,
+    pub region: Option<String>,
+    pub kind: u32,
+    pub media_url: Option<String>,
+    pub feed_url: Option<String>,
+    pub price: Option<String>,
 }
 
 impl Index {
@@ -64,12 +73,51 @@ impl Index {
             source,
         })?;
         init_schema(&conn)?;
-        Ok(Self { conn })
+        ensure_region_column(&conn)?;
+        ensure_kind_columns(&conn)?;
+        let index = Self { conn };
+        let _ = index.fill_kinds()?;
+        let (labeled, total) = index.fill_regions()?;
+        if total > 0 {
+            eprintln!("MDS: регион подписан у {labeled} страниц из {total}");
+        }
+        Ok(index)
+    }
+
+    pub fn fill_regions(&self) -> Result<(usize, usize), IndexError> {
+        let mut stmt = self.conn.prepare("SELECT id, title, text FROM pages")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+        })?;
+        let mut labeled = 0;
+        let mut total = 0;
+        let mut pending = Vec::new();
+        for row in rows {
+            let (id, title, text) = row?;
+            total += 1;
+            let region = mds_types::region_in(&format!("{title}\n{text}")).map(str::to_string);
+            if region.is_some() {
+                labeled += 1;
+            }
+            pending.push((region, id));
+        }
+        drop(stmt);
+        for (region, id) in pending {
+            self.conn
+                .execute("UPDATE pages SET region = ?1 WHERE id = ?2", params![region, id])?;
+        }
+        Ok((labeled, total))
     }
 
     pub fn len(&self) -> Result<usize, IndexError> {
         let count: i64 = self.conn.query_row("SELECT COUNT(*) FROM pages", [], |row| row.get(0))?;
         Ok(count as usize)
+    }
+
+    pub fn census(&self) -> Result<(usize, usize), IndexError> {
+        let pages: i64 = self.conn.query_row("SELECT COUNT(*) FROM pages", [], |row| row.get(0))?;
+        let sites: i64 = self.conn.query_row("SELECT COUNT(DISTINCT host) FROM pages", [], |row| row.get(0))?;
+        Ok((sites as usize, pages as usize))
     }
 
     pub fn is_duplicate(&self, hash: u64) -> Result<bool, IndexError> {
@@ -99,9 +147,10 @@ impl Index {
         }
         let blob = vector.values.iter().map(|v| *v as u8).collect::<Vec<_>>();
         let tx = self.conn.transaction()?;
+        let region = mds_types::region_in(&format!("{}\n{}", page.title, page.text));
         tx.execute(
-            "INSERT INTO pages (url, title, host, text, simhash, scale, vector, domain_hash, semantic_bucket)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+            "INSERT INTO pages (url, title, host, text, simhash, scale, vector, domain_hash, semantic_bucket, region, kind, media_url, feed_url, price)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)
              ON CONFLICT(url) DO UPDATE SET
                 title=excluded.title,
                 host=excluded.host,
@@ -110,7 +159,12 @@ impl Index {
                 scale=excluded.scale,
                 vector=excluded.vector,
                 domain_hash=excluded.domain_hash,
-                semantic_bucket=excluded.semantic_bucket",
+                semantic_bucket=excluded.semantic_bucket,
+                region=excluded.region,
+                kind=excluded.kind,
+                media_url=excluded.media_url,
+                feed_url=excluded.feed_url,
+                price=excluded.price",
             params![
                 page.url,
                 page.title,
@@ -121,6 +175,11 @@ impl Index {
                 blob,
                 domain_hash.as_slice(),
                 semantic_bucket as i64,
+                region,
+                page.kind,
+                page.media_url,
+                page.feed_url,
+                page.price,
             ],
         )?;
         let id: i64 = tx.query_row("SELECT id FROM pages WHERE url = ?1", [&page.url], |row| row.get(0))?;
@@ -133,7 +192,7 @@ impl Index {
         Ok(())
     }
 
-    pub fn search_words(&self, query: &str, limit: usize) -> Result<Vec<WordMatch>, IndexError> {
+    pub fn search_words(&self, query: &str, limit: usize, kind_mask: u32) -> Result<Vec<WordMatch>, IndexError> {
         let Some(match_query) = fts_query(query) else {
             return Ok(Vec::new());
         };
@@ -142,10 +201,14 @@ impl Index {
              FROM pages_fts
              JOIN pages ON pages.id = pages_fts.rowid
              WHERE pages_fts MATCH ?1
+               AND ((?3 != 0 AND (pages.kind & ?3) != 0) OR (?3 = 0 AND (pages.kind & ?4) = 0))
              ORDER BY bm25(pages_fts)
              LIMIT ?2",
         )?;
-        let rows = stmt.query_map(params![match_query, limit as i64], |row| row.get::<_, i64>(0))?;
+        let rows = stmt.query_map(
+            params![match_query, limit as i64, kind_mask, KIND_NEWS | KIND_CHANNEL],
+            |row| row.get::<_, i64>(0),
+        )?;
         let mut out = Vec::new();
         for (offset, id) in rows.enumerate() {
             out.push(WordMatch {
@@ -161,13 +224,14 @@ impl Index {
         query: &[f32],
         bucket: Option<u16>,
         limit: usize,
+        kind_mask: u32,
     ) -> Result<Vec<VectorMatch>, IndexError> {
         let mut scored = match bucket {
-            Some(bucket) => self.score_bucket_neighbors(query, bucket)?,
+            Some(bucket) => self.score_bucket_neighbors(query, bucket, kind_mask)?,
             None => Vec::new(),
         };
         if scored.len() < limit {
-            scored = self.score_all_vectors(query)?;
+            scored = self.score_all_vectors(query, kind_mask)?;
         }
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         Ok(scored
@@ -186,6 +250,7 @@ impl Index {
         &self,
         query: &[f32],
         bucket: u16,
+        kind_mask: u32,
     ) -> Result<Vec<(i64, f32)>, IndexError> {
         let mut b = [0_i64; 17];
         b[0] = bucket as i64;
@@ -193,13 +258,14 @@ impl Index {
             b[i + 1] = (bucket ^ (1 << i)) as i64;
         }
         let mut stmt = self.conn.prepare(
-            "SELECT id, scale, vector FROM pages
-             WHERE semantic_bucket IN (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+            "SELECT id, scale, vector, kind FROM pages
+             WHERE semantic_bucket IN (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)
+               AND ((?18 != 0 AND (kind & ?18) != 0) OR (?18 = 0 AND (kind & ?19) = 0))",
         )?;
         let rows = stmt.query_map(
             params![
                 b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8],
-                b[9], b[10], b[11], b[12], b[13], b[14], b[15], b[16]
+                b[9], b[10], b[11], b[12], b[13], b[14], b[15], b[16], kind_mask, KIND_NEWS | KIND_CHANNEL
             ],
             |row| {
                 Ok((
@@ -212,9 +278,13 @@ impl Index {
         score_rows(query, rows)
     }
 
-    fn score_all_vectors(&self, query: &[f32]) -> Result<Vec<(i64, f32)>, IndexError> {
-        let mut stmt = self.conn.prepare("SELECT id, scale, vector FROM pages")?;
-        let rows = stmt.query_map([], |row| {
+    fn score_all_vectors(&self, query: &[f32], kind_mask: u32) -> Result<Vec<(i64, f32)>, IndexError> {
+        let mut stmt = self
+            .conn
+            .prepare(
+                "SELECT id, scale, vector FROM pages WHERE ((?1 != 0 AND (kind & ?1) != 0) OR (?1 = 0 AND (kind & ?2) = 0))",
+            )?;
+        let rows = stmt.query_map(params![kind_mask, KIND_NEWS | KIND_CHANNEL], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, f32>(1)?,
@@ -225,16 +295,353 @@ impl Index {
     }
 
     pub fn enqueue_urls(&self, urls: &[String]) -> Result<(), IndexError> {
+        let mut pressure: HashMap<String, i64> = HashMap::new();
         for url in urls {
             let trimmed = url.trim();
-            if trimmed.is_empty() {
+            if trimmed.is_empty() || is_broken_url(trimmed) {
                 continue;
+            }
+            let Some(host) = host_of_url(trimmed) else {
+                continue;
+            };
+            let bare = bare_host(&host);
+            if self.is_webshop_host(&bare)? && is_product_url(trimmed) {
+                continue;
+            }
+            if is_press_host(&bare) && !is_press_front(trimmed) {
+                continue;
+            }
+            let volunteer = self.is_volunteer_host(&bare)?;
+            if self.has_picks(&bare)? && !volunteer && !self.is_pick(&bare, trimmed)? {
+                continue;
+            }
+            if !volunteer {
+                let load = if let Some(load) = pressure.get(&bare).copied() {
+                    load
+                } else {
+                    let load = if self.has_picks(&bare)? {
+                        self.pick_pressure(&bare)?
+                    } else {
+                        self.host_pressure(&bare)?
+                    };
+                    pressure.insert(bare.clone(), load);
+                    load
+                };
+                if load >= HOST_PAGE_CAP {
+                    continue;
+                }
+                pressure.insert(bare, load + 1);
             }
             self.conn.execute(
                 "INSERT OR IGNORE INTO crawl_queue (url, visited, added_at) VALUES (?1, 0, strftime('%s','now'))",
                 params![trimmed],
             )?;
         }
+        Ok(())
+    }
+
+    pub fn set_priority(&self, host: &str, urls: &[String]) -> Result<(), IndexError> {
+        let bare = bare_host(host);
+        if bare.is_empty() {
+            return Ok(());
+        }
+        let picks: Vec<String> = urls
+            .iter()
+            .map(|url| url.trim().to_string())
+            .filter(|url| !url.is_empty())
+            .take(100)
+            .collect();
+        if picks.is_empty() {
+            return Ok(());
+        }
+        self.conn.execute("DELETE FROM host_picks WHERE host = ?1", [&bare])?;
+        for url in &picks {
+            self.conn.execute(
+                "INSERT INTO host_picks (host, url) VALUES (?1, ?2) ON CONFLICT(host, url) DO NOTHING",
+                params![bare.as_str(), url.as_str()],
+            )?;
+        }
+        let mut stmt = self.conn.prepare("SELECT url FROM crawl_queue WHERE visited = 0")?;
+        let queued = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut drop = Vec::new();
+        for url in queued {
+            let url = url?;
+            let Some(found) = host_of_url(&url) else {
+                continue;
+            };
+            if bare_host(&found) == bare && !picks.iter().any(|pick| pick == &url) {
+                drop.push(url);
+            }
+        }
+        for url in drop {
+            self.conn.execute("DELETE FROM crawl_queue WHERE url = ?1 AND visited = 0", [url])?;
+        }
+        for url in &picks {
+            let stored: i64 = self.conn.query_row(
+                "SELECT COUNT(*) FROM pages WHERE url = ?1",
+                [url.as_str()],
+                |row| row.get(0),
+            )?;
+            if stored > 0 {
+                continue;
+            }
+            self.conn.execute(
+                "INSERT INTO crawl_queue (url, visited, added_at) VALUES (?1, 0, 20)
+                 ON CONFLICT(url) DO UPDATE SET visited = 0, added_at = 20",
+                [url.as_str()],
+            )?;
+        }
+        Ok(())
+    }
+
+    fn has_picks(&self, bare: &str) -> Result<bool, IndexError> {
+        let found: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM host_picks WHERE host = ?1",
+            [bare],
+            |row| row.get(0),
+        )?;
+        Ok(found > 0)
+    }
+
+    fn is_pick(&self, bare: &str, url: &str) -> Result<bool, IndexError> {
+        let found: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM host_picks WHERE host = ?1 AND url = ?2",
+            params![bare, url],
+            |row| row.get(0),
+        )?;
+        Ok(found > 0)
+    }
+
+    fn pick_pressure(&self, bare: &str) -> Result<i64, IndexError> {
+        let stored: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM pages WHERE url IN (SELECT url FROM host_picks WHERE host = ?1)",
+            [bare],
+            |row| row.get(0),
+        )?;
+        let queued: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM crawl_queue WHERE visited = 0 AND url IN (SELECT url FROM host_picks WHERE host = ?1)",
+            [bare],
+            |row| row.get(0),
+        )?;
+        Ok(stored + queued)
+    }
+
+    pub fn note_webshop(&self, host: &str) -> Result<(), IndexError> {
+        let host = bare_host(host);
+        if host.is_empty() {
+            return Ok(());
+        }
+        self.conn.execute(
+            "INSERT INTO webshops (host) VALUES (?1) ON CONFLICT(host) DO NOTHING",
+            [host],
+        )?;
+        Ok(())
+    }
+
+    fn is_webshop_host(&self, bare: &str) -> Result<bool, IndexError> {
+        let found: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM webshops WHERE host = ?1",
+            [bare],
+            |row| row.get(0),
+        )?;
+        Ok(found > 0)
+    }
+
+    fn is_volunteer_host(&self, bare: &str) -> Result<bool, IndexError> {
+        let found: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM volunteers WHERE host = ?1 OR host = ?2",
+            params![bare, format!("www.{bare}")],
+            |row| row.get(0),
+        )?;
+        Ok(found > 0)
+    }
+
+    fn host_pressure(&self, bare: &str) -> Result<i64, IndexError> {
+        let www = format!("www.{bare}");
+        let pages: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM pages WHERE host = ?1 OR host = ?2",
+            params![bare, www],
+            |row| row.get(0),
+        )?;
+        let queued: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM crawl_queue WHERE visited = 0 AND (
+                url LIKE ?1 OR url LIKE ?2 OR url LIKE ?3 OR url LIKE ?4
+                OR url LIKE ?5 OR url LIKE ?6 OR url LIKE ?7 OR url LIKE ?8
+            )",
+            params![
+                format!("https://{bare}/%"),
+                format!("http://{bare}/%"),
+                format!("https://{www}/%"),
+                format!("http://{www}/%"),
+                format!("https://{bare}"),
+                format!("http://{bare}"),
+                format!("https://{www}"),
+                format!("http://{www}"),
+            ],
+            |row| row.get(0),
+        )?;
+        Ok(pages + queued)
+    }
+
+    pub fn enqueue_next(&self, urls: &[String]) -> Result<(), IndexError> {
+        for url in urls {
+            let trimmed = url.trim();
+            if trimmed.is_empty() || is_broken_url(trimmed) {
+                continue;
+            }
+            if let Some(host) = host_of_url(trimmed) {
+                if is_press_host(&host) && !is_press_front(trimmed) {
+                    continue;
+                }
+            }
+            self.conn
+                .execute(
+                    "INSERT INTO crawl_queue (url, visited, added_at) VALUES (?1, 0, 40)
+                     ON CONFLICT(url) DO UPDATE SET visited = 0, added_at = 40",
+                    params![trimmed],
+                )
+                .map_err(|source| IndexError::Sqlite {
+                    context: "enqueue_next",
+                    source,
+                })?;
+        }
+        Ok(())
+    }
+
+    pub fn delete_urls(&self, urls: &[String]) -> Result<usize, IndexError> {
+        let mut removed = 0_usize;
+        for url in urls {
+            let trimmed = url.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            let id: Option<i64> = self
+                .conn
+                .query_row("SELECT id FROM pages WHERE url = ?1", [trimmed], |row| row.get(0))
+                .ok();
+            if let Some(id) = id {
+                self.delete_id(id)?;
+                removed += 1;
+            }
+        }
+        Ok(removed)
+    }
+
+    pub fn scrub_stored_pages(&self) -> Result<usize, IndexError> {
+        let rows = {
+            let mut stmt = self
+                .conn
+                .prepare("SELECT id, url, title, text FROM pages")
+                .map_err(|source| IndexError::Sqlite {
+                    context: "scrub",
+                    source,
+                })?;
+            let mapped = stmt
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                    ))
+                })
+                .map_err(|source| IndexError::Sqlite {
+                    context: "scrub",
+                    source,
+                })?;
+            mapped.collect::<Result<Vec<_>, _>>().map_err(|source| IndexError::Sqlite {
+                context: "scrub",
+                source,
+            })?
+        };
+        let mut removed = 0_usize;
+        for (id, url, title, text) in rows {
+            if is_broken_url(&url) || is_not_found(&title, &text) {
+                self.delete_id(id)?;
+                removed += 1;
+                continue;
+            }
+            let clean = strip_boilerplate(&text);
+            if clean != text {
+                self.rewrite_text(id, &clean)?;
+            }
+        }
+        let queued = {
+            let mut stmt = self.conn.prepare("SELECT url FROM crawl_queue").map_err(|source| {
+                IndexError::Sqlite {
+                    context: "scrub_queue",
+                    source,
+                }
+            })?;
+            let mapped = stmt
+                .query_map([], |row| row.get::<_, String>(0))
+                .map_err(|source| IndexError::Sqlite {
+                    context: "scrub_queue",
+                    source,
+                })?;
+            mapped.collect::<Result<Vec<_>, _>>().map_err(|source| IndexError::Sqlite {
+                context: "scrub_queue",
+                source,
+            })?
+        };
+        for url in queued {
+            if is_broken_url(&url) {
+                self.conn
+                    .execute("DELETE FROM crawl_queue WHERE url = ?1", [&url])
+                    .map_err(|source| IndexError::Sqlite {
+                        context: "scrub_queue",
+                        source,
+                    })?;
+            }
+        }
+        Ok(removed)
+    }
+
+    fn delete_id(&self, id: i64) -> Result<(), IndexError> {
+        self.conn
+            .execute("DELETE FROM pages_fts WHERE rowid = ?1", [id])
+            .map_err(|source| IndexError::Sqlite {
+                context: "delete",
+                source,
+            })?;
+        self.conn
+            .execute("DELETE FROM pages WHERE id = ?1", [id])
+            .map_err(|source| IndexError::Sqlite {
+                context: "delete",
+                source,
+            })?;
+        Ok(())
+    }
+
+    fn rewrite_text(&self, id: i64, text: &str) -> Result<(), IndexError> {
+        self.conn
+            .execute("UPDATE pages SET text = ?1 WHERE id = ?2", params![text, id])
+            .map_err(|source| IndexError::Sqlite {
+                context: "rewrite",
+                source,
+            })?;
+        self.conn
+            .execute("DELETE FROM pages_fts WHERE rowid = ?1", [id])
+            .map_err(|source| IndexError::Sqlite {
+                context: "rewrite",
+                source,
+            })?;
+        let title: String = self
+            .conn
+            .query_row("SELECT title FROM pages WHERE id = ?1", [id], |row| row.get(0))
+            .map_err(|source| IndexError::Sqlite {
+                context: "rewrite",
+                source,
+            })?;
+        self.conn
+            .execute(
+                "INSERT INTO pages_fts(rowid, title, text) VALUES (?1, ?2, ?3)",
+                params![id, title, text],
+            )
+            .map_err(|source| IndexError::Sqlite {
+                context: "rewrite",
+                source,
+            })?;
         Ok(())
     }
 
@@ -269,7 +676,7 @@ impl Index {
         let mut out = Vec::new();
         for id in ids {
             let row = self.conn.query_row(
-                "SELECT id, url, title, host, text FROM pages WHERE id = ?1",
+                "SELECT id, url, title, host, text, region, kind, media_url, feed_url, price FROM pages WHERE id = ?1",
                 [id],
                 |row| {
                     Ok(PageRow {
@@ -278,6 +685,11 @@ impl Index {
                         title: row.get(2)?,
                         host: row.get(3)?,
                         text: row.get(4)?,
+                        region: row.get(5)?,
+                        kind: row.get(6)?,
+                        media_url: row.get(7)?,
+                        feed_url: row.get(8)?,
+                        price: row.get(9)?,
                     })
                 },
             );
@@ -411,6 +823,37 @@ impl Index {
         }
         Ok(out)
     }
+
+    pub fn forget_volunteer(&self, host: &str) -> Result<(), IndexError> {
+        let host = bare_host(host);
+        self.conn.execute("DELETE FROM volunteers WHERE host = ?1", [host])?;
+        Ok(())
+    }
+
+    pub fn refuse_host(&self, host: &str) -> Result<(), IndexError> {
+        let host = bare_host(host);
+        if host.is_empty() {
+            return Ok(());
+        }
+        self.conn.execute("INSERT OR IGNORE INTO refused_hosts (host) VALUES (?1)", [host])?;
+        Ok(())
+    }
+
+    pub fn restore_host(&self, host: &str) -> Result<(), IndexError> {
+        let host = bare_host(host);
+        self.conn.execute("DELETE FROM refused_hosts WHERE host = ?1", [host])?;
+        Ok(())
+    }
+
+    pub fn refused_hosts(&self) -> Result<Vec<String>, IndexError> {
+        let mut stmt = self.conn.prepare("SELECT host FROM refused_hosts ORDER BY host")?;
+        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -420,6 +863,156 @@ pub struct QueryStat {
     pub words: i64,
     pub meaning: i64,
     pub adult: i64,
+}
+
+fn ensure_region_column(conn: &Connection) -> Result<(), IndexError> {
+    let mut stmt = conn.prepare("PRAGMA table_info(pages)").map_err(|source| IndexError::Sqlite {
+        context: "region",
+        source,
+    })?;
+    let names = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|source| IndexError::Sqlite {
+            context: "region",
+            source,
+        })?;
+    for name in names {
+        if name? == "region" {
+            return Ok(());
+        }
+    }
+    conn.execute("ALTER TABLE pages ADD COLUMN region TEXT", [])
+        .map_err(|source| IndexError::Sqlite {
+            context: "region",
+            source,
+        })?;
+    Ok(())
+}
+
+fn ensure_kind_columns(conn: &Connection) -> Result<(), IndexError> {
+    for (name, ddl) in [
+        ("kind", "ALTER TABLE pages ADD COLUMN kind INTEGER NOT NULL DEFAULT 0"),
+        ("media_url", "ALTER TABLE pages ADD COLUMN media_url TEXT"),
+        ("feed_url", "ALTER TABLE pages ADD COLUMN feed_url TEXT"),
+        ("price", "ALTER TABLE pages ADD COLUMN price TEXT"),
+    ] {
+        if column_exists(conn, name)? {
+            continue;
+        }
+        conn.execute(ddl, []).map_err(|source| IndexError::Sqlite {
+            context: "kind",
+            source,
+        })?;
+    }
+    Ok(())
+}
+
+fn column_exists(conn: &Connection, name: &str) -> Result<bool, IndexError> {
+    let mut stmt = conn.prepare("PRAGMA table_info(pages)").map_err(|source| IndexError::Sqlite {
+        context: "kind",
+        source,
+    })?;
+    let names = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(|source| IndexError::Sqlite {
+            context: "kind",
+            source,
+        })?;
+    for found in names {
+        if found? == name {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+impl Index {
+    fn fill_kinds(&self) -> Result<usize, IndexError> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, url, title, text, kind FROM pages")?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, i64>(4)?,
+            ))
+        })?;
+        let mut labeled = 0_usize;
+        for row in rows {
+            let (id, url, title, text, stored) = row?;
+            let stored = stored as u32;
+            let host = host_of_url(&url).unwrap_or_default();
+            if is_press_host(&host) && !is_press_front(&url) {
+                self.delete_id(id)?;
+                labeled += 1;
+                continue;
+            }
+            let fresh = kind_from_stored(&url, &title, &text);
+            let kind = if is_channel_host(&host) {
+                (stored | KIND_VIDEO | KIND_CHANNEL) & !KIND_NEWS
+            } else if is_press_host(&host) {
+                KIND_NEWS
+            } else if stored == 0 {
+                fresh
+            } else {
+                stored | (fresh & KIND_NEWS)
+            };
+            if kind == stored || (stored == 0 && kind == 0) {
+                continue;
+            }
+            self.conn.execute("UPDATE pages SET kind = ?1 WHERE id = ?2", params![kind, id])?;
+            labeled += 1;
+        }
+        drop(stmt);
+        let queued = {
+            let mut waiting = self.conn.prepare("SELECT url FROM crawl_queue WHERE visited = 0")?;
+            let mapped = waiting.query_map([], |row| row.get::<_, String>(0))?;
+            mapped.collect::<Result<Vec<_>, _>>()?
+        };
+        for url in queued {
+            let host = host_of_url(&url).unwrap_or_default();
+            if is_press_host(&host) && !is_press_front(&url) {
+                self.conn.execute("DELETE FROM crawl_queue WHERE url = ?1", [&url])?;
+            }
+        }
+        Ok(labeled)
+    }
+
+    pub fn accepts_more(&self, host: &str) -> Result<bool, IndexError> {
+        let bare = bare_host(host);
+        if self.is_volunteer_host(&bare)? {
+            return Ok(true);
+        }
+        Ok(self.host_pressure(&bare)? < HOST_PAGE_CAP)
+    }
+
+    pub fn may_store(&self, host: &str, url: &str) -> Result<bool, IndexError> {
+        let bare = bare_host(host);
+        if is_press_host(&bare) && !is_press_front(url) {
+            return Ok(false);
+        }
+        let exists: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM pages WHERE url = ?1",
+            [url],
+            |row| row.get(0),
+        )?;
+        if exists > 0 {
+            return Ok(true);
+        }
+        if self.is_volunteer_host(&bare)? {
+            return Ok(true);
+        }
+        if self.has_picks(&bare)? {
+            if !self.is_pick(&bare, url)? {
+                return Ok(false);
+            }
+            return Ok(self.pick_pressure(&bare)? < HOST_PAGE_CAP);
+        }
+        self.accepts_more(host)
+    }
 }
 
 fn init_schema(conn: &Connection) -> Result<(), IndexError> {
@@ -471,6 +1064,7 @@ fn init_schema(conn: &Connection) -> Result<(), IndexError> {
             context: "meta",
             source,
         })?;
+    ensure_region_column(conn)?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS query_log (
             id INTEGER PRIMARY KEY,
@@ -484,6 +1078,17 @@ fn init_schema(conn: &Connection) -> Result<(), IndexError> {
         CREATE TABLE IF NOT EXISTS volunteers (
             host TEXT PRIMARY KEY,
             seen_at INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS refused_hosts (
+            host TEXT PRIMARY KEY
+        );
+        CREATE TABLE IF NOT EXISTS webshops (
+            host TEXT PRIMARY KEY
+        );
+        CREATE TABLE IF NOT EXISTS host_picks (
+            host TEXT NOT NULL,
+            url TEXT NOT NULL,
+            PRIMARY KEY (host, url)
         );",
     )
     .map_err(|source| IndexError::Sqlite {
@@ -562,6 +1167,12 @@ mod tests {
             simhash: 1,
             links: Vec::new(),
             indexable: true,
+            kind: 0,
+            media_url: None,
+            feed_url: None,
+            price: None,
+            docs: Vec::new(),
+            priority: Vec::new(),
         }
     }
 
@@ -585,11 +1196,11 @@ mod tests {
                 1,
             )
             .unwrap();
-        let hits = index.search_words("MDSBOLT42", 10).unwrap();
+        let hits = index.search_words("MDSBOLT42", 10, 0).unwrap();
         assert_eq!(hits.len(), 1);
-        let missed = index.search_words("как лечить собаку", 10).unwrap();
+        let missed = index.search_words("как лечить собаку", 10, 0).unwrap();
         assert!(missed.is_empty());
-        let vec_hits = index.search_vectors(&vector, Some(1), 10).unwrap();
+        let vec_hits = index.search_vectors(&vector, Some(1), 10, 0).unwrap();
         assert_eq!(vec_hits.len(), 1);
         index
             .enqueue_urls(&["https://shop.example/a".into(), "https://shop.example/b".into()])
@@ -599,5 +1210,45 @@ mod tests {
             .unwrap();
         let pending = index.pending_urls(10).unwrap();
         assert_eq!(pending, vec!["https://shop.example/b".to_string()]);
+        index.enqueue_next(&["https://shop.example/new".into()]).unwrap();
+        let pending = index.pending_urls(10).unwrap();
+        assert_eq!(pending[0], "https://shop.example/new");
+    }
+
+    #[test]
+    fn hundred_first_page_waits_for_a_bee() {
+        let dir = std::env::temp_dir().join(format!("mds-index-cap-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let index = Index::open(&dir.join("cap.db")).unwrap();
+        let urls: Vec<String> = (0..101).map(|n| format!("https://plant.example/p{n}")).collect();
+        index.enqueue_urls(&urls).unwrap();
+        assert_eq!(index.queue_len().unwrap(), 100);
+        index.remember_volunteer("plant.example").unwrap();
+        index.enqueue_urls(&["https://plant.example/p100".into()]).unwrap();
+        assert_eq!(index.queue_len().unwrap(), 101);
+        index.note_webshop("shop.example").unwrap();
+        index
+            .enqueue_urls(&["https://shop.example/product/bolt".into(), "https://shop.example/about".into()])
+            .unwrap();
+        let pending = index.pending_urls(200).unwrap();
+        assert!(!pending.iter().any(|url| url.contains("/product/")));
+        assert!(pending.iter().any(|url| url.ends_with("/about")));
+    }
+
+    #[test]
+    fn listed_card_pages_replace_the_other_queue() {
+        let dir = std::env::temp_dir().join(format!("mds-index-picks-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let index = Index::open(&dir.join("picks.db")).unwrap();
+        index.enqueue_urls(&["https://zavod.example/random".into()]).unwrap();
+        index
+            .set_priority("www.zavod.example", &["https://zavod.example/keep".into()])
+            .unwrap();
+        let pending = index.pending_urls(20).unwrap();
+        assert!(pending.iter().any(|url| url.ends_with("/keep")));
+        assert!(!pending.iter().any(|url| url.ends_with("/random")));
+        index.enqueue_urls(&["https://zavod.example/other".into()]).unwrap();
+        let pending = index.pending_urls(20).unwrap();
+        assert!(!pending.iter().any(|url| url.ends_with("/other")));
     }
 }

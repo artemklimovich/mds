@@ -1,11 +1,15 @@
+mod bees;
 mod engine;
 mod http;
 mod lite;
+mod model_sync;
 mod updates;
+mod wire_feed;
 
 pub use engine::Engine;
 pub use http::{serve, ServeConfig};
 pub use lite::{run_lite, LiteConfig};
+pub use model_sync::sync_model;
 
 use std::net::SocketAddr;
 use std::path::Path;

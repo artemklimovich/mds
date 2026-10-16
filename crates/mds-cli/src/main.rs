@@ -3,8 +3,11 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use mds_crawl::CrawlPolicy;
-use mds_node::{index_fixture_dir, run_lite, serve, Engine, LiteConfig, ServeConfig};
-use mds_update::{generate_keypair, public_from_secret, save_release, sign_release, PINNED_PUBLIC_HEX};
+use mds_node::{index_fixture_dir, run_lite, serve, sync_model, Engine, LiteConfig, ServeConfig};
+use mds_update::{
+    generate_keypair, public_from_secret, save_release, sign_model, sign_release, PINNED_PUBLIC_HEX,
+    TRUSTED_NODES,
+};
 
 #[derive(Parser)]
 #[command(name = "mds", about = "Децентрализованный поиск MDS")]
@@ -41,14 +44,21 @@ enum Command {
         #[arg(long)]
         recrawl: bool,
         /// Адрес соседней ноды, например http://10.0.0.8:8080. Можно указать несколько раз.
+        /// Если не указан, программа сама берёт вписанные доверенные ноды.
         #[arg(long)]
         peers: Vec<String>,
+        /// Не подключаться к вписанным доверенным нодам. Так запускают сам улей.
+        #[arg(long)]
+        alone: bool,
         /// Публичный улей, которому эта пчела сама отдаёт страницы. Для домашнего адреса без белого IP.
         #[arg(long)]
         hive: Option<String>,
-        /// Общий секрет улья и домашних пчёл. Без него чужие страницы в индекс не принимаются.
+        /// Раньше общий пароль улья. Лёгкая пчела входит карточкой на своём сайте и этот флаг не использует.
         #[arg(long, default_value = "")]
         swarm_key: String,
+        /// Регион этого улья, например «Москва» или «Волгоградская область». Человек может сменить его в строке поиска.
+        #[arg(long)]
+        region: Option<String>,
         /// Лёгкая пчела на сервере сайта: без модели и без общего индекса.
         #[arg(long)]
         lite: bool,
@@ -57,6 +67,9 @@ enum Command {
         site: Option<String>,
         #[arg(long, default_value = "data/releases")]
         releases: PathBuf,
+        /// Каталог, откуда улей отдаёт архивы программы.
+        #[arg(long, default_value = "data/downloads")]
+        downloads: PathBuf,
     },
     /// Создать секретный ключ издателя. Публичная половина должна совпасть с ключом в этой сборке.
     Keygen {
@@ -73,6 +86,15 @@ enum Command {
         version: String,
         #[arg(long, default_value = "data/releases")]
         out: PathBuf,
+    },
+    /// Подписать каталог модели роя. Секрет остаётся у оператора, улей только отдаёт файлы.
+    PublishModel {
+        #[arg(long, default_value = "data/release.key")]
+        key: PathBuf,
+        #[arg(long, default_value = "data/models/swarm")]
+        dir: PathBuf,
+        #[arg(long, default_value = "multilingual-e5-small")]
+        name: String,
     },
 }
 
@@ -92,11 +114,14 @@ async fn main() -> anyhow::Result<()> {
             discover_ct,
             recrawl,
             peers,
+            alone,
             hive,
             swarm_key,
+            region,
             lite,
             site,
             releases,
+            downloads,
         } => {
             if lite {
                 let site = site.ok_or_else(|| anyhow::anyhow!("для --lite нужен --site"))?;
@@ -114,6 +139,12 @@ async fn main() -> anyhow::Result<()> {
             if recrawl {
                 let _ = std::fs::remove_file(&db);
             }
+            let model_hive = match hive.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+                Some(url) => Some(url.to_string()),
+                None if !alone => Some(TRUSTED_NODES[0].to_string()),
+                None => None,
+            };
+            sync_model(&models, model_hive.as_deref()).await?;
             let mut engine = Engine::open(&db, &models)?;
             let policy = CrawlPolicy {
                 delay: Duration::from_millis(delay_ms),
@@ -135,15 +166,8 @@ async fn main() -> anyhow::Result<()> {
                     let stored = engine.index_urls(&urls, &policy).await?;
                     eprintln!("MDS: по списку URL в индекс попало {stored}");
                 } else {
-                    let seed_policy = CrawlPolicy {
-                        delay: Duration::from_millis(delay_ms),
-                        max_bytes: 1_000_000,
-                        max_pages: urls.len().min(12),
-                        follow_external: false,
-                    };
-                    let _ = engine.refresh_urls(&urls, &seed_policy).await;
                     eprintln!(
-                        "MDS: в индексе уже {} страниц; очередь продолжает обход в фоне",
+                        "MDS: в индексе уже {} страниц; страница поиска откроется сразу, очередь продолжит обход",
                         engine.len()?
                     );
                 }
@@ -156,6 +180,19 @@ async fn main() -> anyhow::Result<()> {
                     engine.len()?
                 );
             }
+            let peers = if peers.is_empty() && !alone {
+                TRUSTED_NODES.iter().map(|node| (*node).to_string()).collect()
+            } else {
+                peers
+            };
+            let region = match region {
+                Some(value) => Some(
+                    mds_types::canonical_region(&value)
+                        .ok_or_else(|| anyhow::anyhow!("неизвестный регион: {value}"))?
+                        .to_string(),
+                ),
+                None => None,
+            };
             if engine.len()? == 0 {
                 anyhow::bail!("индекс пуст: положите HTML в fixtures или передайте --seeds");
             }
@@ -165,6 +202,8 @@ async fn main() -> anyhow::Result<()> {
                     listen,
                     peers,
                     releases,
+                    models: models.clone(),
+                    downloads,
                     background_policy: if has_seeds || follow_external {
                         Some(policy)
                     } else {
@@ -174,6 +213,7 @@ async fn main() -> anyhow::Result<()> {
                     hive,
                     swarm_key,
                     label: bee_label(&db),
+                    region,
                 },
             )
             .await?;
@@ -210,6 +250,21 @@ async fn main() -> anyhow::Result<()> {
                 bytes.len()
             );
             println!("работающая нода подхватит файл и отдаст его соседям по --peers");
+        }
+        Command::PublishModel { key, dir, name } => {
+            let secret = std::fs::read_to_string(&key)?;
+            let public = public_from_secret(&secret)?;
+            if public != PINNED_PUBLIC_HEX {
+                anyhow::bail!("секрет не от ключа этой сборки");
+            }
+            let manifest = sign_model(&secret, &dir, &name)?;
+            println!(
+                "модель {} подписана в {} (файлов {})",
+                manifest.name,
+                dir.display(),
+                manifest.files.len()
+            );
+            println!("улей отдаёт её по /peer/model. На странице загрузки ссылки на веса нет");
         }
     }
     Ok(())

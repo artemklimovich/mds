@@ -2,8 +2,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use mds_update::{
-    load_newest, running_hash, save_release, should_replace, stage_and_relaunch, verify_pinned, ReleaseManifest,
-    VERSION,
+    load_newest, running_hash, save_notice, save_release, should_replace, stage_and_relaunch, verify_pinned,
+    ReleaseManifest, VERSION,
 };
 
 use crate::NodeError;
@@ -19,6 +19,10 @@ pub async fn watch(peers: Vec<String>, releases: std::path::PathBuf) {
 
 async fn check_once(peers: &[String], releases: &Path) -> Result<(), NodeError> {
     if let Some((manifest, bytes)) = load_newest(releases)? {
+        if should_replace(VERSION, &running_hash(), &manifest) {
+            let _ = save_notice(releases, &manifest.version);
+            announce(peers, &manifest.version).await;
+        }
         try_apply(&manifest, &bytes)?;
     }
     if peers.is_empty() {
@@ -48,6 +52,8 @@ async fn check_once(peers: &[String], releases: &Path) -> Result<(), NodeError> 
         if !should_replace(VERSION, &running_hash(), &manifest) {
             continue;
         }
+        let _ = save_notice(releases, &manifest.version);
+        announce(peers, &manifest.version).await;
         let blob = match client.get(format!("{base}/peer/update.bin")).send().await {
             Ok(response) if response.status().is_success() => response,
             _ => continue,
@@ -64,6 +70,27 @@ async fn check_once(peers: &[String], releases: &Path) -> Result<(), NodeError> 
         try_apply(&manifest, &bytes)?;
     }
     Ok(())
+}
+
+pub async fn announce(peers: &[String], version: &str) {
+    let Ok(client) = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .user_agent(mds_crawl::USER_AGENT)
+        .build()
+    else {
+        return;
+    };
+    for peer in peers {
+        let Some(base) = peer_base(peer) else {
+            continue;
+        };
+        let _ = client
+            .post(format!("{base}/peer/notice"))
+            .header("content-type", "application/json")
+            .body(format!("\"{version}\""))
+            .send()
+            .await;
+    }
 }
 
 fn try_apply(manifest: &ReleaseManifest, bytes: &[u8]) -> Result<(), NodeError> {

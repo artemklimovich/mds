@@ -69,6 +69,16 @@ struct Fused {
     via_meaning: bool,
 }
 
+pub fn prefer_region(hits: Vec<Hit>, region: Option<&str>) -> Vec<Hit> {
+    let Some(region) = region else {
+        return hits;
+    };
+    let (here, other): (Vec<Hit>, Vec<Hit>) = hits
+        .into_iter()
+        .partition(|hit| hit.region.as_deref() == Some(region));
+    here.into_iter().chain(other).collect()
+}
+
 pub fn fuse(query: &str, words: &[WordMatch], vectors: &[VectorMatch], pages: &[PageRow]) -> Vec<Hit> {
     let mut scores: HashMap<i64, Fused> = HashMap::new();
     for hit in words {
@@ -155,6 +165,11 @@ pub fn fuse(query: &str, words: &[WordMatch], vectors: &[VectorMatch], pages: &[
                 via_meaning: item.via_meaning,
                 adult: lane == Lane::Adult,
                 volunteer: false,
+                region: page.region.clone(),
+                kind: page.kind,
+                media_url: page.media_url.clone(),
+                feed_url: page.feed_url.clone(),
+                price: page.price.clone(),
             })
         })
         .collect()
@@ -224,7 +239,51 @@ mod tests {
             title: host.into(),
             host: host.into(),
             text: "Карточка товара".into(),
+            region: None,
+            kind: 0,
+            media_url: None,
+            feed_url: None,
+            price: None,
         }
+    }
+
+    #[test]
+    fn home_region_stays_above_another_oblast() {
+        let hits = vec![
+            Hit {
+                url: "https://orel.example/".into(),
+                title: "Орёл".into(),
+                snippet: "мёд".into(),
+                score: 2.0,
+                via_words: true,
+                via_meaning: false,
+                adult: false,
+                volunteer: false,
+                region: Some("Орловская область".into()),
+                kind: 0,
+                media_url: None,
+                feed_url: None,
+                price: None,
+            },
+            Hit {
+                url: "https://kamyshin.example/".into(),
+                title: "Камышин".into(),
+                snippet: "банки".into(),
+                score: 1.0,
+                via_words: true,
+                via_meaning: false,
+                adult: false,
+                volunteer: false,
+                region: Some("Волгоградская область".into()),
+                kind: 0,
+                media_url: None,
+                feed_url: None,
+                price: None,
+            },
+        ];
+        let ordered = prefer_region(hits, Some("Волгоградская область"));
+        assert_eq!(ordered[0].region.as_deref(), Some("Волгоградская область"));
+        assert_eq!(ordered[1].region.as_deref(), Some("Орловская область"));
     }
 
     #[test]

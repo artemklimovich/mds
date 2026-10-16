@@ -1,5 +1,13 @@
 use std::fs;
+use std::io::Read;
 use std::path::Path;
+
+mod model;
+
+pub use model::{
+    load_model_manifest, model_file_ready, read_model_manifest, sign_model, verify_model, ModelFile,
+    ModelManifest, SWARM_MODEL_FILES,
+};
 
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -11,6 +19,9 @@ pub const MAX_BYTES: usize = 80 * 1024 * 1024;
 
 /// Публичная половина ключа издателя. Секрет лежит только у того, кто выпускает версию.
 pub const PINNED_PUBLIC_HEX: &str = "bd478e03392a527df2c3e2deebe3485aaa5f87c74bda63cdffc520ae7369f668";
+
+/// Ноды, которым программа доверяет сразу. Список меняется вместе с новой версией.
+pub const TRUSTED_NODES: &[&str] = &["https://45.158.46.52"];
 
 #[derive(Debug, Error)]
 pub enum UpdateError {
@@ -100,13 +111,51 @@ pub fn is_newer(offered: &str, running: &str) -> bool {
     version_parts(offered) > version_parts(running)
 }
 
+pub fn accept_notice(running: &str, already: Option<&str>, offered: &str) -> bool {
+    version_name_ok(offered) && is_newer(offered, running) && already != Some(offered)
+}
+
+pub fn save_notice(dir: &Path, version: &str) -> Result<(), UpdateError> {
+    if !version_name_ok(version) {
+        return Err(UpdateError::BadVersion);
+    }
+    fs::create_dir_all(dir)?;
+    fs::write(dir.join("notice.json"), serde_json::to_vec(&version)?)?;
+    Ok(())
+}
+
+pub fn load_notice(dir: &Path) -> Option<String> {
+    let bytes = fs::read(dir.join("notice.json")).ok()?;
+    let version = serde_json::from_slice::<String>(&bytes).ok()?;
+    if version_name_ok(&version) && is_newer(&version, VERSION) {
+        Some(version)
+    } else {
+        None
+    }
+}
+
 pub fn sha256_hex(bytes: &[u8]) -> String {
     hex_encode(&Sha256::digest(bytes))
 }
 
 pub fn hash_file(path: &Path) -> Result<String, UpdateError> {
-    let bytes = fs::read(path)?;
-    Ok(sha256_hex(&bytes))
+    Ok(hash_path(path)?.0)
+}
+
+pub fn hash_path(path: &Path) -> Result<(String, u64), UpdateError> {
+    let mut file = fs::File::open(path)?;
+    let mut hasher = Sha256::new();
+    let mut buf = [0_u8; 64 * 1024];
+    let mut size = 0_u64;
+    loop {
+        let read = file.read(&mut buf)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buf[..read]);
+        size += read as u64;
+    }
+    Ok((hex_encode(&hasher.finalize()), size))
 }
 
 pub fn running_hash() -> String {
@@ -219,7 +268,7 @@ fn version_name_ok(version: &str) -> bool {
             .all(|ch| ch.is_ascii_alphanumeric() || ch == '.' || ch == '-' || ch == '_')
 }
 
-fn decode_key(hex_text: &str) -> Option<[u8; 32]> {
+pub(crate) fn decode_key(hex_text: &str) -> Option<[u8; 32]> {
     let bytes = decode_hex(hex_text.trim())?;
     if bytes.len() != 32 {
         return None;
@@ -229,12 +278,12 @@ fn decode_key(hex_text: &str) -> Option<[u8; 32]> {
     Some(out)
 }
 
-fn decode_signature(hex_text: &str) -> Option<Signature> {
+pub(crate) fn decode_signature(hex_text: &str) -> Option<Signature> {
     let bytes = decode_hex(hex_text.trim())?;
     Signature::from_slice(&bytes).ok()
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
+pub(crate) fn hex_encode(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut out = String::with_capacity(bytes.len() * 2);
     for byte in bytes {
@@ -357,6 +406,15 @@ mod tests {
         assert!(should_replace("0.1.0", "aaa", &manifest));
         assert!(!should_replace("0.2.0", &manifest.sha256, &manifest));
         assert!(!should_replace("0.9.0", "other", &manifest));
+    }
+
+    #[test]
+    fn trusted_node_and_notice_are_a_newer_version() {
+        assert_eq!(TRUSTED_NODES, ["https://45.158.46.52"]);
+        assert!(accept_notice("0.1.0", None, "0.2.0"));
+        assert!(!accept_notice("0.1.0", Some("0.2.0"), "0.2.0"));
+        assert!(!accept_notice("0.2.0", None, "0.2.0"));
+        assert!(!accept_notice("0.1.0", None, "не версия"));
     }
 
     #[test]

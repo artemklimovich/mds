@@ -9,6 +9,8 @@ use crate::NodeError;
 pub struct LiteConfig {
     pub site: String,
     pub hive: String,
+    /// Старый общий пароль. Лёгкая пчела его больше не посылает.
+    #[allow(dead_code)]
     pub swarm_key: String,
     pub label: String,
     pub delay_ms: u64,
@@ -22,7 +24,9 @@ pub async fn run_lite(config: LiteConfig) -> Result<(), NodeError> {
     if !hive.starts_with("http://") && !hive.starts_with("https://") {
         return Err(NodeError::Message("улью нужен адрес http".into()));
     }
-    eprintln!("MDS: лёгкая пчела сайта {host}, улей {hive}. Модель и общий индекс не загружаются. Чужие адреса берёт у улья.");
+    eprintln!("MDS: лёгкая пчела сайта {host}, улей {hive}. Модель и общий индекс не загружаются.");
+    eprintln!("MDS: положите на сайт файл https://{host}/.well-known/pchela.txt");
+    eprintln!("MDS: в файле одна строка: {}", config.label);
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(60))
         .user_agent(mds_crawl::USER_AGENT)
@@ -42,6 +46,13 @@ async fn push_once(
     hive: &str,
     host: &str,
 ) -> Result<(), NodeError> {
+    if !join(client, config, hive).await? {
+        eprintln!(
+            "MDS: улей не подтвердил карточку. Строка {} должна лежать в https://{host}/.well-known/pchela.txt",
+            config.label
+        );
+        return Ok(());
+    }
     let policy = CrawlPolicy {
         delay: Duration::from_millis(config.delay_ms.max(2000)),
         max_bytes: 500_000,
@@ -68,24 +79,6 @@ async fn push_once(
     if let Some(foreign) = fetch_work(client, config, hive).await {
         pushed.extend(foreign);
     }
-    let hello = PeerHello {
-        base: String::new(),
-        label: config.label.clone(),
-        buckets: Vec::new(),
-        holds_all: false,
-        pages: pushed.len() as u32,
-        queue: 0,
-        site: config.site.clone(),
-    };
-    let hello_body = serde_json::to_vec(&hello).map_err(|err| NodeError::Message(err.to_string()))?;
-    client
-        .post(format!("{hive}/peer/join"))
-        .header("x-mds-swarm", &config.swarm_key)
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .body(hello_body)
-        .send()
-        .await
-        .map_err(|err| NodeError::Message(err.to_string()))?;
     if pushed.is_empty() {
         eprintln!("MDS: страниц для улья нет");
         return Ok(());
@@ -93,7 +86,7 @@ async fn push_once(
     let body = serde_json::to_vec(&pushed).map_err(|err| NodeError::Message(err.to_string()))?;
     client
         .post(format!("{hive}/peer/pages"))
-        .header("x-mds-swarm", &config.swarm_key)
+        .header("x-mds-bee", &config.label)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .body(body)
         .send()
@@ -103,10 +96,32 @@ async fn push_once(
     Ok(())
 }
 
+async fn join(client: &reqwest::Client, config: &LiteConfig, hive: &str) -> Result<bool, NodeError> {
+    let hello = PeerHello {
+        base: String::new(),
+        label: config.label.clone(),
+        buckets: Vec::new(),
+        holds_all: false,
+        pages: 0,
+        queue: 0,
+        site: config.site.clone(),
+    };
+    let hello_body = serde_json::to_vec(&hello).map_err(|err| NodeError::Message(err.to_string()))?;
+    let response = client
+        .post(format!("{hive}/peer/join"))
+        .header("x-mds-bee", &config.label)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(hello_body)
+        .send()
+        .await
+        .map_err(|err| NodeError::Message(err.to_string()))?;
+    Ok(response.status().is_success())
+}
+
 async fn fetch_work(client: &reqwest::Client, config: &LiteConfig, hive: &str) -> Option<Vec<PushedPage>> {
     let response = client
         .get(format!("{hive}/peer/work"))
-        .header("x-mds-swarm", &config.swarm_key)
+        .header("x-mds-bee", &config.label)
         .send()
         .await
         .ok()?;

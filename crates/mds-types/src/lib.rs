@@ -1,3 +1,16 @@
+mod kind;
+mod region;
+mod rss;
+
+pub use kind::{
+    bare_host, host_of_url, in_general, is_channel_host, is_document_url, is_government_host, is_job_board,
+    is_marketplace_host, is_press_front, is_press_host, is_product_url, is_webshop, kind_from_stored, press_feeds,
+    tab_mask, HostFeed, HOST_PAGE_CAP, KIND_CHANNEL, KIND_DOC, KIND_GOODS, KIND_GOV, KIND_IMAGE, KIND_JOBS,
+    KIND_MEDICINE, KIND_NEWS, KIND_SERVICE, KIND_VIDEO,
+};
+pub use rss::rss_headlines;
+pub use region::{canonical_region, region_in, region_names};
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -103,6 +116,18 @@ pub struct Hit {
     pub adult: bool,
     #[serde(default)]
     pub volunteer: bool,
+    /// Край, который написан на странице. Пусто, если страница его не назвала.
+    #[serde(default)]
+    pub region: Option<String>,
+    /// Маска вкладок. Ноль значит обычная веб-страница, она видна только во «Всех».
+    #[serde(default)]
+    pub kind: u32,
+    #[serde(default)]
+    pub media_url: Option<String>,
+    #[serde(default)]
+    pub feed_url: Option<String>,
+    #[serde(default)]
+    pub price: Option<String>,
 }
 
 #[derive(Clone, Debug)]

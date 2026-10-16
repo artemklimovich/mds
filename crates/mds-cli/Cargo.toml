@@ -14,5 +14,6 @@ anyhow = { workspace = true }
 clap = { workspace = true }
 mds-crawl = { workspace = true }
 mds-node = { workspace = true }
+mds-types = { workspace = true }
 mds-update = { workspace = true }
 tokio = { workspace = true }
