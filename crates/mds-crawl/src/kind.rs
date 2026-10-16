@@ -150,7 +150,7 @@ fn price_of(html: &str) -> Option<String> {
     let Some(rel) = lower.find(key) else {
         return None;
     };
-    let window = &html[rel..html.len().min(rel + 180)];
+    let window = &html[rel..cut_at_char(html, rel, 180)];
     let window_lower = window.to_ascii_lowercase();
     let content = window_lower.find("content=\"").map(|pos| pos + 9)?;
     let rest = &window[content..];
@@ -163,6 +163,14 @@ fn price_of(html: &str) -> Option<String> {
     }
 }
 
+fn cut_at_char(text: &str, start: usize, span: usize) -> usize {
+    let mut end = text.len().min(start.saturating_add(span));
+    while end > start && !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    end
+}
+
 fn first_image(base: &str, html: &str) -> Option<String> {
     let Ok(base) = Url::parse(base) else {
         return None;
@@ -171,7 +179,7 @@ fn first_image(base: &str, html: &str) -> Option<String> {
     let Some(rel) = lower.find("<img") else {
         return None;
     };
-    let tag = &html[rel..html.len().min(rel + 400)];
+    let tag = &html[rel..cut_at_char(html, rel, 400)];
     let tag_lower = tag.to_ascii_lowercase();
     let src_at = tag_lower.find("src=")?;
     let bytes = tag[src_at + 4..].as_bytes();
@@ -294,6 +302,12 @@ pub fn drop_shop_products(links: &mut Vec<String>, shop: bool) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_tag_cut_does_not_split_a_letter() {
+        let html = format!("<img src=\"a.jpg\">{}\">", "и".repeat(250));
+        assert!(first_image("https://example.test/", &html).is_some());
+    }
 
     #[test]
     fn article_picture_is_not_an_image_page() {
