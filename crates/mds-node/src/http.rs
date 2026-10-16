@@ -5,7 +5,8 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::body::Body;
-use axum::extract::{ConnectInfo, Form, Path, Query, State};
+use axum::extract::{ConnectInfo, Form, Path, Query, Request, State};
+use axum::middleware::Next;
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
@@ -15,7 +16,7 @@ use mds_types::{bare_host, canonical_region, host_of_url, in_general, tab_mask, 
 use mds_update::{read_model_manifest, ReleaseManifest};
 use mds_rank::{page_lane, prefer_region, query_lane, Lane};
 use mds_web::{
-    hive_card, page_add, page_download, page_for_sites, page_help, page_how, page_indexing, page_llms, page_manifesto, page_operator,
+    hive_card, offer_region, page_add, page_download, page_for_sites, page_help, page_how, page_indexing, page_llms, page_manifesto, page_operator,
     AddLine,
     render, render_results, robots_txt, sitemap_xml, stamp_census, OperatorReport, PeerLine,
 };
@@ -39,6 +40,13 @@ struct AppState {
     volunteers: Arc<Mutex<HashSet<String>>>,
     region: Option<String>,
     bees: Arc<Mutex<crate::bees::BeeBook>>,
+    map: Arc<Mutex<Option<mds_wire::NetworkMap>>>,
+    door: Option<Arc<crate::admin::Door>>,
+    nonces: Arc<crate::gate::Nonces>,
+    model: String,
+    limits: Arc<Mutex<HashMap<String, (u32, u64)>>>,
+    shards: Arc<Mutex<mds_dht::ShardBook>>,
+    visits: Arc<Mutex<crate::visits::VisitBook>>,
 }
 
 pub struct ServeConfig {
@@ -53,6 +61,10 @@ pub struct ServeConfig {
     pub swarm_key: String,
     pub label: String,
     pub region: Option<String>,
+    pub map: PathBuf,
+    pub admin_listen: String,
+    pub alone: bool,
+    pub mcp_path: PathBuf,
 }
 
 #[derive(Deserialize)]
@@ -129,6 +141,7 @@ pub async fn serve(engine: Engine, config: ServeConfig) -> Result<(), NodeError>
             client.clone(),
         ));
     }
+    let model = model_generation(&config.models);
     let state = AppState {
         engine,
         releases: config.releases,
@@ -138,9 +151,40 @@ pub async fn serve(engine: Engine, config: ServeConfig) -> Result<(), NodeError>
         client,
         swarm,
         volunteers,
-        region: config.region,
+        region: config.region.clone(),
         bees,
+        map: Arc::new(Mutex::new(crate::admin::read_map(&config.map))),
+        door: crate::admin::door_from_env(config.mcp_path.clone()).map(Arc::new),
+        nonces: Arc::new(crate::gate::Nonces::default()),
+        model,
+        limits: Arc::new(Mutex::new(HashMap::new())),
+        shards: Arc::new(Mutex::new(mds_dht::ShardBook::default())),
+        visits: Arc::new(Mutex::new(crate::visits::VisitBook::default())),
     };
+    if !config.alone {
+        remember_map_neighbors(&state);
+    }
+    if state.door.is_some() {
+        let admin = admin_router(state.clone());
+        match TcpListener::bind(&config.admin_listen).await {
+            Ok(listener) => {
+                eprintln!("MDS: кабинет на http://{}/operator", config.admin_listen);
+                tokio::spawn(async move {
+                    if let Err(err) = axum::serve(
+                        listener,
+                        admin.into_make_service_with_connect_info::<SocketAddr>(),
+                    )
+                    .await
+                    {
+                        eprintln!("MDS: кабинет остановился: {err}");
+                    }
+                });
+            }
+            Err(err) => {
+                eprintln!("MDS: кабинет не открылся: {err}");
+            }
+        }
+    }
     let app = Router::new()
         .route("/", get(home))
         .route("/search", get(search))
@@ -160,8 +204,9 @@ pub async fn serve(engine: Engine, config: ServeConfig) -> Result<(), NodeError>
         .route("/download/pchela.zip", get(download_zip))
         .route("/download/pchela-linux-x64.tar.gz", get(download_linux))
         .route("/download/pchela-windows-x64.zip", get(download_windows))
-        .route("/operator", get(operator).post(operator_act))
         .route("/peer/search", post(peer_search))
+        .route("/peer/v1/search", post(peer_search_v1))
+        .route("/peer/v1/shard", post(peer_shard_v1))
         .route("/peer/status", get(peer_status))
         .route("/peer/join", post(peer_join))
         .route("/peer/pages", post(peer_pages))
@@ -172,11 +217,76 @@ pub async fn serve(engine: Engine, config: ServeConfig) -> Result<(), NodeError>
         .route("/peer/model/{name}", get(peer_model_file))
         .route("/peer/notice", get(peer_notice).post(peer_notice_from))
         .route("/wire", get(wire))
+        .layer(axum::middleware::from_fn_with_state(state.clone(), count_visit))
         .with_state(state);
     let listener = TcpListener::bind(&config.listen).await?;
     eprintln!("MDS: поиск на http://{}/", config.listen);
     axum::serve(listener, app.into_make_service_with_connect_info::<SocketAddr>()).await?;
     Ok(())
+}
+
+fn stamp_search(mut response: Response, mark: crate::visits::SearchMark) -> Response {
+    response.extensions_mut().insert(mark);
+    response
+}
+
+fn person_page(path: &str) -> bool {
+    matches!(
+        path,
+        "/" | "/search" | "/manifesto" | "/how" | "/help" | "/for-sites" | "/indexing" | "/add" | "/llms" | "/download"
+    )
+}
+
+fn visit_token(cookie: Option<&str>) -> (String, bool) {
+    if let Some(raw) = cookie {
+        for part in raw.split(';') {
+            let part = part.trim();
+            if let Some(value) = part.strip_prefix("mds_visit=") {
+                if value.len() == 32 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+                    return (value.to_string(), false);
+                }
+            }
+        }
+    }
+    (crate::visits::fresh_token(), true)
+}
+
+async fn count_visit(State(state): State<AppState>, request: Request, next: Next) -> Response {
+    let path = request.uri().path().to_string();
+    let cookie = request
+        .headers()
+        .get(header::COOKIE)
+        .and_then(|value| value.to_str().ok())
+        .map(str::to_string);
+    let mut response = next.run(request).await;
+    if !person_page(&path) {
+        return response;
+    }
+    let (token, fresh) = visit_token(cookie.as_deref());
+    let mark = response.extensions().get::<crate::visits::SearchMark>().copied();
+    let now = std::time::Instant::now();
+    let delta = {
+        let mut book = state.visits.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut delta = book.page(&token, now);
+        if let Some(mark) = mark {
+            delta.merge(book.search(&token, now, mark));
+        }
+        delta
+    };
+    let engine = state.engine.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        let guard = engine.lock().unwrap_or_else(|poison| poison.into_inner());
+        guard.add_visit(&delta)
+    })
+    .await;
+    if fresh {
+        if let Ok(value) = HeaderValue::from_str(&format!(
+            "mds_visit={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=1800"
+        )) {
+            response.headers_mut().append(header::SET_COOKIE, value);
+        }
+    }
+    response
 }
 
 async fn wire() -> Json<Vec<crate::wire_feed::WireLine>> {
@@ -185,8 +295,15 @@ async fn wire() -> Json<Vec<crate::wire_feed::WireLine>> {
 
 async fn peer_search(
     State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Json(req): Json<SearchRequest>,
 ) -> Result<Json<SearchResponse>, StatusCode> {
+    if !peer.ip().is_loopback() || !hit_limit(&state, &format!("peer:{}", peer.ip()), 30, 60) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    if query_lane(&req.text) == Lane::Hidden {
+        return Ok(Json(SearchResponse { hits: Vec::new() }));
+    }
     let engine = state.engine.clone();
     let hits = tokio::task::spawn_blocking(move || {
         let guard = engine.lock().unwrap_or_else(|poison| poison.into_inner());
@@ -319,6 +436,9 @@ async fn peer_status(State(state): State<AppState>) -> Result<Json<PeerStatus>, 
             searches_per_minute: searches,
             avg_ms,
             db_bytes: guard.db_bytes(),
+            region: state.region.clone().unwrap_or_default(),
+            role: "full".into(),
+            version: mds_update::VERSION.into(),
         }
     })
     .await
@@ -458,17 +578,43 @@ fn bee_header(headers: &HeaderMap) -> Option<String> {
 
 async fn operator_act(
     State(state): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     request: axum::extract::Request,
 ) -> Response {
     let headers = request.headers().clone();
-    if !operator_on_this_machine(peer, &headers) {
+    let Some(csrf) = cabinet_csrf(&state, &headers) else {
         return StatusCode::NOT_FOUND.into_response();
-    }
+    };
     let Ok(bytes) = axum::body::to_bytes(request.into_body(), 2_000).await else {
         return StatusCode::BAD_REQUEST.into_response();
     };
     let text = String::from_utf8_lossy(&bytes);
+    if form_field(&text, "csrf") != csrf {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    if form_field(&text, "action") == "issue_mcp" {
+        let Some(door) = &state.door else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+        return match door.issue_mcp() {
+            Ok(secret) => Html(format!(
+                "<!doctype html><meta charset=\"utf-8\"><title>Ключ MCP</title><body><main><p>Ключ показан один раз. Адрес: https://admin.&lt;домен этой ноды&gt;/mcp, порт 443.</p><pre>{}</pre><p><a href=\"/operator\">Назад</a></p></main></body>",
+                secret
+            ))
+            .into_response(),
+            Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        };
+    }
+    if form_field(&text, "action") == "revoke_mcp" {
+        let Some(door) = &state.door else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+        let _ = door.revoke_mcp();
+        return Response::builder()
+            .status(StatusCode::SEE_OTHER)
+            .header(header::LOCATION, "/operator")
+            .body(Body::empty())
+            .unwrap_or_else(|_| StatusCode::NO_CONTENT.into_response());
+    }
     let host = bare_host(&form_field(&text, "host"));
     let action = form_field(&text, "action");
     if host.is_empty() {
@@ -522,6 +668,7 @@ fn form_field(body: &str, key: &str) -> String {
         .unwrap_or_default()
 }
 
+#[cfg(test)]
 fn operator_on_this_machine(peer: SocketAddr, headers: &HeaderMap) -> bool {
     if !peer.ip().is_loopback() {
         return false;
@@ -576,7 +723,18 @@ struct AddForm {
     url: String,
 }
 
-async fn add_site(State(state): State<AppState>, Form(form): Form<AddForm>) -> Html<String> {
+async fn add_site(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Form(form): Form<AddForm>,
+) -> Html<String> {
+    if form.url.len() > 500 || !hit_limit(&state, &format!("add:{}", peer.ip()), 20, 60) {
+        let lines = [AddLine {
+            ok: false,
+            text: "Слишком часто или адрес слишком длинный.".into(),
+        }];
+        return painted(&state, page_add(&form.url, Some(&lines), false));
+    }
     let check = mds_crawl::check_site(&form.url).await;
     if !check.queue.is_empty() {
         let engine = state.engine.clone();
@@ -737,7 +895,14 @@ async fn search(
         return painted(&state, render_results("", &[], &[], false, 1, None, chosen.as_deref(), "")).into_response();
     }
     if query_lane(&query) == Lane::Hidden {
-        return painted(&state, render("", &[], 1, Some("Такой запрос эта нода не ищет."))).into_response();
+        return stamp_search(
+            painted(&state, render("", &[], 1, Some("Такой запрос эта нода не ищет."))).into_response(),
+            crate::visits::SearchMark {
+                empty: false,
+                failed: false,
+                refused: true,
+            },
+        );
     }
     let adult_open = params.adult.as_deref() == Some("1") || cookie_is(&headers, "mds_adult", "1");
     let tab = params.tab.clone().unwrap_or_default();
@@ -798,10 +963,35 @@ async fn search(
                 guard.remember_query(&query_for_log, &logged)
             })
             .await;
-            painted(&state, render_results(&query, &open, &adult, adult_open, page, None, chosen.as_deref(), &tab)).into_response()
+            let mut html = render_results(&query, &open, &adult, adult_open, page, None, chosen.as_deref(), &tab);
+            if let Some((label, href)) = region_button(&state, &query, &tab).await {
+                html = offer_region(html, &label, &href);
+            }
+            stamp_search(
+                painted(&state, html).into_response(),
+                crate::visits::SearchMark {
+                    empty: open.is_empty() && adult.is_empty(),
+                    failed: false,
+                    refused: false,
+                },
+            )
         }
-        Ok(Err(err)) => painted(&state, render(&query, &[], page, Some(&err.to_string()))).into_response(),
-        Err(_) => painted(&state, render(&query, &[], page, Some("поиск прерван"))).into_response(),
+        Ok(Err(err)) => stamp_search(
+            painted(&state, render(&query, &[], page, Some(&err.to_string()))).into_response(),
+            crate::visits::SearchMark {
+                empty: false,
+                failed: true,
+                refused: false,
+            },
+        ),
+        Err(_) => stamp_search(
+            painted(&state, render(&query, &[], page, Some("поиск прерван"))).into_response(),
+            crate::visits::SearchMark {
+                empty: false,
+                failed: true,
+                refused: false,
+            },
+        ),
     };
     if params.adult.as_deref() == Some("1") {
         let mut response = response;
@@ -816,12 +1006,11 @@ async fn search(
 
 async fn operator(
     State(state): State<AppState>,
-    ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
 ) -> Response {
-    if !operator_on_this_machine(peer, &headers) {
+    let Some(csrf) = cabinet_csrf(&state, &headers) else {
         return StatusCode::NOT_FOUND.into_response();
-    }
+    };
     let engine = state.engine.clone();
     let rows = tokio::task::spawn_blocking(move || {
         let mut guard = engine.lock().unwrap_or_else(|poison| poison.into_inner());
@@ -882,8 +1071,11 @@ async fn operator(
                         .collect(),
                     refused: state.bees.lock().unwrap_or_else(|poison| poison.into_inner()).refused(),
                     rows: view,
+                    csrf: csrf.clone(),
                 }),
             )
+            .0
+            .replacen("</main>", &format!("{}</main>", cabinet_tail(&state, &csrf)), 1)
             .into_response()
         }
         _ => painted(&state, render("", &[], 1, Some("журнал не открылся"))).into_response(),
@@ -1210,6 +1402,394 @@ async fn background_crawl_loop(
             let _ = guard.record_crawl_step(&visited, &discovered, &gone, pages);
         })
         .await;
+    }
+}
+
+fn admin_router(state: AppState) -> Router {
+    Router::new()
+        .route("/login", get(login_page).post(login_act))
+        .route("/logout", post(logout_act))
+        .route("/operator", get(operator).post(operator_act))
+        .route("/mcp", post(mcp_act))
+        .with_state(state)
+}
+
+async fn login_page() -> Html<String> {
+    Html(crate::admin::login_page(false))
+}
+
+#[derive(Deserialize)]
+struct LoginForm {
+    user: String,
+    password: String,
+}
+
+async fn login_act(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    Form(form): Form<LoginForm>,
+) -> Response {
+    let Some(door) = &state.door else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if !door.allow(&format!("login:{}", peer.ip()), 8, 60) {
+        return StatusCode::TOO_MANY_REQUESTS.into_response();
+    }
+    let Some((token, _)) = door.login(&form.user, &form.password) else {
+        return Html(crate::admin::login_page(true)).into_response();
+    };
+    Response::builder()
+        .status(StatusCode::SEE_OTHER)
+        .header(header::LOCATION, "/operator")
+        .header(
+            header::SET_COOKIE,
+            format!("mds_session={token}; HttpOnly; SameSite=Strict; Path=/; Secure; Max-Age=43200"),
+        )
+        .body(Body::empty())
+        .unwrap_or_else(|_| StatusCode::NO_CONTENT.into_response())
+}
+
+async fn logout_act(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let (Some(door), Some(token)) = (&state.door, crate::admin::cookie_token(&headers)) {
+        door.logout(&token);
+    }
+    Response::builder()
+        .status(StatusCode::SEE_OTHER)
+        .header(header::LOCATION, "/login")
+        .header(
+            header::SET_COOKIE,
+            "mds_session=; HttpOnly; SameSite=Strict; Path=/; Secure; Max-Age=0",
+        )
+        .body(Body::empty())
+        .unwrap_or_else(|_| StatusCode::NO_CONTENT.into_response())
+}
+
+async fn mcp_act(State(state): State<AppState>, headers: HeaderMap, request: axum::extract::Request) -> Response {
+    let Some(door) = &state.door else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let bearer = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .unwrap_or("");
+    if !door.allow(&format!("mcp:{bearer}"), 60, 60) || !door.mcp_ok(bearer) {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let Ok(bytes) = axum::body::to_bytes(request.into_body(), 64 * 1024).await else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let text = String::from_utf8_lossy(&bytes).into_owned();
+    let map = state.map.lock().unwrap_or_else(|poison| poison.into_inner()).clone();
+    let engine = state.engine.clone();
+    let answer = tokio::task::spawn_blocking(move || {
+        let mut guard = engine.lock().unwrap_or_else(|poison| poison.into_inner());
+        crate::mcp::handle(&mut guard, map.as_ref(), &text, true)
+    })
+    .await;
+    match answer {
+        Ok((status, body)) => Response::builder()
+            .status(StatusCode::from_u16(status).unwrap_or(StatusCode::OK))
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(Body::from(body))
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response()),
+        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    }
+}
+
+fn cabinet_csrf(state: &AppState, headers: &HeaderMap) -> Option<String> {
+    let door = state.door.as_ref()?;
+    let token = crate::admin::cookie_token(headers)?;
+    door.session(&token)
+}
+
+fn cabinet_tail(state: &AppState, csrf: &str) -> String {
+    let guard = state.engine.lock().unwrap_or_else(|poison| poison.into_inner());
+    let day = guard.query_counts("day").unwrap_or_default();
+    let week = guard.query_counts("week").unwrap_or_default();
+    let month = guard.query_counts("month").unwrap_or_default();
+    let visits_day = guard.visit_span("day").unwrap_or_default();
+    let visits_week = guard.visit_span("week").unwrap_or_default();
+    let visits_month = guard.visit_span("month").unwrap_or_default();
+    let pages = guard.list_index(None, None, 0).unwrap_or_default();
+    drop(guard);
+    let map = state.map.lock().unwrap_or_else(|poison| poison.into_inner());
+    let mut body = format!(
+        "<h2>Эта нода</h2><ul class=\"load\"><li>Версия: {}</li><li>Край: {}</li><li>Поколение модели: {}</li></ul>",
+        mds_update::VERSION,
+        state.region.as_deref().unwrap_or("не задан"),
+        state.model
+    );
+    body.push_str("<h2>Карта сети</h2>");
+    if let Some(map) = map.as_ref() {
+        body.push_str(&format!("<p>Версия карты {}.</p><ul class=\"check\">", map.version));
+        for place in &map.places {
+            let door = place.hives.first().map(|door| door.base.as_str()).unwrap_or("нет входа");
+            body.push_str(&format!(
+                "<li>{} / {} — {}</li>",
+                esc_text(&place.place.country),
+                esc_text(&place.place.region),
+                esc_text(door)
+            ));
+        }
+        body.push_str("</ul>");
+    } else {
+        body.push_str("<p>Подписанной карты нет, поэтому кнопка другого края не показывается.</p>");
+    }
+    body.push_str("<h2>Заходы</h2><p>Это браузеры, не имена людей. Адрес не пишется и к запросу не привязывается. Время — от первого запроса визита до последнего; одна открытая страница времени не даёт. Отказ — ушёл, не поискав и не открыв вторую страницу.</p>");
+    for (title, report) in [("За день", visits_day), ("За неделю", visits_week), ("За месяц", visits_month)] {
+        body.push_str(&format!("<h3>{title}</h3>{}", visit_lines(&report)));
+    }
+    body.push_str("<h2>Запросы</h2><p>Одинаковый текст склеен. Число — сколько раз его спросили за этот срок. Буквы ё и е не склеиваются.</p>");
+    for (title, rows) in [("За день", day), ("За неделю", week), ("За месяц", month)] {
+        body.push_str(&format!("<h3>{title}</h3><ul class=\"check\">"));
+        for (query, count) in rows {
+            body.push_str(&format!("<li>{} — {}</li>", esc_text(&query), count));
+        }
+        body.push_str("</ul>");
+    }
+    body.push_str("<h2>Свой индекс</h2><ul class=\"check\">");
+    for page in pages {
+        body.push_str(&format!("<li>{}</li>", esc_text(&page.url)));
+    }
+    body.push_str("</ul>");
+    body.push_str(&format!(
+        "<h2>MCP</h2><p>Адрес https://admin.&lt;домен этой ноды&gt;/mcp, порт 443. Ключ отдельно от пароля кабинета.</p>
+<form method=\"post\" action=\"/operator\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\"><button name=\"action\" value=\"issue_mcp\">Выдать ключ</button><button name=\"action\" value=\"revoke_mcp\">Отозвать</button></form>"
+    ));
+    body
+}
+
+fn visit_lines(report: &mds_index::VisitReport) -> String {
+    let time = if report.timed_visits > 0 {
+        format!("{} с", report.dwell_seconds / report.timed_visits)
+    } else {
+        "ещё не измерено".into()
+    };
+    let bounces = if report.visits > 0 {
+        format!("{} ({}%)", report.bounces, report.bounces * 100 / report.visits)
+    } else {
+        "0".into()
+    };
+    format!(
+        "<ul class=\"load\"><li>Заходы: {}</li><li>Просмотры: {}</li><li>Среднее время: {time}</li><li>Отказы: {bounces}</li><li>Поиски: {}</li><li>Пустая выдача: {}</li><li>Ошибки поиска: {}</li><li>Запросы, которые нода не ищет: {}</li></ul>",
+        report.visits, report.views, report.searches, report.empty_searches, report.search_errors, report.refused
+    )
+}
+
+fn esc_text(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
+fn hit_limit(state: &AppState, key: &str, limit: u32, window_secs: u64) -> bool {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|span| span.as_secs())
+        .unwrap_or(0);
+    let mut hits = state.limits.lock().unwrap_or_else(|poison| poison.into_inner());
+    let entry = hits.entry(key.to_string()).or_insert((0, now));
+    if now.saturating_sub(entry.1) >= window_secs {
+        *entry = (0, now);
+    }
+    if entry.0 >= limit {
+        return false;
+    }
+    entry.0 += 1;
+    true
+}
+
+fn model_generation(models: &std::path::Path) -> String {
+    std::fs::read_to_string(models.join("swarm").join("stamp"))
+        .ok()
+        .map(|text| text.trim().to_string())
+        .filter(|text| !text.is_empty())
+        .unwrap_or_else(|| "legacy".into())
+}
+
+fn remember_map_neighbors(state: &AppState) {
+    let map = state.map.lock().unwrap_or_else(|poison| poison.into_inner());
+    let Some(map) = map.as_ref() else {
+        return;
+    };
+    let regional: Vec<String> = map
+        .places
+        .iter()
+        .filter(|place| state.region.as_deref() == Some(place.place.region.as_str()))
+        .flat_map(|place| place.hives.iter().map(|door| door.base.clone()))
+        .collect();
+    let shard_peers: Vec<String> = map
+        .places
+        .iter()
+        .flat_map(|place| place.shards.iter())
+        .flat_map(|shard| shard.holders.iter().cloned())
+        .filter(|holder| holder.starts_with("http"))
+        .collect();
+    let distant: Vec<String> = map
+        .places
+        .iter()
+        .filter(|place| state.region.as_deref() != Some(place.place.region.as_str()))
+        .flat_map(|place| place.hives.iter().map(|door| door.base.clone()))
+        .collect();
+    let near = mds_dht::neighbor_set(&[], &regional, &shard_peers, &[]);
+    let far = mds_dht::neighbor_set(&[], &[], &[], &distant);
+    let mut swarm = state.swarm.lock().unwrap_or_else(|poison| poison.into_inner());
+    for base in near {
+        swarm.upsert(peer_card(base, true));
+    }
+    for base in far {
+        swarm.upsert(peer_card(base, false));
+    }
+}
+
+fn peer_card(base: String, reachable: bool) -> mds_dht::PeerCard {
+    mds_dht::PeerCard {
+        base: base.clone(),
+        label: base,
+        buckets: Vec::new(),
+        holds_all: false,
+        latency_ms: 0,
+        alive: true,
+        reachable,
+        pages: 0,
+        queue: 0,
+    }
+}
+
+async fn region_button(state: &AppState, query: &str, tab: &str) -> Option<(String, String)> {
+    let named = mds_types::region_in(query)?;
+    if state.region.as_deref() == Some(named) {
+        return None;
+    }
+    let doors = {
+        let map = state.map.lock().unwrap_or_else(|poison| poison.into_inner());
+        map.as_ref()?.hives_for(named).into_iter().map(str::to_string).collect::<Vec<_>>()
+    };
+    if doors.is_empty() {
+        return None;
+    }
+    let probe = reqwest::Client::builder()
+        .timeout(Duration::from_millis(400))
+        .build()
+        .ok()?;
+    for base in doors {
+        let status = format!("{}/peer/status", base.trim_end_matches('/'));
+        if probe.get(status).send().await.ok()?.status().is_success() {
+            let href = format!(
+                "{}/search?q={}&tab={}&region={}",
+                base.trim_end_matches('/'),
+                q_encode(query),
+                q_encode(tab),
+                q_encode(named)
+            );
+            return Some((named.to_string(), href));
+        }
+    }
+    None
+}
+
+fn q_encode(value: &str) -> String {
+    let mut out = String::new();
+    for byte in value.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' => out.push(*byte as char),
+            b' ' => out.push('+'),
+            _ => out.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    out
+}
+
+#[derive(Deserialize)]
+struct SignedPacket {
+    envelope: mds_wire::WireEnvelope,
+    body: String,
+}
+
+async fn peer_search_v1(State(state): State<AppState>, Json(packet): Json<SignedPacket>) -> Result<Json<mds_wire::SearchAnswerV1>, StatusCode> {
+    let map = state.map.lock().unwrap_or_else(|poison| poison.into_inner()).clone();
+    let Some(map) = map else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+    if !state
+        .nonces
+        .accept(&packet.envelope, packet.body.as_bytes(), &map, &state.model, 1)
+    {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let query: mds_wire::SearchQueryV1 = serde_json::from_str(&packet.body).map_err(|_| StatusCode::BAD_REQUEST)?;
+    if query.hop_limit == 0 || query_lane(&query.text) == Lane::Hidden {
+        return Ok(Json(mds_wire::SearchAnswerV1 { hits: Vec::new(), compatible: true }));
+    }
+    if !mds_wire::search_compatible(&state.model, &packet.envelope.model_generation)
+        || query.vector.len() != mds_types::EMBED_DIMS
+    {
+        return Ok(Json(mds_wire::SearchAnswerV1 { hits: Vec::new(), compatible: false }));
+    }
+    let engine = state.engine.clone();
+    let req = SearchRequest {
+        text: query.text.clone(),
+        vector: mds_types::QuantVector {
+            scale: query.scale,
+            values: query.vector.clone(),
+        },
+    };
+    let hits = tokio::task::spawn_blocking(move || {
+        let guard = engine.lock().unwrap_or_else(|poison| poison.into_inner());
+        guard.search_wire(&req)
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let hits = hits.into_iter().take(query.top_k as usize).map(SearchHit::from).collect();
+    Ok(Json(mds_wire::SearchAnswerV1 { hits, compatible: true }))
+}
+
+async fn peer_shard_v1(State(state): State<AppState>, Json(packet): Json<SignedPacket>) -> StatusCode {
+    let map = state.map.lock().unwrap_or_else(|poison| poison.into_inner()).clone();
+    let Some(map) = map else {
+        return StatusCode::NOT_FOUND;
+    };
+    if packet.envelope.kind != "shard_delta"
+        || !state
+            .nonces
+            .accept(&packet.envelope, packet.body.as_bytes(), &map, &state.model, 1)
+    {
+        return StatusCode::NOT_FOUND;
+    }
+    let Some(packed) = crate::gate::pack_block(packet.body.as_bytes(), 1024 * 1024) else {
+        return StatusCode::BAD_REQUEST;
+    };
+    let Some(plain) = crate::gate::unpack_block(&packed, 1024 * 1024) else {
+        return StatusCode::BAD_REQUEST;
+    };
+    let Ok(delta) = serde_json::from_slice::<mds_wire::ShardDeltaV1>(&plain) else {
+        return StatusCode::BAD_REQUEST;
+    };
+    let mut book = state.shards.lock().unwrap_or_else(|poison| poison.into_inner());
+    if !book.known(&packet.envelope.node_id) {
+        book.note(mds_dht::ShardCopy {
+            node_id: packet.envelope.node_id.clone(),
+            generation: delta.generation,
+            revision: delta.from_revision,
+            root_sha256: String::new(),
+            state: mds_dht::CopyState::CatchingUp,
+        });
+    }
+    let actual = mds_update::sha256_hex(&plain);
+    if book.apply_delta(
+        &packet.envelope.node_id,
+        delta.generation,
+        delta.from_revision,
+        delta.to_revision,
+        &delta.block_sha256,
+        &actual,
+    ) {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::CONFLICT
     }
 }
 

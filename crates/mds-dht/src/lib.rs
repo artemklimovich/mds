@@ -100,6 +100,121 @@ impl LocalDirectory {
     }
 }
 
+/// Три разные машины одного края. Если машин меньше трёх, возвращаются все.
+pub fn assign_holders(nodes: &[NodeId], key: &ShardKey) -> Vec<NodeId> {
+    if nodes.is_empty() {
+        return Vec::new();
+    }
+    let mut ranked: Vec<(String, NodeId)> = nodes
+        .iter()
+        .map(|node| {
+            let mut hasher = blake3::Hasher::new();
+            hasher.update(&node.0);
+            hasher.update(&key.domain_hash);
+            hasher.update(&key.semantic_bucket.to_le_bytes());
+            (hasher.finalize().to_hex().to_string(), node.clone())
+        })
+        .collect();
+    ranked.sort_by(|left, right| left.0.cmp(&right.0));
+    ranked.dedup_by(|left, right| left.1.0 == right.1.0);
+    ranked.into_iter().take(REPLICATION).map(|(_, node)| node).collect()
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CopyState {
+    Active,
+    CatchingUp,
+    Stale,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ShardCopy {
+    pub node_id: String,
+    pub generation: u64,
+    pub revision: u64,
+    pub root_sha256: String,
+    pub state: CopyState,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct ShardBook {
+    copies: Vec<ShardCopy>,
+}
+
+impl ShardBook {
+    pub fn known(&self, node_id: &str) -> bool {
+        self.copies.iter().any(|item| item.node_id == node_id)
+    }
+
+    pub fn note(&mut self, copy: ShardCopy) {
+        if let Some(existing) = self.copies.iter_mut().find(|item| item.node_id == copy.node_id) {
+            *existing = copy;
+        } else {
+            self.copies.push(copy);
+        }
+    }
+
+    pub fn apply_delta(
+        &mut self,
+        node_id: &str,
+        generation: u64,
+        from_revision: u64,
+        to_revision: u64,
+        block_sha256: &str,
+        expected_sha256: &str,
+    ) -> bool {
+        if block_sha256 != expected_sha256 || to_revision <= from_revision {
+            return false;
+        }
+        let Some(copy) = self.copies.iter_mut().find(|item| item.node_id == node_id) else {
+            return false;
+        };
+        if copy.generation != generation || copy.revision != from_revision {
+            return false;
+        }
+        copy.revision = to_revision;
+        copy.root_sha256 = expected_sha256.to_string();
+        copy.state = CopyState::Active;
+        true
+    }
+
+    pub fn active(&self) -> Vec<&ShardCopy> {
+        self.copies
+            .iter()
+            .filter(|copy| copy.state == CopyState::Active)
+            .collect()
+    }
+}
+
+/// Активный набор: несколько ключевых, ульи своего края, другие копии своих шардов и дальние соседи.
+pub fn neighbor_set(
+    bootstrap: &[String],
+    regional: &[String],
+    shard_peers: &[String],
+    distant: &[String],
+) -> Vec<String> {
+    let mut out = Vec::new();
+    push_unique(&mut out, bootstrap, 3);
+    push_unique(&mut out, regional, 3);
+    push_unique(&mut out, shard_peers, 6);
+    push_unique(&mut out, distant, 4);
+    out
+}
+
+fn push_unique(out: &mut Vec<String>, source: &[String], limit: usize) {
+    let mut taken = 0;
+    for item in source {
+        if taken >= limit {
+            break;
+        }
+        if item.is_empty() || out.iter().any(|have| have == item) {
+            continue;
+        }
+        out.push(item.clone());
+        taken += 1;
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct PeerCard {
     pub base: String,
@@ -282,6 +397,54 @@ mod tests {
                 "http://mid:8080".to_string(),
             ]
         );
+    }
+
+    #[test]
+    fn three_holders_are_stable_and_distinct() {
+        let nodes: Vec<NodeId> = (0..8)
+            .map(|n| NodeId([n, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]))
+            .collect();
+        let key = ShardKey {
+            domain_hash: [9; 16],
+            semantic_bucket: 4,
+        };
+        let first = assign_holders(&nodes, &key);
+        let again = assign_holders(&nodes, &key);
+        assert_eq!(first.len(), 3);
+        assert_eq!(first, again);
+        let mut ids: Vec<[u8; 16]> = first.iter().map(|node| node.0).collect();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), 3);
+    }
+
+    #[test]
+    fn delta_moves_revision_only_when_the_hash_matches() {
+        let mut book = ShardBook::default();
+        book.note(ShardCopy {
+            node_id: "node-a".into(),
+            generation: 1,
+            revision: 4,
+            root_sha256: "old".into(),
+            state: CopyState::CatchingUp,
+        });
+        assert!(!book.apply_delta("node-a", 1, 4, 5, "bad", "good"));
+        assert!(book.apply_delta("node-a", 1, 4, 5, "good", "good"));
+        assert_eq!(book.active()[0].revision, 5);
+    }
+
+    #[test]
+    fn neighbor_set_stays_inside_the_budget() {
+        let bootstrap = vec!["a".into(), "b".into(), "c".into(), "d".into()];
+        let regional = vec!["b".into(), "e".into(), "f".into(), "g".into()];
+        let shards = vec!["h".into(), "i".into()];
+        let distant = vec!["j".into(), "k".into(), "l".into(), "m".into(), "n".into()];
+        let set = neighbor_set(&bootstrap, &regional, &shards, &distant);
+        assert!(set.len() <= 16);
+        assert_eq!(set.iter().filter(|item| item.as_str() == "b").count(), 1);
+        assert!(set.contains(&"a".to_string()));
+        assert!(!set.contains(&"d".to_string()));
+        assert!(!set.contains(&"n".to_string()));
     }
 
     #[test]

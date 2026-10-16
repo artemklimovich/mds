@@ -59,6 +59,15 @@ pub fn sitemap_xml(origin: &str) -> String {
     body
 }
 
+pub fn offer_region(page: String, label: &str, href: &str) -> String {
+    let line = format!(
+        "<p class=\"handoff\"><a href=\"{}\">Искать в {}</a></p>",
+        escape(href),
+        escape(label)
+    );
+    page.replacen("</main>", &format!("{line}</main>"), 1)
+}
+
 pub fn render(query: &str, hits: &[Hit], page: usize, error: Option<&str>) -> String {
     render_results(query, hits, &[], false, page, error, None, "")
 }
@@ -599,6 +608,7 @@ pub struct OperatorReport {
     pub volunteers: Vec<String>,
     pub refused: Vec<String>,
     pub rows: Vec<(String, i64, i64, i64, i64)>,
+    pub csrf: String,
 }
 
 pub fn page_operator(report: &OperatorReport) -> String {
@@ -655,7 +665,10 @@ pub fn page_operator(report: &OperatorReport) -> String {
         body.push_str("</ul>");
     }
     body.push_str(
-        "<form class=\"admit\" method=\"post\" action=\"/operator\"><input name=\"host\" placeholder=\"сайт пчелы\" required><button name=\"action\" value=\"refuse\">Остановить</button><button name=\"action\" value=\"restore\">Вернуть</button></form>",
+        &format!(
+            "<form class=\"admit\" method=\"post\" action=\"/operator\"><input type=\"hidden\" name=\"csrf\" value=\"{}\"><input name=\"host\" placeholder=\"сайт пчелы\" required><button name=\"action\" value=\"refuse\">Остановить</button><button name=\"action\" value=\"restore\">Вернуть</button></form>",
+            escape(&report.csrf)
+        ),
     );
     if report.rows.is_empty() {
         body.push_str("<p>Запросов пока нет.</p>");
@@ -1215,5 +1228,14 @@ mod tests {
         let closed = render("банки", &[], 1, None);
         assert!(closed.contains("<details class=\"tune\">"));
         assert!(!closed.contains("<details class=\"tune\" open>"));
+    }
+
+    #[test]
+    fn region_button_keeps_this_pages_answer() {
+        let page = render("завод в казани", &[], 1, None);
+        let with = offer_region(page, "Татарстан", "https://kazan.example/search?q=завод");
+        assert!(with.contains("Искать в Татарстан"));
+        assert!(with.contains("https://kazan.example/search?q=завод"));
+        assert!(with.contains("завод в казани"));
     }
 }

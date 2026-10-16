@@ -16,4 +16,5 @@ mds-crawl = { workspace = true }
 mds-node = { workspace = true }
 mds-types = { workspace = true }
 mds-update = { workspace = true }
+rpassword = "7"
 tokio = { workspace = true }

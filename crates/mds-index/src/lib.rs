@@ -710,22 +710,218 @@ impl Index {
         meaning: i64,
         adult: i64,
     ) -> Result<(), IndexError> {
+        self.remember_ranked(query, results, words, meaning, adult, &[])
+    }
+
+    pub fn remember_ranked(
+        &self,
+        query: &str,
+        results: i64,
+        words: i64,
+        meaning: i64,
+        adult: i64,
+        places: &[RankPlace],
+    ) -> Result<(), IndexError> {
         let trimmed = query.trim();
         if trimmed.is_empty() || trimmed.chars().count() > 300 {
             return Ok(());
         }
+        let glued = glue_query(trimmed);
         self.conn.execute(
             "INSERT INTO query_log (query, asked_at, result_count, word_hits, meaning_hits, adult_count)
              VALUES (?1, strftime('%s','now'), ?2, ?3, ?4, ?5)",
-            params![trimmed, results, words, meaning, adult],
+            params![glued, results, words, meaning, adult],
         )?;
+        self.bump_tally(&glued)?;
+        let log_id = self.conn.last_insert_rowid();
+        for place in places.iter().take(10) {
+            self.conn.execute(
+                "INSERT INTO query_rank (log_id, place, url, host) VALUES (?1, ?2, ?3, ?4)",
+                params![log_id, place.place, place.url, place.host],
+            )?;
+        }
         self.conn.execute(
             "DELETE FROM query_log WHERE id NOT IN (
                 SELECT id FROM query_log ORDER BY id DESC LIMIT 500
              )",
             [],
         )?;
+        self.conn.execute(
+            "DELETE FROM query_rank WHERE log_id NOT IN (SELECT id FROM query_log)",
+            [],
+        )?;
         Ok(())
+    }
+
+    pub fn key_queries(&self, limit: usize) -> Result<Vec<(String, i64)>, IndexError> {
+        self.query_counts("month", limit)
+    }
+
+    pub fn query_counts(&self, span: &str, limit: usize) -> Result<Vec<(String, i64)>, IndexError> {
+        let start_sql = match span {
+            "day" => "date('now','localtime')",
+            "week" => "date('now','localtime','-' || ((cast(strftime('%w','now','localtime') as integer) + 6) % 7) || ' days')",
+            "month" => "date('now','localtime','start of month')",
+            _ => return Ok(Vec::new()),
+        };
+        let limit = limit.min(50) as i64;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT query, hits FROM query_tally WHERE span = ?1 AND start = {start_sql} ORDER BY hits DESC LIMIT ?2"
+        ))?;
+        let rows = stmt.query_map(params![span, limit], |row| Ok((row.get(0)?, row.get(1)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn add_visit(&self, delta: &VisitDelta) -> Result<(), IndexError> {
+        if *delta == VisitDelta::default() {
+            return Ok(());
+        }
+        self.conn.execute(
+            "INSERT INTO visit_day (
+                day, visits, views, searches, bounces, dwell_seconds, timed_visits,
+                empty_searches, search_errors, refused
+             ) VALUES (date('now','localtime'), ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(day) DO UPDATE SET
+                visits = visits + excluded.visits,
+                views = views + excluded.views,
+                searches = searches + excluded.searches,
+                bounces = MAX(0, bounces + excluded.bounces),
+                dwell_seconds = dwell_seconds + excluded.dwell_seconds,
+                timed_visits = timed_visits + excluded.timed_visits,
+                empty_searches = empty_searches + excluded.empty_searches,
+                search_errors = search_errors + excluded.search_errors,
+                refused = refused + excluded.refused",
+            params![
+                delta.visits,
+                delta.views,
+                delta.searches,
+                delta.bounces,
+                delta.dwell_seconds,
+                delta.timed_visits,
+                delta.empty_searches,
+                delta.search_errors,
+                delta.refused
+            ],
+        )?;
+        self.conn.execute(
+            "DELETE FROM visit_day WHERE day < date('now','localtime','-400 days')",
+            [],
+        )?;
+        Ok(())
+    }
+
+    pub fn visit_span(&self, span: &str) -> Result<VisitReport, IndexError> {
+        let start_sql = match span {
+            "day" => "date('now','localtime')",
+            "week" => "date('now','localtime','-' || ((cast(strftime('%w','now','localtime') as integer) + 6) % 7) || ' days')",
+            "month" => "date('now','localtime','start of month')",
+            _ => return Ok(VisitReport::default()),
+        };
+        let sql = format!(
+            "SELECT
+                COALESCE(SUM(visits), 0),
+                COALESCE(SUM(views), 0),
+                COALESCE(SUM(searches), 0),
+                COALESCE(SUM(bounces), 0),
+                COALESCE(SUM(dwell_seconds), 0),
+                COALESCE(SUM(timed_visits), 0),
+                COALESCE(SUM(empty_searches), 0),
+                COALESCE(SUM(search_errors), 0),
+                COALESCE(SUM(refused), 0)
+             FROM visit_day WHERE day >= {start_sql}"
+        );
+        self.conn.query_row(&sql, [], |row| {
+            Ok(VisitReport {
+                visits: row.get(0)?,
+                views: row.get(1)?,
+                searches: row.get(2)?,
+                bounces: row.get(3)?,
+                dwell_seconds: row.get(4)?,
+                timed_visits: row.get(5)?,
+                empty_searches: row.get(6)?,
+                search_errors: row.get(7)?,
+                refused: row.get(8)?,
+            })
+        }).map_err(IndexError::from)
+    }
+
+    fn bump_tally(&self, query: &str) -> Result<(), IndexError> {
+        for (span, start_sql) in [
+            ("day", "date('now','localtime')"),
+            (
+                "week",
+                "date('now','localtime','-' || ((cast(strftime('%w','now','localtime') as integer) + 6) % 7) || ' days')",
+            ),
+            ("month", "date('now','localtime','start of month')"),
+        ] {
+            self.conn.execute(
+                &format!(
+                    "INSERT INTO query_tally (query, span, start, hits) VALUES (?1, ?2, {start_sql}, 1)
+                     ON CONFLICT(query, span, start) DO UPDATE SET hits = hits + 1"
+                ),
+                params![query, span],
+            )?;
+        }
+        self.conn.execute(
+            "DELETE FROM query_tally WHERE
+                (span = 'day' AND start < date('now','localtime','-400 days'))
+                OR (span = 'week' AND start < date('now','localtime','-3 years'))
+                OR (span = 'month' AND start < date('now','localtime','-5 years'))",
+            [],
+        )?;
+        Ok(())
+    }
+
+    pub fn site_places(&self, host: &str, limit: usize) -> Result<Vec<(String, i64, String)>, IndexError> {
+        let limit = limit.min(50) as i64;
+        let mut stmt = self.conn.prepare(
+            "SELECT l.query, r.place, r.url
+             FROM query_rank r JOIN query_log l ON l.id = r.log_id
+             WHERE r.host = ?1 ORDER BY r.id DESC LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![host, limit], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn list_index(
+        &self,
+        host: Option<&str>,
+        kind: Option<u32>,
+        after: i64,
+        limit: usize,
+    ) -> Result<Vec<IndexLine>, IndexError> {
+        let limit = limit.clamp(1, 50) as i64;
+        let host = host.unwrap_or("");
+        let kind = kind.unwrap_or(0) as i64;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, url, title, host, kind FROM pages
+             WHERE id > ?1
+               AND (?2 = '' OR host = ?2)
+               AND (?3 = 0 OR (kind & ?3) != 0)
+             ORDER BY id LIMIT ?4",
+        )?;
+        let rows = stmt.query_map(params![after, host, kind, limit], |row| {
+            Ok(IndexLine {
+                id: row.get(0)?,
+                url: row.get(1)?,
+                title: row.get(2)?,
+                host: row.get(3)?,
+                kind: row.get(4)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
     }
 
     pub fn recent_queries(&self, limit: usize) -> Result<Vec<QueryStat>, IndexError> {
@@ -856,13 +1052,85 @@ impl Index {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VisitDelta {
+    pub visits: i64,
+    pub views: i64,
+    pub searches: i64,
+    pub bounces: i64,
+    pub dwell_seconds: i64,
+    pub timed_visits: i64,
+    pub empty_searches: i64,
+    pub search_errors: i64,
+    pub refused: i64,
+}
+
+impl VisitDelta {
+    pub fn merge(&mut self, extra: VisitDelta) {
+        self.visits += extra.visits;
+        self.views += extra.views;
+        self.searches += extra.searches;
+        self.bounces += extra.bounces;
+        self.dwell_seconds += extra.dwell_seconds;
+        self.timed_visits += extra.timed_visits;
+        self.empty_searches += extra.empty_searches;
+        self.search_errors += extra.search_errors;
+        self.refused += extra.refused;
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct VisitReport {
+    pub visits: i64,
+    pub views: i64,
+    pub searches: i64,
+    pub bounces: i64,
+    pub dwell_seconds: i64,
+    pub timed_visits: i64,
+    pub empty_searches: i64,
+    pub search_errors: i64,
+    pub refused: i64,
+}
+
 #[derive(Clone, Debug)]
+pub struct RankPlace {
+    pub place: i64,
+    pub url: String,
+    pub host: String,
+}
+
+#[derive(Clone, Debug)]
+pub struct IndexLine {
+    pub id: i64,
+    pub url: String,
+    pub title: String,
+    pub host: String,
+    pub kind: i64,
+}
+
 pub struct QueryStat {
     pub text: String,
     pub results: i64,
     pub words: i64,
     pub meaning: i64,
     pub adult: i64,
+}
+
+fn glue_query(query: &str) -> String {
+    let mut out = String::new();
+    let mut gap = false;
+    for ch in query.trim().chars() {
+        if ch.is_whitespace() {
+            gap = true;
+            continue;
+        }
+        if gap && !out.is_empty() {
+            out.push(' ');
+        }
+        gap = false;
+        out.push(ch);
+    }
+    out
 }
 
 fn ensure_region_column(conn: &Connection) -> Result<(), IndexError> {
@@ -1066,7 +1334,7 @@ fn init_schema(conn: &Connection) -> Result<(), IndexError> {
         })?;
     ensure_region_column(conn)?;
     conn.execute_batch(
-        "CREATE TABLE IF NOT EXISTS query_log (
+        "        CREATE TABLE IF NOT EXISTS query_log (
             id INTEGER PRIMARY KEY,
             query TEXT NOT NULL,
             asked_at INTEGER NOT NULL,
@@ -1074,6 +1342,32 @@ fn init_schema(conn: &Connection) -> Result<(), IndexError> {
             word_hits INTEGER NOT NULL,
             meaning_hits INTEGER NOT NULL,
             adult_count INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS query_rank (
+            id INTEGER PRIMARY KEY,
+            log_id INTEGER NOT NULL,
+            place INTEGER NOT NULL,
+            url TEXT NOT NULL,
+            host TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS query_tally (
+            query TEXT NOT NULL,
+            span TEXT NOT NULL,
+            start TEXT NOT NULL,
+            hits INTEGER NOT NULL,
+            PRIMARY KEY (query, span, start)
+        );
+        CREATE TABLE IF NOT EXISTS visit_day (
+            day TEXT PRIMARY KEY,
+            visits INTEGER NOT NULL,
+            views INTEGER NOT NULL,
+            searches INTEGER NOT NULL,
+            bounces INTEGER NOT NULL,
+            dwell_seconds INTEGER NOT NULL,
+            timed_visits INTEGER NOT NULL,
+            empty_searches INTEGER NOT NULL,
+            search_errors INTEGER NOT NULL,
+            refused INTEGER NOT NULL
         );
         CREATE TABLE IF NOT EXISTS volunteers (
             host TEXT PRIMARY KEY,
@@ -1250,5 +1544,20 @@ mod tests {
         index.enqueue_urls(&["https://zavod.example/other".into()]).unwrap();
         let pending = index.pending_urls(20).unwrap();
         assert!(!pending.iter().any(|url| url.ends_with("/other")));
+    }
+
+    #[test]
+    fn same_query_is_counted_by_day_week_and_month() {
+        let dir = std::env::temp_dir().join(format!("mds-index-tally-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let index = Index::open(&dir.join("tally.db")).unwrap();
+        index.remember_query("мёд  липовый", 1, 1, 0, 0).unwrap();
+        index.remember_query("мёд липовый", 1, 1, 0, 0).unwrap();
+        index.remember_query("мед липовый", 1, 1, 0, 0).unwrap();
+        for span in ["day", "week", "month"] {
+            let rows = index.query_counts(span, 10).unwrap();
+            assert_eq!(rows.iter().find(|(text, _)| text == "мёд липовый").map(|(_, hits)| *hits), Some(2));
+            assert_eq!(rows.iter().find(|(text, _)| text == "мед липовый").map(|(_, hits)| *hits), Some(1));
+        }
     }
 }

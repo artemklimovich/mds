@@ -6,7 +6,10 @@ license.workspace = true
 publish.workspace = true
 
 [dependencies]
+argon2 = "0.5"
 axum = { workspace = true }
+getrandom = "0.2"
+zstd = "0.13"
 mds-crawl = { workspace = true }
 mds-dht = { workspace = true }
 mds-embed = { workspace = true }

@@ -3,7 +3,9 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use mds_crawl::CrawlPolicy;
-use mds_node::{index_fixture_dir, run_lite, serve, sync_model, Engine, LiteConfig, ServeConfig};
+use mds_node::{
+    hash_admin_password, index_fixture_dir, run_lite, serve, sync_model, Engine, LiteConfig, ServeConfig,
+};
 use mds_update::{
     generate_keypair, public_from_secret, save_release, sign_model, sign_release, PINNED_PUBLIC_HEX,
     TRUSTED_NODES,
@@ -70,7 +72,15 @@ enum Command {
         /// Каталог, откуда улей отдаёт архивы программы.
         #[arg(long, default_value = "data/downloads")]
         downloads: PathBuf,
+        /// Подписанная карта сети. Без верной подписи кнопка другого края не появляется.
+        #[arg(long, default_value = "data/network.json")]
+        map: PathBuf,
+        /// Кабинет и MCP. Открывается только если заданы имя и хеш пароля.
+        #[arg(long, default_value = "127.0.0.1:8081")]
+        admin_listen: String,
     },
+    /// Спросить пароль без эха и напечатать Argon2id-хеш для MDS_ADMIN_PASSWORD_HASH.
+    AdminPassword,
     /// Создать секретный ключ издателя. Публичная половина должна совпасть с ключом в этой сборке.
     Keygen {
         #[arg(long, default_value = "data/release.key")]
@@ -122,6 +132,8 @@ async fn main() -> anyhow::Result<()> {
             site,
             releases,
             downloads,
+            map,
+            admin_listen,
         } => {
             if lite {
                 let site = site.ok_or_else(|| anyhow::anyhow!("для --lite нужен --site"))?;
@@ -214,9 +226,21 @@ async fn main() -> anyhow::Result<()> {
                     swarm_key,
                     label: bee_label(&db),
                     region,
+                    map,
+                    admin_listen,
+                    alone,
+                    mcp_path: db
+                        .parent()
+                        .unwrap_or(std::path::Path::new("data"))
+                        .join("mcp.hash"),
                 },
             )
             .await?;
+        }
+        Command::AdminPassword => {
+            let password = rpassword::prompt_password("Пароль кабинета: ")?;
+            let hash = hash_admin_password(&password).map_err(|err| anyhow::anyhow!(err))?;
+            println!("{hash}");
         }
         Command::Keygen { out } => {
             if out.exists() {

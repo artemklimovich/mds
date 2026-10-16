@@ -1,6 +1,15 @@
 use mds_types::{Hit, QuantVector};
 use serde::{Deserialize, Serialize};
 
+pub mod network;
+pub mod v1;
+
+pub use network::{HiveDoor, NetworkMap, NodeKey, PlaceEntry, PlaceRef, ShardNote, PROTOCOL_VERSION};
+pub use v1::{
+    search_compatible, SearchAnswerV1, SearchQueryV1, ShardAckV1, ShardCopy, ShardDeltaV1,
+    ShardManifestV1, WireEnvelope,
+};
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SearchRequest {
     pub text: String,
@@ -84,6 +93,12 @@ pub struct PeerStatus {
     pub searches_per_minute: u64,
     pub avg_ms: u64,
     pub db_bytes: u64,
+    #[serde(default)]
+    pub region: String,
+    #[serde(default)]
+    pub role: String,
+    #[serde(default)]
+    pub version: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

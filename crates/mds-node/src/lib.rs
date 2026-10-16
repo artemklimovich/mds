@@ -1,9 +1,15 @@
+mod admin;
 mod bees;
+mod gate;
+mod mcp;
+
+pub use admin::hash_admin_password;
 mod engine;
 mod http;
 mod lite;
 mod model_sync;
 mod updates;
+mod visits;
 mod wire_feed;
 
 pub use engine::Engine;

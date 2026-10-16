@@ -3,6 +3,9 @@ use std::io::Read;
 use std::path::Path;
 
 mod model;
+mod network;
+
+pub use network::{node_id_of, open_wire, seal, sign_network, verify_network, verify_network_with};
 
 pub use model::{
     load_model_manifest, model_file_ready, read_model_manifest, sign_model, verify_model, ModelFile,

@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use mds_crawl::{is_broken_url, is_not_found, strip_boilerplate, CrawlPolicy, Crawler, FetchedPage};
 use mds_dht::{shard_key, LocalDirectory, Lsh};
 use mds_embed::Embedder;
-use mds_index::{Index, QueryStat};
+use mds_index::{Index, IndexLine, QueryStat, RankPlace, VisitDelta, VisitReport};
 use mds_rank::{fuse, page_lane, query_lane, Lane};
 use mds_types::{quantize, Hit, QuantVector};
 use mds_wire::SearchRequest;
@@ -288,7 +288,51 @@ impl Engine {
         let meaning = hits.iter().filter(|hit| hit.via_meaning).count() as i64;
         let adult = hits.iter().filter(|hit| hit.adult).count() as i64;
         let open = hits.len() as i64 - adult;
-        Ok(self.index.remember_query(query, open, words, meaning, adult)?)
+        let places: Vec<RankPlace> = hits
+            .iter()
+            .take(10)
+            .enumerate()
+            .filter_map(|(place, hit)| {
+                let host = mds_dht::host_of(&hit.url)?;
+                Some(RankPlace {
+                    place: place as i64 + 1,
+                    url: hit.url.clone(),
+                    host,
+                })
+            })
+            .collect();
+        Ok(self
+            .index
+            .remember_ranked(query, open, words, meaning, adult, &places)?)
+    }
+
+    pub fn key_queries(&self) -> Result<Vec<(String, i64)>, NodeError> {
+        Ok(self.index.key_queries(20)?)
+    }
+
+    pub fn query_counts(&self, span: &str) -> Result<Vec<(String, i64)>, NodeError> {
+        Ok(self.index.query_counts(span, 20)?)
+    }
+
+    pub fn add_visit(&self, delta: &VisitDelta) -> Result<(), NodeError> {
+        Ok(self.index.add_visit(delta)?)
+    }
+
+    pub fn visit_span(&self, span: &str) -> Result<VisitReport, NodeError> {
+        Ok(self.index.visit_span(span)?)
+    }
+
+    pub fn site_places(&self, host: &str) -> Result<Vec<(String, i64, String)>, NodeError> {
+        Ok(self.index.site_places(host, 20)?)
+    }
+
+    pub fn list_index(
+        &self,
+        host: Option<&str>,
+        kind: Option<u32>,
+        after: i64,
+    ) -> Result<Vec<IndexLine>, NodeError> {
+        Ok(self.index.list_index(host, kind, after, 20)?)
     }
 
     fn remember_priorities(&self, pages: &[FetchedPage]) -> Result<(), NodeError> {
