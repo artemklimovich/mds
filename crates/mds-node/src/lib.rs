@@ -1,5 +1,6 @@
 mod admin;
 mod bees;
+mod face;
 mod gate;
 mod mcp;
 
@@ -8,11 +9,14 @@ mod engine;
 mod http;
 mod lite;
 mod model_sync;
+mod offers;
+mod shell;
 mod updates;
 mod visits;
 mod wire_feed;
 
 pub use engine::Engine;
+pub use face::{serve_face, FaceConfig};
 pub use http::{serve, ServeConfig};
 pub use lite::{run_lite, LiteConfig};
 pub use model_sync::sync_model;

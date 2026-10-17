@@ -5,23 +5,24 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use axum::body::Body;
-use axum::extract::{ConnectInfo, Form, Path, Query, Request, State};
+use axum::extract::{ConnectInfo, Form, OriginalUri, Path, Query, Request, State};
 use axum::middleware::Next;
 use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use mds_dht::Swarm;
-use mds_types::{bare_host, canonical_region, host_of_url, in_general, tab_mask, Hit};
+use mds_types::{bare_host, canonical_region, geo_in, host_of_url, in_general, site_ask, tab_mask, valid_coords, Hit, QuantVector};
 use mds_update::{read_model_manifest, ReleaseManifest};
-use mds_rank::{page_lane, prefer_region, query_lane, Lane};
+use mds_rank::{page_lane, prefer_geo_radius, query_lane, Lane};
 use mds_web::{
-    hive_card, offer_region, page_add, page_download, page_for_sites, page_help, page_how, page_indexing, page_llms, page_manifesto, page_operator,
+    hive_card, offer_region, page_add, page_android, page_computer, page_download, page_for_sites, page_help, page_hive, page_how, page_indexing, page_llms, page_manifesto, page_operator,
     AddLine,
-    render, render_results, robots_txt, sitemap_xml, stamp_census, OperatorReport, PeerLine,
+    cabinet_sheets, render, render_results, robots_txt, sitemap_xml, stamp_census, BeeLine, CabinetSheets, MapLine, NodeChip,
+    OperatorReport, PeerLine, ShellLine, VisitNumbers,
 };
 use mds_wire::{CrawlWork, PeerHello, PeerStatus, PushedPage, SearchHit, SearchRequest, SearchResponse};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio_util::io::ReaderStream;
 
@@ -35,6 +36,7 @@ struct AppState {
     models: PathBuf,
     downloads: PathBuf,
     peers: Vec<String>,
+    self_base: String,
     client: reqwest::Client,
     swarm: Arc<Mutex<Swarm>>,
     volunteers: Arc<Mutex<HashSet<String>>>,
@@ -47,6 +49,10 @@ struct AppState {
     limits: Arc<Mutex<HashMap<String, (u32, u64)>>>,
     shards: Arc<Mutex<mds_dht::ShardBook>>,
     visits: Arc<Mutex<crate::visits::VisitBook>>,
+    shells: Arc<Mutex<crate::shell::ShellBook>>,
+    dials: Arc<Mutex<Vec<String>>>,
+    note: Arc<Mutex<String>>,
+    face_token: String,
 }
 
 pub struct ServeConfig {
@@ -65,6 +71,8 @@ pub struct ServeConfig {
     pub admin_listen: String,
     pub alone: bool,
     pub mcp_path: PathBuf,
+    /// Публичный адрес этого улья. Вместе с соседями делит домены. Пусто — этот улей держит все.
+    pub self_base: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -74,6 +82,9 @@ struct SearchParams {
     adult: Option<String>,
     region: Option<String>,
     tab: Option<String>,
+    lat: Option<f64>,
+    lon: Option<f64>,
+    radius: Option<f64>,
 }
 
 pub async fn serve(engine: Engine, config: ServeConfig) -> Result<(), NodeError> {
@@ -81,6 +92,12 @@ pub async fn serve(engine: Engine, config: ServeConfig) -> Result<(), NodeError>
     let peers = config.peers.clone();
     tokio::spawn(watch(peers, releases));
     let engine = Arc::new(Mutex::new(engine));
+    if let Some(base) = config.self_base.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+        engine
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .set_shard_circle(base, config.peers.clone());
+    }
     let volunteers = {
         let known = engine
             .lock()
@@ -106,6 +123,8 @@ pub async fn serve(engine: Engine, config: ServeConfig) -> Result<(), NodeError>
             config.discover_ct,
         ));
     }
+    tokio::spawn(spool_loop(engine.clone()));
+    tokio::spawn(load_loop(engine.clone()));
     let client = reqwest::Client::builder()
         .timeout(Duration::from_millis(2500))
         .build()
@@ -122,16 +141,25 @@ pub async fn serve(engine: Engine, config: ServeConfig) -> Result<(), NodeError>
             buckets: Vec::new(),
             holds_all: false,
             latency_ms: 0,
-            alive: true,
-            reachable: true,
+            alive: false,
+            reachable: false,
             pages: 0,
             queue: 0,
         });
     }
     let swarm = Arc::new(Mutex::new(swarm));
-    if !config.peers.is_empty() {
-        tokio::spawn(poll_peers(config.peers.clone(), swarm.clone(), client.clone()));
-    }
+    let dials = {
+        let mut list = config.peers.clone();
+        if let Ok(nodes) = engine.lock().unwrap_or_else(|poison| poison.into_inner()).known_nodes() {
+            for node in nodes {
+                if !list.iter().any(|item| item == &node.base) {
+                    list.push(node.base);
+                }
+            }
+        }
+        Arc::new(Mutex::new(list))
+    };
+    tokio::spawn(poll_peers(dials.clone(), swarm.clone(), client.clone(), engine.clone()));
     if let Some(hive) = config.hive.clone() {
         tokio::spawn(dial_hive(
             hive,
@@ -147,7 +175,8 @@ pub async fn serve(engine: Engine, config: ServeConfig) -> Result<(), NodeError>
         releases: config.releases,
         models: config.models,
         downloads: config.downloads,
-        peers: config.peers,
+        peers: config.peers.clone(),
+        self_base: config.self_base.clone().unwrap_or_default(),
         client,
         swarm,
         volunteers,
@@ -160,9 +189,27 @@ pub async fn serve(engine: Engine, config: ServeConfig) -> Result<(), NodeError>
         limits: Arc::new(Mutex::new(HashMap::new())),
         shards: Arc::new(Mutex::new(mds_dht::ShardBook::default())),
         visits: Arc::new(Mutex::new(crate::visits::VisitBook::default())),
+        shells: Arc::new(Mutex::new(crate::shell::ShellBook::default())),
+        dials,
+        note: Arc::new(Mutex::new(String::new())),
+        face_token: crate::face::ensure_face_token(
+            &config
+                .mcp_path
+                .parent()
+                .unwrap_or(std::path::Path::new("data"))
+                .join("face.token"),
+        )?,
     };
     if !config.alone {
         remember_map_neighbors(&state);
+    }
+    if !state.self_base.is_empty() && !state.peers.is_empty() {
+        tokio::spawn(shard_sync_loop(
+            state.engine.clone(),
+            state.client.clone(),
+            state.peers.clone(),
+            state.self_base.clone(),
+        ));
     }
     if state.door.is_some() {
         let admin = admin_router(state.clone());
@@ -188,11 +235,17 @@ pub async fn serve(engine: Engine, config: ServeConfig) -> Result<(), NodeError>
     let app = Router::new()
         .route("/", get(home))
         .route("/search", get(search))
+        .route("/internal/face/meta", get(face_meta))
+        .route("/internal/face/search", get(face_search))
+        .route("/internal/face/cabinet", get(face_cabinet))
         .route("/manifesto", get(manifesto_page))
         .route("/how", get(how_page))
         .route("/help", get(help_page))
         .route("/for-sites", get(for_sites_page))
         .route("/indexing", get(indexing_page))
+        .route("/android", get(android_page))
+        .route("/hive", get(hive_page))
+        .route("/computer", get(computer_page))
         .route("/add", get(add_page).post(add_site))
         .route("/llms", get(llms_page))
         .route("/llms.txt", get(llms_card))
@@ -207,16 +260,24 @@ pub async fn serve(engine: Engine, config: ServeConfig) -> Result<(), NodeError>
         .route("/peer/search", post(peer_search))
         .route("/peer/v1/search", post(peer_search_v1))
         .route("/peer/v1/shard", post(peer_shard_v1))
+        .route("/peer/shard/manifest", get(peer_shard_manifest))
+        .route("/peer/shard/delta", get(peer_shard_delta))
         .route("/peer/status", get(peer_status))
         .route("/peer/join", post(peer_join))
         .route("/peer/pages", post(peer_pages))
         .route("/peer/work", get(peer_work))
+        .route("/peer/fresh", post(peer_fresh))
         .route("/peer/update", get(peer_update))
         .route("/peer/update.bin", get(peer_blob))
         .route("/peer/model", get(peer_model))
         .route("/peer/model/{name}", get(peer_model_file))
         .route("/peer/notice", get(peer_notice).post(peer_notice_from))
         .route("/wire", get(wire))
+        .route("/offers", get(offers))
+        .route("/shell/version", get(shell_version))
+        .route("/shell/work", get(shell_work))
+        .route("/shell/pages", post(shell_pages))
+        .route("/download/pchela-android.apk", get(download_android))
         .layer(axum::middleware::from_fn_with_state(state.clone(), count_visit))
         .with_state(state);
     let listener = TcpListener::bind(&config.listen).await?;
@@ -233,7 +294,7 @@ fn stamp_search(mut response: Response, mark: crate::visits::SearchMark) -> Resp
 fn person_page(path: &str) -> bool {
     matches!(
         path,
-        "/" | "/search" | "/manifesto" | "/how" | "/help" | "/for-sites" | "/indexing" | "/add" | "/llms" | "/download"
+        "/" | "/search" | "/manifesto" | "/how" | "/help" | "/for-sites" | "/indexing" | "/android" | "/hive" | "/computer" | "/add" | "/llms" | "/download"
     )
 }
 
@@ -259,11 +320,28 @@ async fn count_visit(State(state): State<AppState>, request: Request, next: Next
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
     let mut response = next.run(request).await;
-    if !person_page(&path) {
-        return response;
-    }
-    let (token, fresh) = visit_token(cookie.as_deref());
     let mark = response.extensions().get::<crate::visits::SearchMark>().copied();
+    let fresh = remember_visit(&state, &path, cookie.as_deref(), mark).await;
+    if let Some(token) = fresh {
+        if let Ok(value) = HeaderValue::from_str(&format!(
+            "mds_visit={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=1800"
+        )) {
+            response.headers_mut().append(header::SET_COOKIE, value);
+        }
+    }
+    response
+}
+
+async fn remember_visit(
+    state: &AppState,
+    path: &str,
+    cookie: Option<&str>,
+    mark: Option<crate::visits::SearchMark>,
+) -> Option<String> {
+    if !person_page(path) {
+        return None;
+    }
+    let (token, fresh) = visit_token(cookie);
     let now = std::time::Instant::now();
     let delta = {
         let mut book = state.visits.lock().unwrap_or_else(|poison| poison.into_inner());
@@ -279,18 +357,355 @@ async fn count_visit(State(state): State<AppState>, request: Request, next: Next
         guard.add_visit(&delta)
     })
     .await;
-    if fresh {
-        if let Ok(value) = HeaderValue::from_str(&format!(
-            "mds_visit={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=1800"
-        )) {
-            response.headers_mut().append(header::SET_COOKIE, value);
-        }
-    }
-    response
+    fresh.then_some(token)
 }
 
-async fn wire() -> Json<Vec<crate::wire_feed::WireLine>> {
-    Json(crate::wire_feed::headlines().await)
+#[derive(Deserialize)]
+struct FacePath {
+    path: Option<String>,
+}
+
+fn face_allowed(state: &AppState, peer: SocketAddr, headers: &HeaderMap) -> bool {
+    if !operator_on_this_machine(peer, headers) {
+        return false;
+    }
+    let given = headers.get("x-mds-face").and_then(|value| value.to_str().ok()).unwrap_or("");
+    crate::face::token_matches(&state.face_token, given)
+}
+
+async fn face_meta(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Query(ask): Query<FacePath>,
+) -> Result<Json<crate::face::FaceMeta>, StatusCode> {
+    if !face_allowed(&state, peer, &headers) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let path = ask.path.unwrap_or_else(|| "/".into());
+    let cookie = headers.get(header::COOKIE).and_then(|value| value.to_str().ok());
+    let visit_cookie = remember_visit(&state, &path, cookie, None).await;
+    let (sites, pages) = state
+        .engine
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .census()
+        .unwrap_or((0, 0));
+    let notice = mds_update::load_notice(&state.releases);
+    let release_version = mds_update::load_newest(&state.releases)
+        .ok()
+        .and_then(|found| found.map(|(manifest, _)| manifest.version));
+    Ok(Json(crate::face::FaceMeta {
+        sites,
+        pages,
+        notice,
+        region: state.region.clone(),
+        release_version,
+        visit_cookie,
+    }))
+}
+
+async fn face_search(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    Query(params): Query<SearchParams>,
+) -> Result<Json<crate::face::FaceSearch>, StatusCode> {
+    if !face_allowed(&state, peer, &headers) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let paint = gather_search(&state, &headers, &params).await;
+    let cookie = headers.get(header::COOKIE).and_then(|value| value.to_str().ok());
+    let visit_cookie = remember_visit(&state, "/search", cookie, paint.mark).await;
+    let (sites, pages) = state
+        .engine
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .census()
+        .unwrap_or((0, 0));
+    let notice = mds_update::load_notice(&state.releases);
+    let (offer_label, offer_href) = match paint.offer {
+        Some((label, href)) => (Some(label), Some(href)),
+        None => (None, None),
+    };
+    Ok(Json(crate::face::FaceSearch {
+        query: paint.query,
+        open: paint.open,
+        adult: paint.adult,
+        adult_open: paint.adult_open,
+        page: paint.page,
+        error: paint.error,
+        region: paint.region,
+        tab: paint.tab,
+        offer_label,
+        offer_href,
+        refused: paint.refused,
+        adult_cookie: paint.adult_cookie,
+        sites,
+        pages,
+        notice,
+        visit_cookie,
+    }))
+}
+
+async fn face_cabinet(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Result<Json<crate::face::FaceCabinet>, StatusCode> {
+    if !face_allowed(&state, peer, &headers) {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let Some(csrf) = cabinet_csrf(&state, &headers) else {
+        return Ok(Json(crate::face::FaceCabinet {
+            login: true,
+            report: None,
+            sheets: None,
+        }));
+    };
+    let Some((report, sheets)) = compose_cabinet(&state, &csrf, "/admin").await else {
+        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    };
+    Ok(Json(crate::face::FaceCabinet {
+        login: false,
+        report: Some(report),
+        sheets: Some(sheets),
+    }))
+}
+
+#[derive(Deserialize)]
+struct WireAsk {
+    #[serde(default)]
+    feed: String,
+}
+
+async fn wire(State(state): State<AppState>, Query(ask): Query<WireAsk>) -> Json<Vec<crate::wire_feed::WireLine>> {
+    if ask.feed.trim().is_empty() {
+        return Json(crate::wire_feed::headlines().await);
+    }
+    let Some(feed) = mds_types::open_feed(&ask.feed) else {
+        return Json(Vec::new());
+    };
+    if !mds_types::press_rss(&feed) {
+        let engine = state.engine.clone();
+        let saved = feed.clone();
+        let known = tokio::task::spawn_blocking(move || {
+            engine
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .has_news_feed(&saved)
+                .unwrap_or(false)
+        })
+        .await
+        .unwrap_or(false);
+        if !known {
+            return Json(Vec::new());
+        }
+    }
+    Json(crate::wire_feed::one(&feed).await)
+}
+
+async fn offers(State(state): State<AppState>, Query(ask): Query<WireAsk>) -> Json<Vec<crate::offers::ShopLine>> {
+    let Some(feed) = mds_types::open_feed(&ask.feed) else {
+        return Json(Vec::new());
+    };
+    let engine = state.engine.clone();
+    let saved = feed.clone();
+    let known = tokio::task::spawn_blocking(move || {
+        engine
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .has_shop_feed(&saved)
+            .unwrap_or(false)
+    })
+    .await
+    .unwrap_or(false);
+    if !known {
+        return Json(Vec::new());
+    }
+    Json(crate::offers::read(&feed).await)
+}
+
+#[derive(serde::Serialize)]
+struct ShellRelease {
+    version: String,
+    apk: String,
+}
+
+async fn shell_version(State(state): State<AppState>) -> Json<ShellRelease> {
+    let ready = state.downloads.join("pchela-android.apk").is_file();
+    Json(ShellRelease {
+        version: if ready { "0.1.9" } else { "0.1.0" }.to_string(),
+        apk: "/download/pchela-android.apk".to_string(),
+    })
+}
+
+fn pace_for_wish(
+    wish: &str,
+    normal: mds_index::ShellPace,
+    ceiling: mds_index::ShellCeiling,
+) -> mds_index::ShellPace {
+    let max_batch = ceiling.max_batch.max(normal.batch).min(30);
+    let min_gap = ceiling.min_gap.min(normal.gap_min).clamp(1, 60);
+    match wish {
+        "server" => mds_index::ShellPace {
+            batch: max_batch,
+            gap_min: min_gap,
+            window_max: normal.window_max,
+        },
+        "fast" => mds_index::ShellPace {
+            batch: normal.batch.max(8).min(max_batch),
+            gap_min: normal.gap_min.min(2).max(min_gap),
+            window_max: normal.window_max,
+        },
+        _ => normal,
+    }
+}
+
+fn shell_header(headers: &HeaderMap) -> Option<String> {
+    let id = headers.get("x-mds-shell").and_then(|value| value.to_str().ok())?.trim();
+    if crate::shell::shell_id_ok(id) {
+        Some(id.to_string())
+    } else {
+        None
+    }
+}
+
+async fn shell_work(State(state): State<AppState>, headers: HeaderMap) -> Json<CrawlWork> {
+    let Some(id) = shell_header(&headers) else {
+        return Json(CrawlWork { urls: Vec::new(), pause_secs: 600 });
+    };
+    let engine = state.engine.clone();
+    let saved = id.clone();
+    let wish = headers
+        .get("x-mds-wish")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("hive")
+        .trim()
+        .to_string();
+    let pace = tokio::task::spawn_blocking(move || {
+        let guard = engine.lock().unwrap_or_else(|poison| poison.into_inner());
+        let _ = guard.note_shell(&saved);
+        let normal = guard.shell_pace().unwrap_or(mds_index::ShellPace { batch: 2, gap_min: 10, window_max: 4 });
+        let ceiling = guard.shell_ceiling().unwrap_or(mds_index::ShellCeiling { max_batch: 8, min_gap: 1 });
+        let pace = pace_for_wish(&wish, normal, ceiling);
+        let grants = guard.shell_grants().unwrap_or(60);
+        (pace, grants)
+    })
+    .await
+    .unwrap_or((mds_index::ShellPace { batch: 2, gap_min: 10, window_max: 4 }, 60));
+    let (pace, grants) = pace;
+    let per_phone = (600 / pace.gap_min.max(1)).clamp(pace.window_max, 30);
+    let limits = crate::shell::ShellLimits {
+        batch: pace.batch as usize,
+        gap: Duration::from_secs(pace.gap_min as u64 * 60),
+        window_max: per_phone as usize,
+        global_max: grants as usize,
+    };
+    let now = std::time::Instant::now();
+    let pause_secs = pace.gap_min as u64 * 60;
+    if !state
+        .shells
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .ready(&id, now, limits)
+    {
+        return Json(CrawlWork { urls: Vec::new(), pause_secs });
+    }
+    let hold = (pause_secs as i64).clamp(600, 1800);
+    let engine = state.engine.clone();
+    let batch = pace.batch as usize;
+    let claimed = tokio::task::spawn_blocking(move || {
+        let guard = engine.lock().unwrap_or_else(|poison| poison.into_inner());
+        guard.claim_urls(batch, hold).unwrap_or_default()
+    })
+    .await
+    .unwrap_or_default();
+    let urls = state
+        .shells
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .take(&id, claimed.clone(), now, limits);
+    if urls.len() < claimed.len() {
+        let leftover: Vec<String> = claimed.into_iter().filter(|url| !urls.contains(url)).collect();
+        let engine = state.engine.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            let guard = engine.lock().unwrap_or_else(|poison| poison.into_inner());
+            let _ = guard.release_lease(&leftover);
+        })
+        .await;
+    }
+    Json(CrawlWork { urls, pause_secs })
+}
+
+async fn shell_pages(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(pages): Json<Vec<PushedPage>>,
+) -> StatusCode {
+    let Some(id) = shell_header(&headers) else {
+        return StatusCode::NOT_FOUND;
+    };
+    let now = std::time::Instant::now();
+    let wish = headers
+        .get("x-mds-wish")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("hive")
+        .trim()
+        .to_string();
+    let batch_cap = {
+        let guard = state.engine.lock().unwrap_or_else(|poison| poison.into_inner());
+        let normal = guard.shell_pace().unwrap_or(mds_index::ShellPace {
+            batch: 2,
+            gap_min: 10,
+            window_max: 4,
+        });
+        let ceiling = guard.shell_ceiling().unwrap_or(mds_index::ShellCeiling {
+            max_batch: 8,
+            min_gap: 1,
+        });
+        pace_for_wish(&wish, normal, ceiling).batch as usize
+    };
+    let batch: Vec<PushedPage> = {
+        let mut shells = state.shells.lock().unwrap_or_else(|poison| poison.into_inner());
+        pages
+            .into_iter()
+            .take(batch_cap)
+            .filter(|page| shells.accepts(&id, &page.url, now))
+            .filter_map(|page| {
+                let host = host_of_url(&page.url)?;
+                let text: String = page.text.chars().take(20_000).collect();
+                if text.trim().chars().count() < 40 {
+                    return None;
+                }
+                Some(PushedPage {
+                    url: page.url,
+                    title: page.title,
+                    host: bare_host(&host),
+                    text,
+                    links: page.links.into_iter().take(20).collect(),
+                    simhash: page.simhash,
+                    anchors: page.anchors.into_iter().take(20).collect(),
+                })
+            })
+            .collect()
+    };
+    if batch.is_empty() {
+        return StatusCode::NO_CONTENT;
+    }
+    let engine = state.engine.clone();
+    let stored = tokio::task::spawn_blocking(move || {
+        let mut guard = engine.lock().unwrap_or_else(|poison| poison.into_inner());
+        let stored = guard.accept_remote_pages(batch)?;
+        let _ = guard.note_shell_pages(stored as i64);
+        Ok::<usize, crate::NodeError>(stored)
+    })
+    .await;
+    if stored.ok().and_then(|item| item.ok()).is_some() {
+        StatusCode::NO_CONTENT
+    } else {
+        StatusCode::INTERNAL_SERVER_ERROR
+    }
 }
 
 async fn peer_search(
@@ -373,6 +788,23 @@ async fn peer_model_file(State(state): State<AppState>, Path(name): Path<String>
         return StatusCode::NOT_FOUND.into_response();
     }
     send_file(dir.join(name), false).await
+}
+
+async fn download_android(State(state): State<AppState>) -> Response {
+    let path = state.downloads.join("pchela-android.apk");
+    if !path.is_file() {
+        return Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+            .body(Body::from("Оболочка для Android на этом улье ещё не лежит"))
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+    }
+    let mut response = send_file(path, true).await;
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/vnd.android.package-archive"),
+    );
+    response
 }
 
 async fn download_linux(State(state): State<AppState>) -> Response {
@@ -509,12 +941,12 @@ async fn peer_pages(
     let Some(bee) = bee_header(&headers) else {
         return Err(StatusCode::NOT_FOUND);
     };
-    if state.bees.lock().unwrap_or_else(|poison| poison.into_inner()).host_of(&bee).is_none() {
+    let Some(site) = state.bees.lock().unwrap_or_else(|poison| poison.into_inner()).host_of(&bee) else {
         return Err(StatusCode::NOT_FOUND);
-    }
-    let batch: Vec<(String, String, String, String)> = pages
+    };
+    let batch: Vec<PushedPage> = pages
         .into_iter()
-        .take(8)
+        .take(40)
         .filter(|page| {
             state
                 .bees
@@ -524,7 +956,15 @@ async fn peer_pages(
         })
         .filter_map(|page| {
             let host = host_of_url(&page.url)?;
-            Some((page.url, page.title, bare_host(&host), page.text))
+            Some(PushedPage {
+                url: page.url,
+                title: page.title,
+                host: bare_host(&host),
+                text: page.text.chars().take(80_000).collect(),
+                links: page.links.into_iter().take(20).collect(),
+                simhash: page.simhash,
+                anchors: page.anchors.into_iter().take(20).collect(),
+            })
         })
         .collect();
     if batch.is_empty() {
@@ -533,7 +973,9 @@ async fn peer_pages(
     let engine = state.engine.clone();
     tokio::task::spawn_blocking(move || {
         let mut guard = engine.lock().unwrap_or_else(|poison| poison.into_inner());
-        guard.accept_remote_pages(batch)
+        let stored = guard.accept_remote_pages(batch)?;
+        let _ = guard.note_bee_pages(&site, stored as i64);
+        Ok::<usize, crate::NodeError>(stored)
     })
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -552,9 +994,11 @@ async fn peer_work(
         return Err(StatusCode::NOT_FOUND);
     }
     let engine = state.engine.clone();
-    let urls = tokio::task::spawn_blocking(move || {
+    let (urls, pause_secs) = tokio::task::spawn_blocking(move || {
         let guard = engine.lock().unwrap_or_else(|poison| poison.into_inner());
-        guard.pending_urls(4)
+        let pace = guard.bee_pace().unwrap_or(mds_index::BeePace { batch: 4, gap_secs: 600 });
+        let hold = pace.gap_secs.clamp(600, 1800);
+        guard.claim_urls(pace.batch as usize, hold).map(|urls| (urls, pace.gap_secs as u64))
     })
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -564,7 +1008,51 @@ async fn peer_work(
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
         .assign(&bee, urls.clone());
-    Ok(Json(CrawlWork { urls }))
+    Ok(Json(CrawlWork { urls, pause_secs }))
+}
+
+#[derive(Deserialize)]
+struct FreshPage {
+    url: String,
+    simhash: u64,
+}
+
+#[derive(Deserialize)]
+struct FreshAsk {
+    pages: Vec<FreshPage>,
+}
+
+#[derive(Serialize)]
+struct FreshAnswer {
+    want: Vec<String>,
+}
+
+async fn peer_fresh(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(ask): Json<FreshAsk>,
+) -> Result<Json<FreshAnswer>, StatusCode> {
+    let Some(bee) = bee_header(&headers) else {
+        return Err(StatusCode::NOT_FOUND);
+    };
+    if state.bees.lock().unwrap_or_else(|poison| poison.into_inner()).host_of(&bee).is_none() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let pairs: Vec<(String, u64)> = ask
+        .pages
+        .into_iter()
+        .take(40)
+        .map(|page| (page.url, page.simhash))
+        .collect();
+    let engine = state.engine.clone();
+    let want = tokio::task::spawn_blocking(move || {
+        let guard = engine.lock().unwrap_or_else(|poison| poison.into_inner());
+        guard.fresh_urls(&pairs)
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(FreshAnswer { want }))
 }
 
 fn bee_header(headers: &HeaderMap) -> Option<String> {
@@ -578,13 +1066,15 @@ fn bee_header(headers: &HeaderMap) -> Option<String> {
 
 async fn operator_act(
     State(state): State<AppState>,
-    request: axum::extract::Request,
+    OriginalUri(uri): OriginalUri,
+    request: Request,
 ) -> Response {
+    let base = cabinet_base(uri.path());
     let headers = request.headers().clone();
     let Some(csrf) = cabinet_csrf(&state, &headers) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let Ok(bytes) = axum::body::to_bytes(request.into_body(), 2_000).await else {
+    let Ok(bytes) = axum::body::to_bytes(request.into_body(), 8_000).await else {
         return StatusCode::BAD_REQUEST.into_response();
     };
     let text = String::from_utf8_lossy(&bytes);
@@ -597,7 +1087,7 @@ async fn operator_act(
         };
         return match door.issue_mcp() {
             Ok(secret) => Html(format!(
-                "<!doctype html><meta charset=\"utf-8\"><title>Ключ MCP</title><body><main><p>Ключ показан один раз. Адрес: https://admin.&lt;домен этой ноды&gt;/mcp, порт 443.</p><pre>{}</pre><p><a href=\"/operator\">Назад</a></p></main></body>",
+                "<!doctype html><meta charset=\"utf-8\"><title>Ключ MCP</title><body><main><p>Ключ показан один раз. Адрес MCP: {base}/mcp на этом же сайте. Когда появится домен, тот же ключ пойдёт на https://admin.&lt;домен&gt;/mcp, порт 443.</p><pre>{}</pre><p><a href=\"{base}/operator\">Назад</a></p></main></body>",
                 secret
             ))
             .into_response(),
@@ -609,14 +1099,154 @@ async fn operator_act(
             return StatusCode::NOT_FOUND.into_response();
         };
         let _ = door.revoke_mcp();
-        return Response::builder()
-            .status(StatusCode::SEE_OTHER)
-            .header(header::LOCATION, "/operator")
-            .body(Body::empty())
-            .unwrap_or_else(|_| StatusCode::NO_CONTENT.into_response());
+        return see_other(&format!("{base}/operator"));
+    }
+    let action = form_field(&text, "action");
+    if action == "shell_pace" {
+        let batch = form_field(&text, "batch").parse().unwrap_or(2);
+        let gap = form_field(&text, "gap").parse().unwrap_or(10);
+        let window = form_field(&text, "window").parse().unwrap_or(4);
+        let engine = state.engine.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            engine.lock().unwrap_or_else(|poison| poison.into_inner()).set_shell_pace(batch, gap, window)
+        })
+        .await;
+        let max_batch = form_field(&text, "max_batch").parse().unwrap_or(8);
+        let min_gap = form_field(&text, "min_gap").parse().unwrap_or(1);
+        let grants = form_field(&text, "grants").parse().unwrap_or(60);
+        let engine = state.engine.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            let guard = engine.lock().unwrap_or_else(|poison| poison.into_inner());
+            let _ = guard.set_shell_ceiling(max_batch, min_gap);
+            let _ = guard.set_shell_grants(grants);
+        })
+        .await;
+        return cabinet_note(&state, base, "Темп телефонов сохранён. Обычный режим берёт первые три числа. Быстрый режим и режим сервера не выходят за потолок. Общий потолок — на эту машину.");
+    }
+    if action == "refresh_pace" {
+        let batch = form_field(&text, "batch").parse().unwrap_or(1);
+        let gap = form_field(&text, "gap").parse().unwrap_or(120);
+        let engine = state.engine.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            engine.lock().unwrap_or_else(|poison| poison.into_inner()).set_refresh_pace(batch, gap)
+        })
+        .await;
+        return cabinet_note(&state, base, "Скорость переобхода сохранена. Уже лежащие обычные страницы проверяются отдельно от новых адресов.");
+    }
+    if action == "crawl_pace" {
+        let batch = form_field(&text, "batch").parse().unwrap_or(4);
+        let gap = form_field(&text, "gap").parse().unwrap_or(10);
+        let engine = state.engine.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            engine.lock().unwrap_or_else(|poison| poison.into_inner()).set_crawl_pace(batch, gap)
+        })
+        .await;
+        return cabinet_note(&state, base, "Скорость улья сохранена. Следующий заход обхода уже с этими числами.");
+    }
+    if action == "bee_pace" {
+        let batch = form_field(&text, "batch").parse().unwrap_or(4);
+        let gap = form_field(&text, "gap").parse().unwrap_or(600);
+        let engine = state.engine.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            engine.lock().unwrap_or_else(|poison| poison.into_inner()).set_bee_pace(batch, gap)
+        })
+        .await;
+        *state.note.lock().unwrap_or_else(|poison| poison.into_inner()) =
+            "Скорость пчёл сохранена. Улей отдаёт чужие адреса этим темпом.".into();
+        return see_other(&format!("{base}/operator?sheet=bees"));
+    }
+    if action == "enqueue" {
+        let url = form_field(&text, "url");
+        if url.len() > 500 || url.is_empty() {
+            return cabinet_note(&state, base, "Адрес слишком длинный.");
+        }
+        let check = mds_crawl::check_site(&url).await;
+        if !check.queue.is_empty() {
+            let engine = state.engine.clone();
+            let queue = check.queue.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                engine.lock().unwrap_or_else(|poison| poison.into_inner()).enqueue_next(&queue)
+            })
+            .await;
+        }
+        let line = check.lines.first().map(|line| line.text.clone()).unwrap_or_else(|| "Адрес проверен.".into());
+        return cabinet_note_sheet(&state, base, &line, "index");
+    }
+    if action == "mute" || action == "unmute" {
+        let host = host_field(&form_field(&text, "host"));
+        if host.is_empty() || !host.contains('.') {
+            return cabinet_note_sheet(&state, base, "Нужен адрес сайта, например example.ru.", "index");
+        }
+        let engine = state.engine.clone();
+        let saved = host.clone();
+        let hiding = action == "mute";
+        let changed = tokio::task::spawn_blocking(move || {
+            let mut guard = engine.lock().unwrap_or_else(|poison| poison.into_inner());
+            if hiding {
+                guard.mute_host(&saved)
+            } else {
+                guard.unmute_host(&saved)
+            }
+        })
+        .await;
+        if changed.ok().and_then(|result| result.ok()).is_none() {
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+        let line = if hiding {
+            format!("Сайт {host} скрыт из выдачи этой ноды. Страницы в базе остались. Другие ульи этот список не видят.")
+        } else {
+            format!("Сайт {host} снова в выдаче этой ноды.")
+        };
+        return cabinet_note_sheet(&state, base, &line, "index");
+    }
+    if action == "forget_node" {
+        let node = node_base(&form_field(&text, "base"));
+        if let Some(node) = node {
+            let engine = state.engine.clone();
+            let saved = node.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                engine.lock().unwrap_or_else(|poison| poison.into_inner()).forget_node(&saved)
+            })
+            .await;
+            state.dials.lock().unwrap_or_else(|poison| poison.into_inner()).retain(|item| item != &node);
+            return cabinet_note(&state, base, "Нода убрана из перечня.");
+        }
+        return cabinet_note(&state, base, "Адрес ноды не похож на http://хост:порт.");
+    }
+    if action == "handshake" {
+        let Some(node) = node_base(&form_field(&text, "base")) else {
+            return cabinet_note(&state, base, "Адрес ноды не похож на http://хост:порт.");
+        };
+        let engine = state.engine.clone();
+        let saved = node.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            engine.lock().unwrap_or_else(|poison| poison.into_inner()).remember_node(&saved)
+        })
+        .await;
+        {
+            let mut dials = state.dials.lock().unwrap_or_else(|poison| poison.into_inner());
+            if !dials.iter().any(|item| item == &node) {
+                dials.push(node.clone());
+            }
+        }
+        let started = std::time::Instant::now();
+        let response = state.client.get(format!("{node}/peer/status")).send().await;
+        let elapsed = started.elapsed().as_millis() as u64;
+        let alive = response.as_ref().map(|item| item.status().is_success()).unwrap_or(false);
+        let engine = state.engine.clone();
+        let saved = node.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            engine.lock().unwrap_or_else(|poison| poison.into_inner()).touch_node(&saved, alive, elapsed)
+        })
+        .await;
+        let line = if alive {
+            format!("Нода ответила за {elapsed} мс.")
+        } else {
+            "Нода не ответила. Адрес сохранён, улей спросит её ещё раз.".into()
+        };
+        return cabinet_note(&state, base, &line);
     }
     let host = bare_host(&form_field(&text, "host"));
-    let action = form_field(&text, "action");
     if host.is_empty() {
         return StatusCode::BAD_REQUEST.into_response();
     }
@@ -650,7 +1280,7 @@ async fn operator_act(
     drop(book);
     Response::builder()
         .status(StatusCode::SEE_OTHER)
-        .header(header::LOCATION, "/operator")
+        .header(header::LOCATION, format!("{base}/operator"))
         .body(Body::empty())
         .unwrap_or_else(|_| StatusCode::NO_CONTENT.into_response())
 }
@@ -660,7 +1290,7 @@ fn form_field(body: &str, key: &str) -> String {
         .find_map(|pair| {
             let (name, value) = pair.split_once('=')?;
             if name == key {
-                Some(value.replace('+', " ").trim().to_string())
+                Some(form_decode(value).trim().to_string())
             } else {
                 None
             }
@@ -668,7 +1298,64 @@ fn form_field(body: &str, key: &str) -> String {
         .unwrap_or_default()
 }
 
-#[cfg(test)]
+fn form_decode(input: &str) -> String {
+    let mut bytes = Vec::new();
+    let raw = input.as_bytes();
+    let mut index = 0;
+    while index < raw.len() {
+        match raw[index] {
+            b'+' => {
+                bytes.push(b' ');
+                index += 1;
+            }
+            b'%' if index + 2 < raw.len() => {
+                let hex = &input[index + 1..index + 3];
+                if let Ok(byte) = u8::from_str_radix(hex, 16) {
+                    bytes.push(byte);
+                    index += 3;
+                } else {
+                    bytes.push(b'%');
+                    index += 1;
+                }
+            }
+            byte => {
+                bytes.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+fn node_base(raw: &str) -> Option<String> {
+    let raw = raw.trim().trim_end_matches('/');
+    if raw.len() > 200 || raw.contains('@') || raw.contains('\\') || raw.contains(' ') {
+        return None;
+    }
+    let rest = raw.strip_prefix("https://").or_else(|| raw.strip_prefix("http://"))?;
+    if rest.is_empty() || rest.starts_with('/') {
+        return None;
+    }
+    Some(raw.to_string())
+}
+
+fn cabinet_note(state: &AppState, base: &str, note: &str) -> Response {
+    cabinet_note_sheet(state, base, note, "node")
+}
+
+fn cabinet_note_sheet(state: &AppState, base: &str, note: &str, sheet: &str) -> Response {
+    *state.note.lock().unwrap_or_else(|poison| poison.into_inner()) = note.to_string();
+    see_other(&format!("{base}/operator?sheet={sheet}"))
+}
+
+fn host_field(raw: &str) -> String {
+    let raw = raw.trim();
+    if let Some(host) = host_of_url(raw) {
+        return bare_host(&host);
+    }
+    bare_host(raw.split(['/', '?', '#']).next().unwrap_or(""))
+}
+
 fn operator_on_this_machine(peer: SocketAddr, headers: &HeaderMap) -> bool {
     if !peer.ip().is_loopback() {
         return false;
@@ -704,6 +1391,18 @@ async fn how_page(State(state): State<AppState>) -> Html<String> {
 
 async fn indexing_page(State(state): State<AppState>) -> Html<String> {
     painted(&state, page_indexing())
+}
+
+async fn android_page(State(state): State<AppState>) -> Html<String> {
+    painted(&state, page_android())
+}
+
+async fn hive_page(State(state): State<AppState>) -> Html<String> {
+    painted(&state, page_hive())
+}
+
+async fn computer_page(State(state): State<AppState>) -> Html<String> {
+    painted(&state, page_computer())
 }
 
 async fn help_page(State(state): State<AppState>) -> Html<String> {
@@ -878,68 +1577,267 @@ fn onnx_dll() -> Option<Vec<u8>> {
     paths.into_iter().find(|path| path.is_file()).and_then(|path| std::fs::read(path).ok())
 }
 
+struct SearchPaint {
+    query: String,
+    open: Vec<Hit>,
+    adult: Vec<Hit>,
+    adult_open: bool,
+    page: usize,
+    error: Option<String>,
+    region: Option<String>,
+    tab: String,
+    offer: Option<(String, String)>,
+    mark: Option<crate::visits::SearchMark>,
+    adult_cookie: bool,
+    refused: bool,
+}
+
+enum LocalReady {
+    Ready(Vec<Hit>, Option<(QuantVector, u16)>),
+    NeedModel,
+}
+
+async fn local_search(
+    engine: &Arc<Mutex<Engine>>,
+    query: &str,
+    kind_mask: u32,
+) -> Result<(Vec<Hit>, Option<(QuantVector, u16)>), NodeError> {
+    let started = std::time::Instant::now();
+    let eng = engine.clone();
+    let query_for_cache = query.to_string();
+    let phase = tokio::task::spawn_blocking(move || {
+        let mut guard = eng.lock().unwrap_or_else(|poison| poison.into_inner());
+        if let Some(ask) = site_ask(&query_for_cache) {
+            let hits = guard.pages_of_site(&ask.host, &ask.words, kind_mask)?;
+            guard.note_search(started.elapsed().as_millis());
+            return Ok::<_, NodeError>(LocalReady::Ready(hits, None));
+        }
+        if let Some((hits, vector)) = guard.cached_search(&query_for_cache, kind_mask) {
+            let bucket = guard.semantic_bucket(&vector);
+            guard.note_search(started.elapsed().as_millis());
+            return Ok(LocalReady::Ready(hits, Some((vector, bucket))));
+        }
+        guard.set_search_first(true);
+        Ok(LocalReady::NeedModel)
+    })
+    .await
+    .map_err(|_| NodeError::Message("поиск прерван".into()))??;
+    match phase {
+        LocalReady::Ready(hits, ranked) => Ok((hits, ranked)),
+        LocalReady::NeedModel => finish_fresh_search(engine, query, kind_mask, started).await,
+    }
+}
+
+async fn finish_fresh_search(
+    engine: &Arc<Mutex<Engine>>,
+    query: &str,
+    kind_mask: u32,
+    started: std::time::Instant,
+) -> Result<(Vec<Hit>, Option<(QuantVector, u16)>), NodeError> {
+    let mut embedder = loop {
+        let eng = engine.clone();
+        let taken = tokio::task::spawn_blocking(move || eng.lock().unwrap_or_else(|poison| poison.into_inner()).take_model())
+            .await
+            .map_err(|_| NodeError::Message("поиск прерван".into()))?;
+        if let Some(embedder) = taken {
+            break embedder;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    };
+    let query_for_model = query.to_string();
+    let embedded = tokio::task::spawn_blocking(move || {
+        let result = embedder.embed_query(&query_for_model);
+        (embedder, result)
+    })
+    .await
+    .map_err(|_| NodeError::Message("поиск прерван".into()))?;
+    let (embedder, vector) = embedded;
+    let vector = match vector {
+        Ok(vector) => vector,
+        Err(err) => {
+            let eng = engine.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                let mut guard = eng.lock().unwrap_or_else(|poison| poison.into_inner());
+                guard.give_model(embedder);
+                guard.set_search_first(false);
+            })
+            .await;
+            return Err(NodeError::Message(err.to_string()));
+        }
+    };
+    let eng = engine.clone();
+    let query_owned = query.to_string();
+    tokio::task::spawn_blocking(move || {
+        let mut guard = eng.lock().unwrap_or_else(|poison| poison.into_inner());
+        guard.give_model(embedder);
+        guard.set_search_first(false);
+        let (hits, quant) = guard.finish_search(&query_owned, kind_mask, vector)?;
+        let bucket = guard.semantic_bucket(&quant);
+        guard.note_search(started.elapsed().as_millis());
+        Ok((hits, Some((quant, bucket))))
+    })
+    .await
+    .map_err(|_| NodeError::Message("поиск прерван".into()))?
+}
+
+async fn spool_loop(engine: Arc<Mutex<Engine>>) {
+    loop {
+        let eng = engine.clone();
+        let claimed = tokio::task::spawn_blocking(move || {
+            let mut guard = eng.lock().unwrap_or_else(|poison| poison.into_inner());
+            guard.claim_passage_batch()
+        })
+        .await;
+        let claim = match claimed {
+            Ok(Ok(claim)) => claim,
+            _ => {
+                tokio::time::sleep(Duration::from_millis(400)).await;
+                continue;
+            }
+        };
+        match claim {
+            crate::engine::PassageClaim::Idle => tokio::time::sleep(Duration::from_millis(200)).await,
+            crate::engine::PassageClaim::Yield => tokio::time::sleep(Duration::from_millis(20)).await,
+            crate::engine::PassageClaim::Again => {}
+            crate::engine::PassageClaim::Ready(mut batch) => {
+                let embedded = batch.embed();
+                let eng = engine.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    let mut guard = eng.lock().unwrap_or_else(|poison| poison.into_inner());
+                    match embedded {
+                        Ok(vectors) => {
+                            let _ = guard.finish_passage_batch(batch, vectors);
+                        }
+                        Err(_) => guard.cancel_passage_batch(batch),
+                    }
+                })
+                .await;
+            }
+        }
+    }
+}
+
 async fn search(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(params): Query<SearchParams>,
 ) -> Response {
-    let query = params.q.unwrap_or_default();
+    let paint = gather_search(&state, &headers, &params).await;
+    let html = if paint.refused {
+        render("", &[], 1, Some("Такой запрос эта нода не ищет."))
+    } else if paint.query.is_empty() {
+        render_results("", &[], &[], false, 1, None, paint.region.as_deref(), "")
+    } else if let Some(error) = &paint.error {
+        render(&paint.query, &[], paint.page, Some(error))
+    } else {
+        let mut html = render_results(
+            &paint.query,
+            &paint.open,
+            &paint.adult,
+            paint.adult_open,
+            paint.page,
+            None,
+            paint.region.as_deref(),
+            &paint.tab,
+        );
+        if let Some((label, href)) = &paint.offer {
+            html = offer_region(html, label, href);
+        }
+        html
+    };
+    let mut response = if let Some(mark) = paint.mark {
+        stamp_search(painted(&state, html).into_response(), mark)
+    } else {
+        painted(&state, html).into_response()
+    };
+    if paint.adult_cookie {
+        if let Ok(value) = HeaderValue::from_str("mds_adult=1; Path=/; Max-Age=2592000; SameSite=Lax; HttpOnly") {
+            response.headers_mut().insert(header::SET_COOKIE, value);
+        }
+    }
+    response
+}
+
+async fn gather_search(state: &AppState, headers: &HeaderMap, params: &SearchParams) -> SearchPaint {
+    let query = params.q.clone().unwrap_or_default();
     let query = query.trim().to_string();
     let page = params.page.unwrap_or(1);
+    let query_geo = geo_in(&query);
     let chosen = match params.region.as_deref() {
-        None => state.region.clone(),
-        Some("") => None,
-        Some(value) => canonical_region(value).map(str::to_string).or_else(|| state.region.clone()),
+        None => state
+            .region
+            .clone()
+            .or_else(|| query_geo.region.map(str::to_string)),
+        Some("") => query_geo.region.map(str::to_string),
+        Some(value) => canonical_region(value)
+            .map(str::to_string)
+            .or_else(|| state.region.clone())
+            .or_else(|| query_geo.region.map(str::to_string)),
     };
     if query.is_empty() {
-        return painted(&state, render_results("", &[], &[], false, 1, None, chosen.as_deref(), "")).into_response();
+        return SearchPaint {
+            query,
+            open: Vec::new(),
+            adult: Vec::new(),
+            adult_open: false,
+            page,
+            error: None,
+            region: chosen,
+            tab: String::new(),
+            offer: None,
+            mark: None,
+            adult_cookie: false,
+            refused: false,
+        };
     }
     if query_lane(&query) == Lane::Hidden {
-        return stamp_search(
-            painted(&state, render("", &[], 1, Some("Такой запрос эта нода не ищет."))).into_response(),
-            crate::visits::SearchMark {
+        return SearchPaint {
+            query,
+            open: Vec::new(),
+            adult: Vec::new(),
+            adult_open: false,
+            page,
+            error: None,
+            region: chosen,
+            tab: String::new(),
+            offer: None,
+            mark: Some(crate::visits::SearchMark {
                 empty: false,
                 failed: false,
                 refused: true,
-            },
-        );
+            }),
+            adult_cookie: false,
+            refused: true,
+        };
     }
-    let adult_open = params.adult.as_deref() == Some("1") || cookie_is(&headers, "mds_adult", "1");
+    let adult_open = params.adult.as_deref() == Some("1") || cookie_is(headers, "mds_adult", "1");
     let tab = params.tab.clone().unwrap_or_default();
     let kind_mask = tab_mask(tab.trim());
-    let engine = state.engine.clone();
-    let query_for_search = query.clone();
-    let local = tokio::task::spawn_blocking(move || {
-        let mut guard = engine.lock().unwrap_or_else(|poison| poison.into_inner());
-        let started = std::time::Instant::now();
-        let (hits, vector) = guard.search_with_vector(&query_for_search, kind_mask)?;
-        let bucket = guard.semantic_bucket(&vector);
-        guard.note_search(started.elapsed().as_millis());
-        Ok::<_, crate::NodeError>((hits, vector, bucket))
-    })
-    .await;
-    let response = match local {
-        Ok(Ok((mut hits, vector, bucket))) => {
-            let targets = {
-                let swarm = state.swarm.lock().unwrap_or_else(|poison| poison.into_inner());
-                let asked = swarm.ask(bucket);
-                if asked.is_empty() {
-                    state.peers.clone()
-                } else {
-                    asked
-                }
-            };
-            if !targets.is_empty() {
-                let req = SearchRequest {
-                    text: query.clone(),
-                    vector,
+    let local = local_search(&state.engine, &query, kind_mask).await;
+    match local {
+        Ok((mut hits, ranked)) => {
+            if let Some((vector, bucket)) = ranked {
+                let targets = {
+                    let swarm = state.swarm.lock().unwrap_or_else(|poison| poison.into_inner());
+                    let asked = swarm.ask(bucket);
+                    if asked.is_empty() {
+                        state.peers.clone()
+                    } else {
+                        asked
+                    }
                 };
-                let (remote, samples) = query_peers(&state.client, &targets, &req).await;
-                let mut swarm = state.swarm.lock().unwrap_or_else(|poison| poison.into_inner());
-                for (base, latency_ms, alive) in samples {
-                    swarm.note_latency(&base, latency_ms, alive);
+                if !targets.is_empty() {
+                    let req = SearchRequest {
+                        text: query.clone(),
+                        vector,
+                    };
+                    let (remote, samples) = query_peers(&state.client, &targets, &req).await;
+                    let mut swarm = state.swarm.lock().unwrap_or_else(|poison| poison.into_inner());
+                    for (base, latency_ms, alive) in samples {
+                        swarm.note_latency(&base, latency_ms, alive);
+                    }
+                    hits = merge_hits(hits, remote);
                 }
-                hits = merge_hits(hits, remote);
             }
             let hosts = state
                 .volunteers
@@ -954,7 +1852,13 @@ async fn search(
             } else {
                 open.retain(|hit| hit.kind & kind_mask != 0);
             }
-            let open = prefer_region(open, chosen.as_deref());
+            let around = match (params.lat, params.lon, params.radius) {
+                (Some(lat), Some(lon), Some(r)) if valid_coords(lat, lon) && r.is_finite() && r > 0.0 => {
+                    Some((lat, lon, r.clamp(0.1, 500.0)))
+                }
+                _ => None,
+            };
+            let open = prefer_geo_radius(open, chosen.as_deref(), query_geo.place, around);
             let logged = open.iter().cloned().chain(adult.iter().cloned()).collect::<Vec<_>>();
             let engine = state.engine.clone();
             let query_for_log = query.clone();
@@ -963,58 +1867,110 @@ async fn search(
                 guard.remember_query(&query_for_log, &logged)
             })
             .await;
-            let mut html = render_results(&query, &open, &adult, adult_open, page, None, chosen.as_deref(), &tab);
-            if let Some((label, href)) = region_button(&state, &query, &tab).await {
-                html = offer_region(html, &label, &href);
-            }
-            stamp_search(
-                painted(&state, html).into_response(),
-                crate::visits::SearchMark {
-                    empty: open.is_empty() && adult.is_empty(),
+            let offer = region_button(state, &query, &tab).await;
+            let empty = open.is_empty() && adult.is_empty();
+            SearchPaint {
+                query,
+                open,
+                adult,
+                adult_open,
+                page,
+                error: None,
+                region: chosen,
+                tab,
+                offer,
+                mark: Some(crate::visits::SearchMark {
+                    empty,
                     failed: false,
                     refused: false,
-                },
-            )
+                }),
+                adult_cookie: params.adult.as_deref() == Some("1"),
+                refused: false,
+            }
         }
-        Ok(Err(err)) => stamp_search(
-            painted(&state, render(&query, &[], page, Some(&err.to_string()))).into_response(),
-            crate::visits::SearchMark {
+        Err(err) => SearchPaint {
+            query,
+            open: Vec::new(),
+            adult: Vec::new(),
+            adult_open,
+            page,
+            error: Some(err.to_string()),
+            region: chosen,
+            tab,
+            offer: None,
+            mark: Some(crate::visits::SearchMark {
                 empty: false,
                 failed: true,
                 refused: false,
-            },
-        ),
-        Err(_) => stamp_search(
-            painted(&state, render(&query, &[], page, Some("поиск прерван"))).into_response(),
-            crate::visits::SearchMark {
-                empty: false,
-                failed: true,
-                refused: false,
-            },
-        ),
-    };
-    if params.adult.as_deref() == Some("1") {
-        let mut response = response;
-        if let Ok(value) = HeaderValue::from_str("mds_adult=1; Path=/; Max-Age=2592000; SameSite=Lax; HttpOnly") {
-            response.headers_mut().insert(header::SET_COOKIE, value);
-        }
-        response
-    } else {
-        response
+            }),
+            adult_cookie: params.adult.as_deref() == Some("1"),
+            refused: false,
+        },
     }
 }
 
-async fn operator(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Response {
-    let Some(csrf) = cabinet_csrf(&state, &headers) else {
-        return StatusCode::NOT_FOUND.into_response();
-    };
+async fn compose_cabinet(state: &AppState, csrf: &str, base: &str) -> Option<(OperatorReport, CabinetSheets)> {
+    let hosts: Vec<String> = state
+        .volunteers
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .iter()
+        .cloned()
+        .collect();
     let engine = state.engine.clone();
+    let hosts_for_db = hosts.clone();
     let rows = tokio::task::spawn_blocking(move || {
         let mut guard = engine.lock().unwrap_or_else(|poison| poison.into_inner());
-        let (searches, avg_ms) = guard.load_snapshot();
+        let searches = guard.searches_last_minute().unwrap_or(0);
+        let (_, avg_ms) = guard.load_snapshot();
+        let pace = guard.shell_pace().unwrap_or(mds_index::ShellPace { batch: 2, gap_min: 10, window_max: 4 });
+        let span = |name: &str| guard.shell_span(name).unwrap_or((0, 0));
+        let shells = (span("day"), span("week"), span("month"), span("all"), pace);
+        let bees = hosts_for_db
+            .iter()
+            .map(|host| {
+                let totals = guard.bee_totals(host).unwrap_or(mds_index::BeeTotals {
+                    day: 0, week: 0, month: 0, all: 0, quiet: true,
+                });
+                (host.clone(), totals)
+            })
+            .collect::<Vec<_>>();
+        let sites = guard.census().map(|(sites, _)| sites).unwrap_or(0) as u64;
+        let crawl = guard.crawl_pace().unwrap_or(mds_index::CrawlPace { batch: 4, gap_secs: 10 });
+        let bee_pace = guard.bee_pace().unwrap_or(mds_index::BeePace { batch: 4, gap_secs: 600 });
+        let ceiling = guard.shell_ceiling().unwrap_or(mds_index::ShellCeiling { max_batch: 8, min_gap: 1 });
+        let refresh = guard.refresh_pace().unwrap_or(mds_index::RefreshPace { batch: 1, gap_secs: 120 });
+        let intake_days = guard
+            .intake_days(30)
+            .unwrap_or_default()
+            .into_iter()
+            .map(|day| (day.day, day.new_pages))
+            .collect::<Vec<_>>();
+        let load = guard.load_hours(24).unwrap_or_default();
+        let picture = (
+            sites,
+            guard.intake_sum("new_pages", "day").unwrap_or(0),
+            guard.intake_sum("new_pages", "yesterday").unwrap_or(0),
+            guard.intake_sum("new_pages", "week").unwrap_or(0),
+            guard.intake_sum("new_pages", "month").unwrap_or(0),
+            guard.intake_sum("changed_pages", "day").unwrap_or(0),
+            guard.intake_sum("same_pages", "day").unwrap_or(0),
+            guard.intake_sum("new_hosts", "day").unwrap_or(0),
+            crawl.batch,
+            crawl.gap_secs,
+            bee_pace.batch,
+            bee_pace.gap_secs,
+            ceiling.max_batch,
+            ceiling.min_gap,
+            intake_days,
+            load.iter().map(|hour| (hour.hour.clone(), hour.cpu_pct)).collect::<Vec<_>>(),
+            load.iter().map(|hour| (hour.hour.clone(), hour.ram_pct)).collect::<Vec<_>>(),
+            guard.leased_count().unwrap_or(0).max(0) as u64,
+            guard.refresh_due().unwrap_or(0),
+            refresh.batch,
+            refresh.gap_secs,
+            guard.shell_grants().unwrap_or(60),
+        );
         let report_head = (
             guard.len().unwrap_or(0) as u64,
             guard.queue_len().unwrap_or(0) as u64,
@@ -1022,7 +1978,7 @@ async fn operator(
             searches,
             avg_ms,
         );
-        guard.recent_queries(50).map(|rows| (report_head, rows))
+        guard.recent_queries(50).map(|rows| (report_head, shells, bees, rows, picture))
     })
     .await;
     let peers = {
@@ -1047,38 +2003,97 @@ async fn operator(
             })
             .collect::<Vec<_>>()
     };
-    match rows {
-        Ok(Ok(((pages, queue, db_bytes, searches_per_minute, avg_ms), rows))) => {
+    let packed = match rows {
+        Ok(Ok(((pages, queue, db_bytes, searches_per_minute, avg_ms), shells, bees, rows, picture))) => {
             let view: Vec<(String, i64, i64, i64, i64)> = rows
                 .into_iter()
                 .map(|row| (row.text, row.results, row.words, row.meaning, row.adult))
                 .collect();
-            painted(
-                &state,
-                page_operator(&OperatorReport {
+            let (day, week, month, all, pace) = shells;
+            let sheets = cabinet_view(&state, &csrf, base, &hosts);
+            let note = std::mem::take(&mut *state.note.lock().unwrap_or_else(|poison| poison.into_inner()));
+            let report = OperatorReport {
                     pages,
                     queue,
                     db_bytes,
                     searches_per_minute,
                     avg_ms,
                     peers,
-                    volunteers: state
-                        .volunteers
-                        .lock()
-                        .unwrap_or_else(|poison| poison.into_inner())
-                        .iter()
-                        .cloned()
+                    shells: ShellLine {
+                        day_apps: day.0,
+                        day_pages: day.1,
+                        week_apps: week.0,
+                        week_pages: week.1,
+                        month_apps: month.0,
+                        month_pages: month.1,
+                        all_apps: all.0,
+                        all_pages: all.1,
+                        batch: pace.batch,
+                        gap_min: pace.gap_min,
+                        window_max: pace.window_max,
+                        max_batch: picture.12,
+                        min_gap: picture.13,
+                        grants: picture.21,
+                    },
+                    bees: bees
+                        .into_iter()
+                        .map(|(host, totals)| BeeLine {
+                            host,
+                            day: totals.day,
+                            week: totals.week,
+                            month: totals.month,
+                            all: totals.all,
+                            quiet: totals.quiet,
+                        })
                         .collect(),
                     refused: state.bees.lock().unwrap_or_else(|poison| poison.into_inner()).refused(),
                     rows: view,
-                    csrf: csrf.clone(),
-                }),
-            )
-            .0
-            .replacen("</main>", &format!("{}</main>", cabinet_tail(&state, &csrf)), 1)
-            .into_response()
+                    note,
+                    csrf: csrf.to_string(),
+                    base: base.to_string(),
+                    sites: picture.0,
+                    new_today: picture.1,
+                    new_yesterday: picture.2,
+                    new_week: picture.3,
+                    new_month: picture.4,
+                    changed_today: picture.5,
+                    same_today: picture.6,
+                    hosts_today: picture.7,
+                    crawl_batch: picture.8,
+                    crawl_gap: picture.9,
+                    bee_batch: picture.10,
+                    bee_gap: picture.11,
+                    intake_days: picture.14,
+                    cpu_hours: picture.15,
+                    ram_hours: picture.16,
+                    leased: picture.17,
+                    refresh_due: picture.18,
+                    refresh_batch: picture.19,
+                    refresh_gap: picture.20,
+                };
+            Some((report, sheets))
         }
-        _ => painted(&state, render("", &[], 1, Some("журнал не открылся"))).into_response(),
+        _ => None,
+    };
+    packed
+}
+
+async fn operator(
+    State(state): State<AppState>,
+    OriginalUri(uri): OriginalUri,
+    headers: HeaderMap,
+) -> Response {
+    let base = cabinet_base(uri.path());
+    let Some(csrf) = cabinet_csrf(&state, &headers) else {
+        return see_other(&format!("{base}/login"));
+    };
+    match compose_cabinet(&state, &csrf, base).await {
+        Some((report, sheets)) => {
+            let sheet = query_sheet(&uri);
+            let (stats, rest) = cabinet_sheets(&sheets, &sheet);
+            painted(&state, page_operator(&report, &stats, &rest, &sheet)).into_response()
+        }
+        None => painted(&state, render("", &[], 1, Some("журнал не открылся"))).into_response(),
     }
 }
 
@@ -1181,9 +2196,14 @@ async fn query_one(client: &reqwest::Client, peer: &str, req: &SearchRequest) ->
                 adult: hit.adult,
                 volunteer: hit.volunteer,
                 region: hit.region,
+                place: hit.place,
+                distance_km: hit.distance_km,
+                lat: hit.lat,
+                lon: hit.lon,
                 kind: hit.kind,
                 media_url: hit.media_url,
                 feed_url: hit.feed_url,
+                news_feed: hit.news_feed,
                 price: hit.price,
             })
             .collect(),
@@ -1201,8 +2221,22 @@ fn merge_hits(local: Vec<Hit>, remote: Vec<Hit>) -> Vec<Hit> {
                     existing.title = hit.title.clone();
                     existing.snippet = hit.snippet.clone();
                     existing.region = hit.region.clone();
-                } else if existing.region.is_none() {
-                    existing.region = hit.region.clone();
+                    existing.place = hit.place.clone();
+                    existing.lat = hit.lat.or(existing.lat);
+                    existing.lon = hit.lon.or(existing.lon);
+                } else {
+                    if existing.region.is_none() {
+                        existing.region = hit.region.clone();
+                    }
+                    if existing.place.is_none() {
+                        existing.place = hit.place.clone();
+                    }
+                    if existing.lat.is_none() {
+                        existing.lat = hit.lat;
+                    }
+                    if existing.lon.is_none() {
+                        existing.lon = hit.lon;
+                    }
                 }
                 existing.via_words |= hit.via_words;
                 existing.via_meaning |= hit.via_meaning;
@@ -1230,9 +2264,10 @@ fn mark_volunteers(hits: &mut Vec<Hit>, hosts: &HashSet<String>) {
     hits.sort_by(|left, right| right.score.partial_cmp(&left.score).unwrap_or(std::cmp::Ordering::Equal));
 }
 
-async fn poll_peers(peers: Vec<String>, swarm: Arc<Mutex<Swarm>>, client: reqwest::Client) {
+async fn poll_peers(dials: Arc<Mutex<Vec<String>>>, swarm: Arc<Mutex<Swarm>>, client: reqwest::Client, engine: Arc<Mutex<Engine>>) {
     loop {
         tokio::time::sleep(Duration::from_secs(15)).await;
+        let peers = dials.lock().unwrap_or_else(|poison| poison.into_inner()).clone();
         for peer in &peers {
             let base = peer.trim().trim_end_matches('/');
             let started = std::time::Instant::now();
@@ -1241,11 +2276,13 @@ async fn poll_peers(peers: Vec<String>, swarm: Arc<Mutex<Swarm>>, client: reqwes
             let Ok(response) = response else {
                 let mut guard = swarm.lock().unwrap_or_else(|poison| poison.into_inner());
                 guard.note_latency(base, elapsed, false);
+                let _ = engine.lock().unwrap_or_else(|poison| poison.into_inner()).touch_node(base, false, elapsed);
                 continue;
             };
             if !response.status().is_success() {
                 let mut guard = swarm.lock().unwrap_or_else(|poison| poison.into_inner());
                 guard.note_latency(base, elapsed, false);
+                let _ = engine.lock().unwrap_or_else(|poison| poison.into_inner()).touch_node(base, false, elapsed);
                 continue;
             }
             let Ok(bytes) = response.bytes().await else {
@@ -1254,6 +2291,7 @@ async fn poll_peers(peers: Vec<String>, swarm: Arc<Mutex<Swarm>>, client: reqwes
             let Ok(status) = serde_json::from_slice::<PeerStatus>(&bytes) else {
                 continue;
             };
+            let reachable = status.holds_all || !status.buckets.is_empty();
             let mut guard = swarm.lock().unwrap_or_else(|poison| poison.into_inner());
             guard.upsert(mds_dht::PeerCard {
                 base: base.to_string(),
@@ -1262,10 +2300,12 @@ async fn poll_peers(peers: Vec<String>, swarm: Arc<Mutex<Swarm>>, client: reqwes
                 holds_all: status.holds_all,
                 latency_ms: elapsed,
                 alive: true,
-                reachable: true,
+                reachable,
                 pages: status.pages.min(u64::from(u32::MAX)) as u32,
                 queue: status.queue.min(u64::from(u32::MAX)) as u32,
             });
+            drop(guard);
+            let _ = engine.lock().unwrap_or_else(|poison| poison.into_inner()).touch_node(base, true, elapsed);
         }
     }
 }
@@ -1326,6 +2366,9 @@ async fn dial_hive(
                 title,
                 host,
                 text,
+                links: Vec::new(),
+                simhash: 0,
+                anchors: Vec::new(),
             })
             .collect();
         let pushed_body = serde_json::to_vec(&pushed).unwrap_or_default();
@@ -1336,6 +2379,144 @@ async fn dial_hive(
             .body(pushed_body)
             .send()
             .await;
+    }
+}
+
+async fn load_loop(engine: Arc<Mutex<Engine>>) {
+    let mut previous = cpu_ticks();
+    loop {
+        tokio::time::sleep(Duration::from_secs(60)).await;
+        let cpu = cpu_percent(&mut previous);
+        let ram = ram_percent();
+        if cpu.is_none() && ram.is_none() {
+            continue;
+        }
+        let cpu = cpu.unwrap_or(0);
+        let ram = ram.unwrap_or(0);
+        let eng = engine.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            let guard = eng.lock().unwrap_or_else(|p| p.into_inner());
+            let _ = guard.note_load(cpu, ram);
+        })
+        .await;
+    }
+}
+
+fn cpu_ticks() -> Option<(u64, u64)> {
+    let text = std::fs::read_to_string("/proc/stat").ok()?;
+    let line = text.lines().next()?;
+    let mut all = 0_u64;
+    let mut idle = 0_u64;
+    for (index, part) in line.split_whitespace().skip(1).enumerate() {
+        let value: u64 = part.parse().ok()?;
+        all += value;
+        if index == 3 || index == 4 {
+            idle += value;
+        }
+    }
+    Some((all, idle))
+}
+
+fn cpu_percent(previous: &mut Option<(u64, u64)>) -> Option<i64> {
+    let now = cpu_ticks()?;
+    let result = if let Some((all, idle)) = *previous {
+        let spent = now.0.saturating_sub(all);
+        let rested = now.1.saturating_sub(idle);
+        if spent == 0 {
+            None
+        } else {
+            Some(((spent.saturating_sub(rested)) * 100 / spent) as i64)
+        }
+    } else {
+        None
+    };
+    *previous = Some(now);
+    result
+}
+
+fn ram_percent() -> Option<i64> {
+    let text = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let mut total = 0_i64;
+    let mut available = 0_i64;
+    for line in text.lines() {
+        let number = |prefix: &str| -> Option<i64> {
+            line.strip_prefix(prefix)?
+                .split_whitespace()
+                .next()?
+                .parse()
+                .ok()
+        };
+        if let Some(value) = number("MemTotal:") {
+            total = value;
+        }
+        if let Some(value) = number("MemAvailable:") {
+            available = value;
+        }
+    }
+    if total <= 0 {
+        return None;
+    }
+    Some(((total - available).clamp(0, total) * 100 / total).clamp(0, 100))
+}
+
+async fn refresh_due(engine: &Arc<Mutex<Engine>>, crawler: &mut mds_crawl::Crawler, last_refresh: &mut std::time::Instant) {
+    let pace = {
+        let eng = engine.clone();
+        tokio::task::spawn_blocking(move || {
+            let guard = eng.lock().unwrap_or_else(|poison| poison.into_inner());
+            guard.refresh_pace().unwrap_or(mds_index::RefreshPace { batch: 1, gap_secs: 120 })
+        })
+        .await
+        .unwrap_or(mds_index::RefreshPace { batch: 1, gap_secs: 120 })
+    };
+    if last_refresh.elapsed() < Duration::from_secs(pace.gap_secs.max(60) as u64) {
+        return;
+    }
+    *last_refresh = std::time::Instant::now();
+    let jobs = {
+        let eng = engine.clone();
+        let limit = pace.batch.clamp(1, 4) as usize;
+        tokio::task::spawn_blocking(move || {
+            let guard = eng.lock().unwrap_or_else(|poison| poison.into_inner());
+            guard.claim_refresh(limit).unwrap_or_default()
+        })
+        .await
+        .unwrap_or_default()
+    };
+    for job in jobs {
+        let hit = crawler.probe(&job.url, job.etag.as_deref(), job.modified.as_deref()).await;
+        let url = job.url.clone();
+        let eng = engine.clone();
+        let status = hit.status;
+        let etag = hit.etag;
+        let modified = hit.modified;
+        let page = hit.page;
+        let gone = hit.gone;
+        let skipped = hit.skipped;
+        let failed = hit.failed;
+        let _ = tokio::task::spawn_blocking(move || {
+            let mut guard = eng.lock().unwrap_or_else(|poison| poison.into_inner());
+            if gone {
+                let _ = guard.drop_urls(&[url]);
+                return;
+            }
+            if skipped {
+                let _ = guard.refresh_after(&url, 14 * 86_400);
+                return;
+            }
+            if failed {
+                let _ = guard.refresh_retry(&url);
+                return;
+            }
+            if let Some(page) = page {
+                let _ = guard.store_refresh(page, etag, modified);
+                return;
+            }
+            if status == 304 {
+                let _ = guard.refresh_quiet(&url, etag.as_deref(), modified.as_deref());
+            }
+        })
+        .await;
     }
 }
 
@@ -1351,14 +2532,28 @@ async fn background_crawl_loop(
     };
     let ct_queries = ["%.ru", "%.su", "%.com", "%.org"];
     let mut ct_round = 0_usize;
+    let mut last_refresh = std::time::Instant::now();
 
     loop {
-        tokio::time::sleep(Duration::from_secs(10)).await;
-        let batch = {
+        let pace = {
             let eng = engine.clone();
             tokio::task::spawn_blocking(move || {
                 let guard = eng.lock().unwrap_or_else(|p| p.into_inner());
-                guard.pending_urls(4).unwrap_or_default()
+                guard.crawl_pace().unwrap_or(mds_index::CrawlPace { batch: 4, gap_secs: 10 })
+            })
+            .await
+            .unwrap_or(mds_index::CrawlPace { batch: 4, gap_secs: 10 })
+        };
+        tokio::time::sleep(Duration::from_secs(pace.gap_secs.max(2) as u64)).await;
+        refresh_due(&engine, &mut crawler, &mut last_refresh).await;
+        crawler.set_limit(pace.batch.clamp(1, 24) as usize);
+        let batch = {
+            let eng = engine.clone();
+            let limit = pace.batch.clamp(1, 24) as usize;
+            let hold = pace.gap_secs.saturating_mul(2).clamp(4, 1800);
+            tokio::task::spawn_blocking(move || {
+                let guard = eng.lock().unwrap_or_else(|p| p.into_inner());
+                guard.claim_urls(limit, hold).unwrap_or_default()
             })
             .await
             .unwrap_or_default()
@@ -1387,7 +2582,21 @@ async fn background_crawl_loop(
 
         let pages = match crawler.crawl(&batch).await {
             Ok(pages) => pages,
-            Err(_) => continue,
+            Err(_) => {
+                let failed = batch.clone();
+                let eng = engine.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    let guard = eng.lock().unwrap_or_else(|p| p.into_inner());
+                    for url in &failed {
+                        if let Some(host) = host_of_url(url) {
+                            let _ = guard.note_host_quiet(&host);
+                        }
+                    }
+                    let _ = guard.mark_seen(&failed);
+                })
+                .await;
+                continue;
+            }
         };
         let gone = crawler.take_gone();
         let mut visited: Vec<String> = pages.iter().map(|p| p.url.clone()).collect();
@@ -1406,16 +2615,45 @@ async fn background_crawl_loop(
 }
 
 fn admin_router(state: AppState) -> Router {
-    Router::new()
+    let door = Router::new()
         .route("/login", get(login_page).post(login_act))
         .route("/logout", post(logout_act))
         .route("/operator", get(operator).post(operator_act))
-        .route("/mcp", post(mcp_act))
+        .route("/mcp", post(mcp_act));
+    let prefixed = door.clone().route("/", get(admin_entry));
+    Router::new()
+        .merge(door)
+        .nest("/admin", prefixed)
         .with_state(state)
 }
 
-async fn login_page() -> Html<String> {
-    Html(crate::admin::login_page(false))
+fn cabinet_base(path: &str) -> &'static str {
+    if path == "/admin" || path.starts_with("/admin/") {
+        "/admin"
+    } else {
+        ""
+    }
+}
+
+fn see_other(location: &str) -> Response {
+    Response::builder()
+        .status(StatusCode::SEE_OTHER)
+        .header(header::LOCATION, location)
+        .body(Body::empty())
+        .unwrap_or_else(|_| StatusCode::NO_CONTENT.into_response())
+}
+
+fn session_cookie(token: &str, base: &str, max_age: u32) -> String {
+    let path = if base.is_empty() { "/" } else { base };
+    format!("mds_session={token}; HttpOnly; SameSite=Strict; Path={path}; Secure; Max-Age={max_age}")
+}
+
+async fn admin_entry() -> Response {
+    see_other("/admin/login")
+}
+
+async fn login_page(OriginalUri(uri): OriginalUri) -> Html<String> {
+    Html(crate::admin::login_page(false, cabinet_base(uri.path())))
 }
 
 #[derive(Deserialize)]
@@ -1427,8 +2665,10 @@ struct LoginForm {
 async fn login_act(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    OriginalUri(uri): OriginalUri,
     Form(form): Form<LoginForm>,
 ) -> Response {
+    let base = cabinet_base(uri.path());
     let Some(door) = &state.door else {
         return StatusCode::NOT_FOUND.into_response();
     };
@@ -1436,30 +2676,25 @@ async fn login_act(
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     }
     let Some((token, _)) = door.login(&form.user, &form.password) else {
-        return Html(crate::admin::login_page(true)).into_response();
+        return Html(crate::admin::login_page(true, base)).into_response();
     };
     Response::builder()
         .status(StatusCode::SEE_OTHER)
-        .header(header::LOCATION, "/operator")
-        .header(
-            header::SET_COOKIE,
-            format!("mds_session={token}; HttpOnly; SameSite=Strict; Path=/; Secure; Max-Age=43200"),
-        )
+        .header(header::LOCATION, format!("{base}/operator"))
+        .header(header::SET_COOKIE, session_cookie(&token, base, 43200))
         .body(Body::empty())
         .unwrap_or_else(|_| StatusCode::NO_CONTENT.into_response())
 }
 
-async fn logout_act(State(state): State<AppState>, headers: HeaderMap) -> Response {
+async fn logout_act(State(state): State<AppState>, OriginalUri(uri): OriginalUri, headers: HeaderMap) -> Response {
+    let base = cabinet_base(uri.path());
     if let (Some(door), Some(token)) = (&state.door, crate::admin::cookie_token(&headers)) {
         door.logout(&token);
     }
     Response::builder()
         .status(StatusCode::SEE_OTHER)
-        .header(header::LOCATION, "/login")
-        .header(
-            header::SET_COOKIE,
-            "mds_session=; HttpOnly; SameSite=Strict; Path=/; Secure; Max-Age=0",
-        )
+        .header(header::LOCATION, format!("{base}/login"))
+        .header(header::SET_COOKIE, session_cookie("", base, 0))
         .body(Body::empty())
         .unwrap_or_else(|_| StatusCode::NO_CONTENT.into_response())
 }
@@ -1497,13 +2732,28 @@ async fn mcp_act(State(state): State<AppState>, headers: HeaderMap, request: axu
     }
 }
 
+fn query_sheet(uri: &axum::http::Uri) -> String {
+    uri.query()
+        .and_then(|query| {
+            query.split('&').find_map(|part| {
+                let (key, value) = part.split_once('=')?;
+                if key == "sheet" {
+                    Some(value.to_string())
+                } else {
+                    None
+                }
+            })
+        })
+        .unwrap_or_else(|| "node".into())
+}
+
 fn cabinet_csrf(state: &AppState, headers: &HeaderMap) -> Option<String> {
     let door = state.door.as_ref()?;
     let token = crate::admin::cookie_token(headers)?;
     door.session(&token)
 }
 
-fn cabinet_tail(state: &AppState, csrf: &str) -> String {
+fn cabinet_view(state: &AppState, csrf: &str, base: &str, bees: &[String]) -> CabinetSheets {
     let guard = state.engine.lock().unwrap_or_else(|poison| poison.into_inner());
     let day = guard.query_counts("day").unwrap_or_default();
     let week = guard.query_counts("week").unwrap_or_default();
@@ -1511,77 +2761,73 @@ fn cabinet_tail(state: &AppState, csrf: &str) -> String {
     let visits_day = guard.visit_span("day").unwrap_or_default();
     let visits_week = guard.visit_span("week").unwrap_or_default();
     let visits_month = guard.visit_span("month").unwrap_or_default();
+    let days = guard.visit_days(30).unwrap_or_default();
     let pages = guard.list_index(None, None, 0).unwrap_or_default();
+    let kind_counts = guard.kind_counts().unwrap_or_default();
+    let nodes = guard.known_nodes().unwrap_or_default();
+    let guard_muted = guard.muted_hosts().unwrap_or_default();
     drop(guard);
     let map = state.map.lock().unwrap_or_else(|poison| poison.into_inner());
-    let mut body = format!(
-        "<h2>Эта нода</h2><ul class=\"load\"><li>Версия: {}</li><li>Край: {}</li><li>Поколение модели: {}</li></ul>",
-        mds_update::VERSION,
-        state.region.as_deref().unwrap_or("не задан"),
-        state.model
-    );
-    body.push_str("<h2>Карта сети</h2>");
-    if let Some(map) = map.as_ref() {
-        body.push_str(&format!("<p>Версия карты {}.</p><ul class=\"check\">", map.version));
-        for place in &map.places {
-            let door = place.hives.first().map(|door| door.base.as_str()).unwrap_or("нет входа");
-            body.push_str(&format!(
-                "<li>{} / {} — {}</li>",
-                esc_text(&place.place.country),
-                esc_text(&place.place.region),
-                esc_text(door)
-            ));
-        }
-        body.push_str("</ul>");
+    let (map_version, map_places) = if let Some(map) = map.as_ref() {
+        let places = map
+            .places
+            .iter()
+            .map(|place| MapLine {
+                country: place.place.country.clone(),
+                region: place.place.region.clone(),
+                door: place
+                    .hives
+                    .first()
+                    .map(|door| door.base.clone())
+                    .unwrap_or_else(|| "нет входа".into()),
+            })
+            .collect();
+        (Some(map.version), places)
     } else {
-        body.push_str("<p>Подписанной карты нет, поэтому кнопка другого края не показывается.</p>");
+        (None, Vec::new())
+    };
+    CabinetSheets {
+        version: mds_update::VERSION.into(),
+        region_label: state.region.clone().unwrap_or_else(|| "не задан".into()),
+        model: state.model.clone(),
+        days: days.into_iter().map(|day| (day.day, day.visits, day.searches)).collect(),
+        visits_day: visit_numbers(visits_day),
+        visits_week: visit_numbers(visits_week),
+        visits_month: visit_numbers(visits_month),
+        queries_day: day,
+        queries_week: week,
+        queries_month: month,
+        index_urls: pages.into_iter().map(|page| page.url).collect(),
+        kind_counts,
+        muted: guard_muted,
+        bee_hosts: bees.to_vec(),
+        nodes: nodes
+            .into_iter()
+            .map(|node| NodeChip {
+                base: node.base,
+                alive: node.alive,
+                latency_ms: node.latency_ms,
+            })
+            .collect(),
+        map_version,
+        map_places,
+        csrf: csrf.to_string(),
+        base: base.to_string(),
     }
-    body.push_str("<h2>Заходы</h2><p>Это браузеры, не имена людей. Адрес не пишется и к запросу не привязывается. Время — от первого запроса визита до последнего; одна открытая страница времени не даёт. Отказ — ушёл, не поискав и не открыв вторую страницу.</p>");
-    for (title, report) in [("За день", visits_day), ("За неделю", visits_week), ("За месяц", visits_month)] {
-        body.push_str(&format!("<h3>{title}</h3>{}", visit_lines(&report)));
-    }
-    body.push_str("<h2>Запросы</h2><p>Одинаковый текст склеен. Число — сколько раз его спросили за этот срок. Буквы ё и е не склеиваются.</p>");
-    for (title, rows) in [("За день", day), ("За неделю", week), ("За месяц", month)] {
-        body.push_str(&format!("<h3>{title}</h3><ul class=\"check\">"));
-        for (query, count) in rows {
-            body.push_str(&format!("<li>{} — {}</li>", esc_text(&query), count));
-        }
-        body.push_str("</ul>");
-    }
-    body.push_str("<h2>Свой индекс</h2><ul class=\"check\">");
-    for page in pages {
-        body.push_str(&format!("<li>{}</li>", esc_text(&page.url)));
-    }
-    body.push_str("</ul>");
-    body.push_str(&format!(
-        "<h2>MCP</h2><p>Адрес https://admin.&lt;домен этой ноды&gt;/mcp, порт 443. Ключ отдельно от пароля кабинета.</p>
-<form method=\"post\" action=\"/operator\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\"><button name=\"action\" value=\"issue_mcp\">Выдать ключ</button><button name=\"action\" value=\"revoke_mcp\">Отозвать</button></form>"
-    ));
-    body
 }
 
-fn visit_lines(report: &mds_index::VisitReport) -> String {
-    let time = if report.timed_visits > 0 {
-        format!("{} с", report.dwell_seconds / report.timed_visits)
-    } else {
-        "ещё не измерено".into()
-    };
-    let bounces = if report.visits > 0 {
-        format!("{} ({}%)", report.bounces, report.bounces * 100 / report.visits)
-    } else {
-        "0".into()
-    };
-    format!(
-        "<ul class=\"load\"><li>Заходы: {}</li><li>Просмотры: {}</li><li>Среднее время: {time}</li><li>Отказы: {bounces}</li><li>Поиски: {}</li><li>Пустая выдача: {}</li><li>Ошибки поиска: {}</li><li>Запросы, которые нода не ищет: {}</li></ul>",
-        report.visits, report.views, report.searches, report.empty_searches, report.search_errors, report.refused
-    )
-}
-
-fn esc_text(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
+fn visit_numbers(report: mds_index::VisitReport) -> VisitNumbers {
+    VisitNumbers {
+        visits: report.visits,
+        views: report.views,
+        searches: report.searches,
+        bounces: report.bounces,
+        dwell_seconds: report.dwell_seconds,
+        timed_visits: report.timed_visits,
+        empty_searches: report.empty_searches,
+        search_errors: report.search_errors,
+        refused: report.refused,
+    }
 }
 
 fn hit_limit(state: &AppState, key: &str, limit: u32, window_secs: u64) -> bool {
@@ -1745,6 +2991,122 @@ async fn peer_search_v1(State(state): State<AppState>, Json(packet): Json<Signed
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let hits = hits.into_iter().take(query.top_k as usize).map(SearchHit::from).collect();
     Ok(Json(mds_wire::SearchAnswerV1 { hits, compatible: true }))
+}
+
+#[derive(Deserialize)]
+struct DeltaQuery {
+    from: Option<u64>,
+}
+
+async fn peer_shard_manifest(State(state): State<AppState>) -> Json<mds_wire::ShardManifestV1> {
+    let engine = state.engine.clone();
+    let manifest = tokio::task::spawn_blocking(move || {
+        engine
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .shard_manifest()
+    })
+    .await
+    .unwrap_or_else(|_| mds_wire::ShardManifestV1 {
+        shard: String::new(),
+        generation: 1,
+        revision: 0,
+        pages: 0,
+        root_sha256: String::new(),
+    });
+    Json(manifest)
+}
+
+async fn peer_shard_delta(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<DeltaQuery>,
+) -> Json<mds_wire::ShardBlockV1> {
+    let from = query.from.unwrap_or(0);
+    let caller = headers
+        .get("x-mds-from")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .trim()
+        .trim_end_matches('/')
+        .to_string();
+    let engine = state.engine.clone();
+    let block = tokio::task::spawn_blocking(move || {
+        let guard = engine.lock().unwrap_or_else(|poison| poison.into_inner());
+        if !guard.shares_shards() || !guard.peer_allowed(&caller) {
+            return guard.export_shard(from, 0).unwrap_or_else(|_| mds_wire::ShardBlockV1 {
+                from_revision: from,
+                to_revision: from,
+                pages: Vec::new(),
+                block_sha256: crate::engine::shard_hash(&[]),
+            });
+        }
+        guard.export_shard(from, 32).unwrap_or_else(|_| mds_wire::ShardBlockV1 {
+            from_revision: from,
+            to_revision: from,
+            pages: Vec::new(),
+            block_sha256: crate::engine::shard_hash(&[]),
+        })
+    })
+    .await
+    .unwrap_or(mds_wire::ShardBlockV1 {
+        from_revision: from,
+        to_revision: from,
+        pages: Vec::new(),
+        block_sha256: String::new(),
+    });
+    Json(block)
+}
+
+async fn shard_sync_loop(
+    engine: Arc<Mutex<Engine>>,
+    client: reqwest::Client,
+    peers: Vec<String>,
+    self_base: String,
+) {
+    let mut cursor: HashMap<String, u64> = HashMap::new();
+    loop {
+        tokio::time::sleep(Duration::from_secs(120)).await;
+        for peer in &peers {
+            let from = cursor.get(peer).copied().unwrap_or(0);
+            let url = format!("{}/peer/shard/delta?from={from}", peer.trim_end_matches('/'));
+            let Ok(response) = client
+                .get(url)
+                .header("x-mds-from", &self_base)
+                .send()
+                .await
+            else {
+                continue;
+            };
+            if !response.status().is_success() {
+                continue;
+            }
+            let Ok(bytes) = response.bytes().await else {
+                continue;
+            };
+            let Ok(block) = serde_json::from_slice::<mds_wire::ShardBlockV1>(&bytes) else {
+                continue;
+            };
+            if crate::engine::shard_hash(&block.pages) != block.block_sha256 {
+                eprintln!("MDS: снимок соседа не сошёлся, пакет не принят");
+                continue;
+            }
+            let next_revision = block.to_revision;
+            let eng = engine.clone();
+            let accepted = tokio::task::spawn_blocking(move || {
+                let mut guard = eng.lock().unwrap_or_else(|poison| poison.into_inner());
+                guard.accept_shard_block(&block).unwrap_or(0)
+            })
+            .await
+            .unwrap_or(0);
+            if next_revision > from {
+                cursor.insert(peer.clone(), next_revision);
+            }
+            if accepted > 0 {
+                eprintln!("MDS: из снимка соседа принято страниц: {accepted}");
+            }
+        }
+    }
 }
 
 async fn peer_shard_v1(State(state): State<AppState>, Json(packet): Json<SignedPacket>) -> StatusCode {

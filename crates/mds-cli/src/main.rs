@@ -4,7 +4,8 @@ use std::time::Duration;
 use clap::{Parser, Subcommand};
 use mds_crawl::CrawlPolicy;
 use mds_node::{
-    hash_admin_password, index_fixture_dir, run_lite, serve, sync_model, Engine, LiteConfig, ServeConfig,
+    hash_admin_password, index_fixture_dir, run_lite, serve, serve_face, sync_model, Engine, FaceConfig, LiteConfig,
+    ServeConfig,
 };
 use mds_update::{
     generate_keypair, public_from_secret, save_release, sign_model, sign_release, PINNED_PUBLIC_HEX,
@@ -52,6 +53,10 @@ enum Command {
         /// Не подключаться к вписанным доверенным нодам. Так запускают сам улей.
         #[arg(long)]
         alone: bool,
+        /// Публичный адрес этого улья. Вместе с --peers отдаёт ему свои домены, соседу — остальные.
+        /// Без флага улей держит все домены, даже если соседи указаны.
+        #[arg(long)]
+        self_base: Option<String>,
         /// Публичный улей, которому эта пчела сама отдаёт страницы. Для домашнего адреса без белого IP.
         #[arg(long)]
         hive: Option<String>,
@@ -78,6 +83,23 @@ enum Command {
         /// Кабинет и MCP. Открывается только если заданы имя и хеш пароля.
         #[arg(long, default_value = "127.0.0.1:8081")]
         admin_listen: String,
+        /// Не открывать базу, пока не появится этот файл. Модель к тому времени уже в памяти.
+        #[arg(long)]
+        go_file: Option<PathBuf>,
+        /// Сюда пишется отметка, когда модель уже в памяти и процесс ждёт --go-file.
+        #[arg(long)]
+        warm_file: Option<PathBuf>,
+    },
+    /// Страницы поиска и кабинета без модели и без базы. Данные берёт у улья.
+    Face {
+        #[arg(long, default_value = "127.0.0.1:8090")]
+        listen: String,
+        #[arg(long, default_value = "http://127.0.0.1:8080")]
+        hive: String,
+        #[arg(long, default_value = "http://127.0.0.1:8081")]
+        admin: String,
+        #[arg(long, default_value = "data/face.token")]
+        token_file: PathBuf,
     },
     /// Спросить пароль без эха и напечатать Argon2id-хеш для MDS_ADMIN_PASSWORD_HASH.
     AdminPassword,
@@ -125,6 +147,7 @@ async fn main() -> anyhow::Result<()> {
             recrawl,
             peers,
             alone,
+            self_base,
             hive,
             swarm_key,
             region,
@@ -134,10 +157,12 @@ async fn main() -> anyhow::Result<()> {
             downloads,
             map,
             admin_listen,
+            go_file,
+            warm_file,
         } => {
             if lite {
-                let site = site.ok_or_else(|| anyhow::anyhow!("для --lite нужен --site"))?;
                 let hive = hive.ok_or_else(|| anyhow::anyhow!("для --lite нужен --hive"))?;
+                let site = site.unwrap_or_default();
                 run_lite(LiteConfig {
                     site,
                     hive,
@@ -157,7 +182,7 @@ async fn main() -> anyhow::Result<()> {
                 None => None,
             };
             sync_model(&models, model_hive.as_deref()).await?;
-            let mut engine = Engine::open(&db, &models)?;
+            let mut engine = Engine::open_when(&db, &models, go_file.as_deref(), warm_file.as_deref())?;
             let policy = CrawlPolicy {
                 delay: Duration::from_millis(delay_ms),
                 max_bytes: 1_000_000,
@@ -229,12 +254,27 @@ async fn main() -> anyhow::Result<()> {
                     map,
                     admin_listen,
                     alone,
+                    self_base,
                     mcp_path: db
                         .parent()
                         .unwrap_or(std::path::Path::new("data"))
                         .join("mcp.hash"),
                 },
             )
+            .await?;
+        }
+        Command::Face {
+            listen,
+            hive,
+            admin,
+            token_file,
+        } => {
+            serve_face(FaceConfig {
+                listen,
+                hive,
+                admin,
+                token_file,
+            })
             .await?;
         }
         Command::AdminPassword => {

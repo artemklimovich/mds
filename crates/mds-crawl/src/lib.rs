@@ -7,7 +7,7 @@ mod signals;
 pub mod spa;
 
 pub use admit::{check_site, CheckLine, SiteCheck};
-pub use hygiene::{is_broken_url, is_not_found, resolve_href, strip_banner_nodes, strip_boilerplate};
+pub use hygiene::{is_broken_url, is_not_found, resolve_href, strip_banner_nodes, strip_boilerplate, tidy_url};
 
 pub use discover::{discover_ct_domains, parse_crt_json};
 
@@ -26,12 +26,73 @@ use spa::{parse_js_bundle, spa_script_urls};
 
 pub const USER_AGENT: &str = "MDS-Bot/0.1 (polite crawler; local index)";
 
+/// Текст страницы в UTF-8. Кодировку берём из заголовка, затем из `<meta>`.
+/// Правильный UTF-8 не перекодируем. Иначе пробуем Windows-1251.
+pub fn decode_body(bytes: &[u8], content_type: &str) -> String {
+    if let Some(label) = charset_label(content_type).or_else(|| meta_charset(bytes)) {
+        if let Some(encoding) = encoding_rs::Encoding::for_label(label.as_bytes()) {
+            let (text, _, _) = encoding.decode(bytes);
+            return text.into_owned();
+        }
+    }
+    if std::str::from_utf8(bytes).is_ok() {
+        return String::from_utf8_lossy(bytes).into_owned();
+    }
+    let (text, _, _) = encoding_rs::WINDOWS_1251.decode(bytes);
+    text.into_owned()
+}
+
+fn charset_label(content_type: &str) -> Option<String> {
+    for part in content_type.split(';') {
+        let part = part.trim();
+        let Some(value) = part.split_once('=').filter(|(key, _)| key.trim().eq_ignore_ascii_case("charset")).map(|(_, value)| value.trim()) else {
+            continue;
+        };
+        let value = value.trim_matches('"').trim_matches('\'').trim();
+        if !value.is_empty() {
+            return Some(value.to_string());
+        }
+    }
+    None
+}
+
+fn meta_charset(bytes: &[u8]) -> Option<String> {
+    let head = &bytes[..bytes.len().min(8192)];
+    let lower: Vec<u8> = head.iter().map(|byte| byte.to_ascii_lowercase()).collect();
+    let text = String::from_utf8_lossy(&lower);
+    if let Some(found) = text.split("charset=").nth(1) {
+        let token = found.trim_start_matches([' ', '"', '\'']).split(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-' && ch != '_').next().unwrap_or("");
+        if !token.is_empty() && token != "charset" {
+            return Some(token.to_string());
+        }
+    }
+    None
+}
+
+/// Ответ одной проверки уже лежащей страницы.
+#[derive(Clone, Debug)]
+pub struct ProbeHit {
+    pub status: u16,
+    pub etag: Option<String>,
+    pub modified: Option<String>,
+    pub page: Option<FetchedPage>,
+    pub gone: bool,
+    pub failed: bool,
+    pub skipped: bool,
+}
+
 #[derive(Debug, Error)]
 pub enum CrawlError {
     #[error("адрес не разобран: {0}")]
     BadUrl(String),
     #[error("сеть: {0}")]
     Http(#[from] reqwest::Error),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Anchor {
+    pub url: String,
+    pub text: String,
 }
 
 #[derive(Clone, Debug)]
@@ -42,10 +103,13 @@ pub struct FetchedPage {
     pub text: String,
     pub simhash: u64,
     pub links: Vec<String>,
+    /// Слова ссылки на этой странице. В текст страницы не входят.
+    pub anchors: Vec<Anchor>,
     pub indexable: bool,
     pub kind: u32,
     pub media_url: Option<String>,
     pub feed_url: Option<String>,
+    pub news_feed: Option<String>,
     pub price: Option<String>,
     pub docs: Vec<FetchedPage>,
     /// До 100 адресов своего сайта из llms.txt или llms.md. Пусто, если карточка их не назвала.
@@ -104,8 +168,136 @@ impl Crawler {
         })
     }
 
+    pub fn set_limit(&mut self, max_pages: usize) {
+        self.policy.max_pages = max_pages.max(1);
+    }
+
     pub fn take_gone(&mut self) -> Vec<String> {
         std::mem::take(&mut self.gone)
+    }
+
+    /// Одна страница: сначала метка сервера, при 200 — то же чтение, что у обычного обхода.
+    pub async fn probe(&mut self, url: &str, etag: Option<&str>, modified: Option<&str>) -> ProbeHit {
+        let failed = |status: u16| ProbeHit {
+            status,
+            etag: None,
+            modified: None,
+            page: None,
+            gone: false,
+            failed: true,
+            skipped: false,
+        };
+        let Some(parsed) = Url::parse(url).ok() else {
+            return failed(0);
+        };
+        if parsed.scheme() != "http" && parsed.scheme() != "https" {
+            return failed(0);
+        }
+        let origin = origin_of(&parsed);
+        let host = parsed.host_str().unwrap_or("").to_ascii_lowercase();
+        let mut side = VecDeque::new();
+        self.ensure_robots(&origin, &mut side).await;
+        let path = format!(
+            "{}{}",
+            parsed.path(),
+            parsed.query().map(|query| format!("?{query}")).unwrap_or_default()
+        );
+        if !path_allowed(self.robots.get(&origin).map(String::as_str).unwrap_or(""), USER_AGENT, &path) {
+            return ProbeHit {
+                status: 0,
+                etag: None,
+                modified: None,
+                page: None,
+                gone: false,
+                failed: false,
+                skipped: true,
+            };
+        }
+        self.wait_turn(&origin, &host).await;
+        let mut request = self.client.get(parsed.clone());
+        if let Some(etag) = etag.map(str::trim).filter(|value| !value.is_empty()) {
+            request = request.header("if-none-match", etag);
+        }
+        if let Some(modified) = modified.map(str::trim).filter(|value| !value.is_empty()) {
+            request = request.header("if-modified-since", modified);
+        }
+        let response = match request.send().await {
+            Ok(response) => response,
+            Err(_) => return failed(0),
+        };
+        let status = response.status().as_u16();
+        let response_etag = header_text(&response, "etag");
+        let response_modified = header_text(&response, "last-modified");
+        if status == 304 {
+            return ProbeHit {
+                status,
+                etag: response_etag,
+                modified: response_modified,
+                page: None,
+                gone: false,
+                failed: false,
+                skipped: false,
+            };
+        }
+        if status == 404 || status == 410 {
+            return ProbeHit {
+                status,
+                etag: None,
+                modified: None,
+                page: None,
+                gone: true,
+                failed: false,
+                skipped: false,
+            };
+        }
+        if !response.status().is_success() {
+            return failed(status);
+        }
+        let final_url = response.url().clone();
+        let content_type = response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        let bytes = match response.bytes().await {
+            Ok(bytes) => bytes,
+            Err(_) => return failed(status),
+        };
+        if bytes.len() > self.policy.max_bytes {
+            return failed(status);
+        }
+        let body = decode_body(&bytes, &content_type);
+        let host = final_url.host_str().unwrap_or(&host).to_ascii_lowercase();
+        if is_markdown_document(&final_url, &content_type, &body) {
+            let page = page_from_markdown(final_url.as_str(), &host, &body);
+            return ProbeHit {
+                status,
+                etag: response_etag,
+                modified: response_modified,
+                page: Some(page),
+                gone: false,
+                failed: false,
+                skipped: false,
+            };
+        }
+        if !content_type.is_empty() && !content_type.contains("html") && !content_type.contains("text/plain") && !looks_like_html(&body) {
+            return failed(status);
+        }
+        let mut page = page_from_html(&response_url(&final_url, &body), &host, &body);
+        if page.text.chars().count() < 160 {
+            self.enrich_from_spa_bundles(final_url.as_str(), &body, &mut page).await;
+            page.text = strip_boilerplate(&page.text);
+        }
+        ProbeHit {
+            status,
+            etag: response_etag,
+            modified: response_modified,
+            page: Some(page),
+            gone: false,
+            failed: false,
+            skipped: false,
+        }
     }
 
     fn note_gone(&mut self, url: &str) {
@@ -177,7 +369,7 @@ impl Crawler {
             if bytes.len() > self.policy.max_bytes {
                 continue;
             }
-            let body = String::from_utf8_lossy(&bytes).into_owned();
+            let body = decode_body(&bytes, &content_type);
             if is_sitemap_document(&content_type, final_url.as_str(), &body) {
                 self.enqueue_locs(&mut queue, &sitemap_locs(&body));
                 continue;
@@ -369,6 +561,16 @@ impl Crawler {
     }
 }
 
+fn header_text(response: &reqwest::Response, name: &str) -> Option<String> {
+    response
+        .headers()
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
 fn response_url(requested: &Url, _body: &str) -> String {
     requested.to_string()
 }
@@ -479,16 +681,20 @@ pub fn page_from_html(url: &str, host: &str, html: &str) -> FetchedPage {
         text.push_str(&read.extra_text);
     }
     text = strip_boilerplate(&text);
-    let mut links = if read.follow {
-        extract_links(url, html)
+    let mut named = if read.follow {
+        extract_link_pairs(url, html)
+            .into_iter()
+            .map(|(link, words)| (tidy_url(&link), words))
+            .collect()
     } else {
         Vec::new()
     };
+    let mut links: Vec<String> = named.iter().map(|(link, _)| link.clone()).collect();
     if read.follow {
         if let Ok(base) = Url::parse(url) {
             for route in &read.spa_routes {
                 if let Some(joined) = resolve_href(&base, route) {
-                    let full = joined.to_string();
+                    let full = tidy_url(joined.as_str());
                     if !links.contains(&full) {
                         links.push(full);
                     }
@@ -496,7 +702,7 @@ pub fn page_from_html(url: &str, host: &str, html: &str) -> FetchedPage {
             }
         }
     }
-    let stored_url = same_host_canonical(url, host, read.canonical.as_deref());
+    let stored_url = tidy_url(&same_host_canonical(url, host, read.canonical.as_deref()));
     let indexable = read.indexable && !is_not_found(&title, &text) && !is_broken_url(&stored_url);
     let title = if title.is_empty() {
         text.chars().take(80).collect()
@@ -504,8 +710,24 @@ pub fn page_from_html(url: &str, host: &str, html: &str) -> FetchedPage {
         title
     };
     let classified = kind::classify_html(&stored_url, host, &title, &text, html);
-    kind::drop_shop_products(&mut links, mds_types::is_webshop(&title, &text));
+    kind::drop_marketplace_cards(&mut links);
     links.retain(|url| !mds_types::is_document_url(url));
+    named.retain(|(link, _)| links.iter().any(|kept| kept == link));
+    let anchors = named
+        .into_iter()
+        .filter_map(|(link, words)| {
+            let words = words.trim();
+            if words.chars().count() < 2 {
+                None
+            } else {
+                Some(Anchor {
+                    url: link,
+                    text: words.chars().take(80).collect(),
+                })
+            }
+        })
+        .take(20)
+        .collect();
     FetchedPage {
         url: stored_url,
         host: host.to_string(),
@@ -513,10 +735,12 @@ pub fn page_from_html(url: &str, host: &str, html: &str) -> FetchedPage {
         simhash: simhash(&text),
         text,
         links,
+        anchors,
         indexable,
         kind: classified.kind,
         media_url: classified.media_url,
         feed_url: classified.feed_url,
+        news_feed: classified.news_feed,
         price: classified.price,
         docs: classified.docs,
         priority: Vec::new(),
@@ -603,7 +827,7 @@ fn strip_blocks(html: &str, tag: &str) -> String {
     out
 }
 
-fn extract_links(base: &str, html: &str) -> Vec<String> {
+fn extract_link_pairs(base: &str, html: &str) -> Vec<(String, String)> {
     let Ok(base) = Url::parse(base) else {
         return Vec::new();
     };
@@ -632,10 +856,38 @@ fn extract_links(base: &str, html: &str) -> Vec<String> {
             continue;
         }
         if let Some(joined) = resolve_href(&base, raw) {
-            links.push(joined.to_string());
+            links.push((joined.to_string(), anchor_words(html, href_at)));
         }
     }
     links
+}
+
+fn anchor_words(html: &str, href_at: usize) -> String {
+    let rest = &html[href_at.min(html.len())..];
+    let Some(open) = rest.find('>') else {
+        return String::new();
+    };
+    let body = &rest[open + 1..];
+    let Some(close) = body.to_ascii_lowercase().find("</a>") else {
+        return String::new();
+    };
+    let raw = &body[..close];
+    let mut out = String::new();
+    let mut skip = false;
+    for ch in raw.chars() {
+        if ch == '<' {
+            skip = true;
+            continue;
+        }
+        if ch == '>' {
+            skip = false;
+            continue;
+        }
+        if !skip {
+            out.push(ch);
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn looks_like_html(body: &str) -> bool {
@@ -1019,5 +1271,18 @@ mod tests {
         let raw = br#"[{"name_value":"*.dartalab.ru\ndartalab.ru\nmail.dartalab.ru\nshop.example.ru"}]"#;
         let hosts = parse_crt_json(raw);
         assert_eq!(hosts, vec!["dartalab.ru".to_string(), "shop.example.ru".to_string()]);
+    }
+
+    #[test]
+    fn windows_1251_page_is_stored_as_utf8() {
+        let mut bytes = b"<meta charset=\"windows-1251\"><title>".to_vec();
+        bytes.extend_from_slice(&[0xEC, 0xB8, 0xE4]);
+        bytes.extend_from_slice(b"</title>");
+        let text = decode_body(&bytes, "text/html");
+        assert!(text.contains("мёд"), "{text}");
+        assert_eq!(decode_body("мёд".as_bytes(), "text/html; charset=utf-8"), "мёд");
+        let mut koi = b"<meta charset=koi8-r>".to_vec();
+        koi.extend_from_slice(&[0xCD, 0xA3, 0xC4]);
+        assert!(decode_body(&koi, "text/html").contains("мёд"));
     }
 }

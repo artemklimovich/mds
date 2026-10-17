@@ -69,14 +69,116 @@ struct Fused {
     via_meaning: bool,
 }
 
+/// Оставляет одну ссылку из почти одинакового текста. Сначала страница сайта с пчелой, иначе та, что выше по счёту.
+/// Нулевой отпечаток не склеивает: так помечены старые страницы без него. Похожий адрес сам по себе не склеивает.
+pub fn drop_near_copies(hits: Vec<Hit>, pages: &[PageRow], bees: &[String]) -> Vec<Hit> {
+    let mut out = Vec::new();
+    let mut kept: Vec<KeptCopy> = Vec::new();
+    for hit in hits {
+        let page = pages.iter().find(|page| page.url == hit.url);
+        let hash = page.map(|page| page.simhash).unwrap_or(0);
+        if hash == 0 {
+            out.push(hit);
+            continue;
+        }
+        let bee = page.map(|page| holds_bee(&page.host, bees)).unwrap_or(false);
+        if let Some(slot) = kept.iter_mut().find(|slot| (slot.hash ^ hash).count_ones() <= 3) {
+            if bee && !slot.bee {
+                out[slot.at] = hit;
+                slot.hash = hash;
+                slot.bee = true;
+            }
+            continue;
+        }
+        kept.push(KeptCopy {
+            hash,
+            at: out.len(),
+            bee,
+        });
+        out.push(hit);
+    }
+    out
+}
+
+struct KeptCopy {
+    hash: u64,
+    at: usize,
+    bee: bool,
+}
+
+fn holds_bee(host: &str, bees: &[String]) -> bool {
+    let host = mds_types::bare_host(host);
+    bees.iter().any(|bee| mds_types::bare_host(bee) == host)
+}
+
 pub fn prefer_region(hits: Vec<Hit>, region: Option<&str>) -> Vec<Hit> {
+    prefer_geo(hits, region, None)
+}
+
+pub fn prefer_geo(hits: Vec<Hit>, region: Option<&str>, place: Option<&str>) -> Vec<Hit> {
+    prefer_geo_radius(hits, region, place, None)
+}
+
+pub fn prefer_geo_radius(
+    mut hits: Vec<Hit>,
+    region: Option<&str>,
+    place: Option<&str>,
+    around: Option<(f64, f64, f64)>,
+) -> Vec<Hit> {
+    if let Some((ulat, ulon, radius_km)) = around {
+        if mds_types::valid_coords(ulat, ulon) && radius_km > 0.0 {
+            let mut inside = Vec::new();
+            let mut outside = Vec::new();
+            for mut hit in hits {
+                if let (Some(lat), Some(lon)) = (hit.lat, hit.lon) {
+                    if mds_types::valid_coords(lat, lon) {
+                        let km = mds_types::haversine_km(ulat, ulon, lat, lon);
+                        hit.distance_km = Some(km as f32);
+                        if km <= radius_km {
+                            inside.push(hit);
+                            continue;
+                        }
+                    }
+                }
+                outside.push(hit);
+            }
+            inside.sort_by(|a, b| {
+                a.distance_km
+                    .unwrap_or(f32::MAX)
+                    .partial_cmp(&b.distance_km.unwrap_or(f32::MAX))
+                    .unwrap_or(std::cmp::Ordering::Equal)
+            });
+            let rest = order_by_region_and_place(outside, region, place);
+            return inside.into_iter().chain(rest).collect();
+        }
+    }
+    for hit in &mut hits {
+        hit.distance_km = None;
+    }
+    order_by_region_and_place(hits, region, place)
+}
+
+fn order_by_region_and_place(hits: Vec<Hit>, region: Option<&str>, place: Option<&str>) -> Vec<Hit> {
     let Some(region) = region else {
         return hits;
     };
-    let (here, other): (Vec<Hit>, Vec<Hit>) = hits
-        .into_iter()
-        .partition(|hit| hit.region.as_deref() == Some(region));
-    here.into_iter().chain(other).collect()
+    let mut exact_place = Vec::new();
+    let mut same_region = Vec::new();
+    let mut other = Vec::new();
+    for hit in hits {
+        if hit.region.as_deref() == Some(region) {
+            if let Some(place) = place {
+                if hit.place.as_deref() == Some(place) {
+                    exact_place.push(hit);
+                    continue;
+                }
+            }
+            same_region.push(hit);
+        } else {
+            other.push(hit);
+        }
+    }
+    exact_place.into_iter().chain(same_region).chain(other).collect()
 }
 
 pub fn fuse(query: &str, words: &[WordMatch], vectors: &[VectorMatch], pages: &[PageRow]) -> Vec<Hit> {
@@ -166,9 +268,14 @@ pub fn fuse(query: &str, words: &[WordMatch], vectors: &[VectorMatch], pages: &[
                 adult: lane == Lane::Adult,
                 volunteer: false,
                 region: page.region.clone(),
+                place: page.place.clone(),
+                distance_km: None,
+                lat: page.lat,
+                lon: page.lon,
                 kind: page.kind,
                 media_url: page.media_url.clone(),
                 feed_url: page.feed_url.clone(),
+                news_feed: page.news_feed.clone(),
                 price: page.price.clone(),
             })
         })
@@ -179,7 +286,7 @@ fn query_subject_stems(query: &str) -> Vec<String> {
     query
         .to_lowercase()
         .split(|c: char| !c.is_alphanumeric())
-        .filter(|tok| tok.chars().count() >= 3 && !GENERIC_TOKENS.contains(tok))
+        .filter(|tok| tok.chars().count() >= 3 && !GENERIC_TOKENS.contains(tok) && !mds_types::is_geo_word(tok))
         .map(stem_ru)
         .collect()
 }
@@ -240,10 +347,15 @@ mod tests {
             host: host.into(),
             text: "Карточка товара".into(),
             region: None,
+            place: None,
+            lat: None,
+            lon: None,
             kind: 0,
             media_url: None,
             feed_url: None,
+            news_feed: None,
             price: None,
+            simhash: 0,
         }
     }
 
@@ -260,9 +372,14 @@ mod tests {
                 adult: false,
                 volunteer: false,
                 region: Some("Орловская область".into()),
+                place: Some("Орёл".into()),
+                distance_km: None,
+                lat: None,
+                lon: None,
                 kind: 0,
                 media_url: None,
                 feed_url: None,
+                news_feed: None,
                 price: None,
             },
             Hit {
@@ -275,9 +392,14 @@ mod tests {
                 adult: false,
                 volunteer: false,
                 region: Some("Волгоградская область".into()),
+                place: Some("Камышин".into()),
+                distance_km: None,
+                lat: None,
+                lon: None,
                 kind: 0,
                 media_url: None,
                 feed_url: None,
+                news_feed: None,
                 price: None,
             },
         ];
@@ -334,5 +456,90 @@ mod tests {
         let first = 1.0 / (RRF_K + 1.0);
         let tenth = nudge_volunteer(1.0 / (RRF_K + 10.0));
         assert!(tenth < first);
+    }
+
+    #[test]
+    fn near_copies_leave_the_stronger_link() {
+        let mut first = page(1, "shop.example");
+        first.url = "https://shop.example/jar".into();
+        first.simhash = 0b1111;
+        let mut copy = page(2, "shop.example");
+        copy.url = "https://shop.example/jar?print=1".into();
+        copy.simhash = 0b1110;
+        let mut other = page(3, "farm.example");
+        other.simhash = 0b1111_0000;
+        let hits = vec![
+            hit_of(&first, 3.0),
+            hit_of(&copy, 2.0),
+            hit_of(&other, 1.0),
+        ];
+        let left = drop_near_copies(hits, &[first, copy, other], &[]);
+        assert_eq!(left.len(), 2);
+        assert_eq!(left[0].url, "https://shop.example/jar");
+        assert_eq!(left[1].url, "https://farm.example/item");
+    }
+
+    #[test]
+    fn a_bee_page_stays_ahead_of_a_stronger_copy() {
+        let mut bee = page(1, "shop.example");
+        bee.url = "https://shop.example/jar".into();
+        bee.simhash = 0b1111;
+        let mut copy = page(2, "mirror.example");
+        copy.url = "https://mirror.example/jar".into();
+        copy.simhash = 0b0111;
+        let hits = vec![hit_of(&copy, 5.0), hit_of(&bee, 1.0)];
+        let bees = vec!["www.shop.example".into()];
+        let left = drop_near_copies(hits, &[bee, copy], &bees);
+        assert_eq!(left.len(), 1);
+        assert_eq!(left[0].url, "https://shop.example/jar");
+    }
+
+    #[test]
+    fn different_pages_of_one_site_stay_apart() {
+        let mut honey = page(1, "shop.example");
+        honey.url = "https://shop.example/honey".into();
+        honey.simhash = 0b1111;
+        let mut about = page(2, "shop.example");
+        about.url = "https://shop.example/about".into();
+        about.simhash = 0x00ff_0000_0000_0000;
+        let hits = vec![hit_of(&honey, 3.0), hit_of(&about, 2.0)];
+        let left = drop_near_copies(hits, &[honey, about], &[]);
+        assert_eq!(left.len(), 2);
+    }
+
+    #[test]
+    fn radius_filter_sorts_points_by_distance() {
+        let mut far = hit_of(&page(1, "far.example"), 5.0);
+        far.lat = Some(55.7000);
+        far.lon = Some(37.5000);
+        let mut near = hit_of(&page(2, "near.example"), 2.0);
+        near.lat = Some(55.7540);
+        near.lon = Some(37.6200);
+        let ordered = prefer_geo_radius(vec![far, near], Some("Москва"), None, Some((55.7558, 37.6173, 1.0)));
+        assert_eq!(ordered[0].url, "https://near.example/item");
+        assert!(ordered[0].distance_km.unwrap_or(99.0) < 0.5);
+    }
+
+    fn hit_of(page: &PageRow, score: f32) -> Hit {
+        Hit {
+            url: page.url.clone(),
+            title: page.title.clone(),
+            snippet: page.text.clone(),
+            score,
+            via_words: true,
+            via_meaning: false,
+            adult: false,
+            volunteer: false,
+            region: None,
+            place: None,
+            distance_km: None,
+            lat: None,
+            lon: None,
+            kind: 0,
+            media_url: None,
+            feed_url: None,
+            news_feed: None,
+            price: None,
+        }
     }
 }

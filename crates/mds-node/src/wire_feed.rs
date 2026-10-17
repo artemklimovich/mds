@@ -31,7 +31,7 @@ pub async fn headlines() -> Vec<WireLine> {
         let client = client.clone();
         let name = feed.name.to_string();
         let url = feed.rss.to_string();
-        jobs.push(tokio::spawn(async move { read_feed(&client, &name, &url).await }));
+        jobs.push(tokio::spawn(async move { read_feed(&client, &name, &url, 8).await }));
     }
     let mut lines = Vec::new();
     for job in jobs {
@@ -77,7 +77,40 @@ fn client() -> reqwest::Client {
         .unwrap_or_else(|_| reqwest::Client::new())
 }
 
-async fn read_feed(client: &reqwest::Client, name: &str, url: &str) -> Vec<WireLine> {
+pub async fn one(url: &str) -> Vec<WireLine> {
+    if let Some(lines) = fresh_one(url) {
+        return lines;
+    }
+    let host = url.split('/').nth(2).unwrap_or("").to_string();
+    let lines = read_feed(&client(), &host, url, 24).await;
+    if lines.is_empty() {
+        return stale_one(url);
+    }
+    if let Ok(mut guard) = ONE.lock() {
+        guard.retain(|(saved, _, _)| saved != url);
+        guard.push((url.to_string(), Instant::now(), lines.clone()));
+        if guard.len() > 64 {
+            guard.remove(0);
+        }
+    }
+    lines
+}
+
+fn fresh_one(url: &str) -> Option<Vec<WireLine>> {
+    let guard = ONE.lock().ok()?;
+    guard.iter().find(|(saved, at, _)| saved == url && at.elapsed() < REMEMBER).map(|(_, _, lines)| lines.clone())
+}
+
+fn stale_one(url: &str) -> Vec<WireLine> {
+    ONE.lock()
+        .ok()
+        .and_then(|guard| guard.iter().find(|(saved, _, _)| saved == url).map(|(_, _, lines)| lines.clone()))
+        .unwrap_or_default()
+}
+
+static ONE: Mutex<Vec<(String, Instant, Vec<WireLine>)>> = Mutex::new(Vec::new());
+
+async fn read_feed(client: &reqwest::Client, name: &str, url: &str, limit: usize) -> Vec<WireLine> {
     let Ok(response) = client.get(url).send().await else {
         return Vec::new();
     };
@@ -87,7 +120,7 @@ async fn read_feed(client: &reqwest::Client, name: &str, url: &str) -> Vec<WireL
     let Ok(xml) = response.text().await else {
         return Vec::new();
     };
-    rss_headlines(&xml, 8)
+    rss_headlines(&xml, limit)
         .into_iter()
         .map(|(title, url)| WireLine {
             source: name.to_string(),

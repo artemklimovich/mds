@@ -19,6 +19,10 @@ pub fn read_page(html: &str) -> PageRead {
     let mut indexable = true;
     let mut follow = true;
     let mut spa_routes = Vec::new();
+    let mut meta_lat: Option<f64> = None;
+    let mut meta_lon: Option<f64> = None;
+    let mut found_coords: Option<(f64, f64)> = None;
+    let mut contacts = mds_types::Contacts::default();
 
     let lower = html.to_ascii_lowercase();
     let mut cursor = 0;
@@ -42,6 +46,20 @@ pub fn read_page(html: &str) -> PageRead {
             match key.as_str() {
                 "description" | "og:description" | "twitter:description" | "dc.description" => {
                     push_unique(&mut description, &decode_basic(&content));
+                }
+                "geo.placename" | "geo.region" | "og:locality" | "og:region" | "addresslocality" | "addressregion" => {
+                    push_unique(&mut description, &decode_basic(&content));
+                }
+                "geo.position" | "icbm" => {
+                    if found_coords.is_none() {
+                        found_coords = mds_types::parse_lat_lon_pair(&content);
+                    }
+                }
+                "place:location:latitude" | "og:latitude" | "latitude" => {
+                    meta_lat = content.trim().parse::<f64>().ok();
+                }
+                "place:location:longitude" | "og:longitude" | "longitude" => {
+                    meta_lon = content.trim().parse::<f64>().ok();
                 }
                 "og:title" | "twitter:title" | "dc.title" => {
                     if title_hint.is_empty() {
@@ -95,17 +113,101 @@ pub fn read_page(html: &str) -> PageRead {
             }
         } else if !name.is_empty() {
             let attrs = attrs(raw_tag);
+            if name == "a" {
+                if let Some(href) = attr(&attrs, "href") {
+                    let href = decode_basic(&href);
+                    let h_low = href.trim().to_ascii_lowercase();
+                    if h_low.starts_with("tel:") {
+                        if let Some(phone) = mds_types::clean_phone(&href) {
+                            let mut c = mds_types::Contacts::default();
+                            c.phones.push(phone);
+                            contacts.merge(&c);
+                        }
+                    } else if h_low.starts_with("mailto:") {
+                        if let Some(email) = mds_types::clean_email(&href) {
+                            let mut c = mds_types::Contacts::default();
+                            c.emails.push(email);
+                            contacts.merge(&c);
+                        }
+                    } else if let Some((is_msg, url)) = mds_types::classify_contact_url(&href) {
+                        let mut c = mds_types::Contacts::default();
+                        if is_msg {
+                            c.messengers.push(url);
+                        } else {
+                            c.socials.push(url);
+                        }
+                        contacts.merge(&c);
+                    }
+                }
+            }
             let prop = attr(&attrs, "itemprop").unwrap_or_default().to_ascii_lowercase();
             if matches!(
                 prop.as_str(),
-                "name" | "description" | "headline" | "alternatename" | "abstract"
+                "name"
+                    | "description"
+                    | "headline"
+                    | "alternatename"
+                    | "abstract"
+                    | "addresslocality"
+                    | "addressregion"
+                    | "streetaddress"
             ) {
                 if let Some(text) = element_text(html, tag_end + 1, name) {
                     push_unique(&mut description, &text);
                 }
+            } else if prop == "telephone" {
+                let raw_tel = attr(&attrs, "content")
+                    .map(str::to_string)
+                    .or_else(|| element_text(html, tag_end + 1, name));
+                if let Some(raw_tel) = raw_tel {
+                    if let Some(phone) = mds_types::clean_phone(&raw_tel) {
+                        let mut c = mds_types::Contacts::default();
+                        c.phones.push(phone);
+                        contacts.merge(&c);
+                    }
+                }
+            } else if prop == "email" {
+                let raw_em = attr(&attrs, "content")
+                    .map(str::to_string)
+                    .or_else(|| element_text(html, tag_end + 1, name));
+                if let Some(raw_em) = raw_em {
+                    if let Some(email) = mds_types::clean_email(&raw_em) {
+                        let mut c = mds_types::Contacts::default();
+                        c.emails.push(email);
+                        contacts.merge(&c);
+                    }
+                }
+            } else if prop == "latitude" {
+                meta_lat = attr(&attrs, "content")
+                    .and_then(|v| v.trim().parse::<f64>().ok())
+                    .or_else(|| element_text(html, tag_end + 1, name).and_then(|v| v.trim().parse::<f64>().ok()));
+            } else if prop == "longitude" {
+                meta_lon = attr(&attrs, "content")
+                    .and_then(|v| v.trim().parse::<f64>().ok())
+                    .or_else(|| element_text(html, tag_end + 1, name).and_then(|v| v.trim().parse::<f64>().ok()));
             }
         }
         cursor = tag_end + 1;
+    }
+
+    if found_coords.is_none() {
+        if let (Some(lat), Some(lon)) = (meta_lat, meta_lon) {
+            if mds_types::valid_coords(lat, lon) {
+                found_coords = Some((lat, lon));
+            }
+        }
+    }
+    if found_coords.is_none() {
+        found_coords = mds_types::coords_in_html_maps(html);
+    }
+    if let Some((lat, lon)) = found_coords {
+        push_unique(&mut description, &format!("Geo: {lat:.5}, {lon:.5}"));
+    }
+    let markers = contacts.to_marker_lines();
+    if !markers.is_empty() {
+        for line in markers.lines() {
+            push_unique(&mut description, line);
+        }
     }
 
     let mut extra = String::new();
@@ -272,6 +374,13 @@ fn json_ld_text(raw: &str) -> String {
 fn walk_ld(value: &Value, out: &mut String) {
     match value {
         Value::Object(map) => {
+            if let (Some(lat_v), Some(lon_v)) = (map.get("latitude"), map.get("longitude")) {
+                if let (Some(lat), Some(lon)) = (json_f64(lat_v), json_f64(lon_v)) {
+                    if mds_types::valid_coords(lat, lon) {
+                        push_unique(out, &format!("Geo: {lat:.5}, {lon:.5}"));
+                    }
+                }
+            }
             for (key, child) in map {
                 if matches!(
                     key.as_str(),
@@ -285,8 +394,36 @@ fn walk_ld(value: &Value, out: &mut String) {
                         | "slogan"
                         | "price"
                         | "priceCurrency"
+                        | "addressLocality"
+                        | "addressRegion"
+                        | "streetAddress"
                 ) {
                     push_scalar(child, out);
+                } else if key == "telephone" {
+                    let mut raw = String::new();
+                    push_scalar(child, &mut raw);
+                    for part in raw.split([',', ';']) {
+                        if let Some(phone) = mds_types::clean_phone(part) {
+                            push_unique(out, &format!("Tel: {phone}"));
+                        }
+                    }
+                } else if key == "email" {
+                    let mut raw = String::new();
+                    push_scalar(child, &mut raw);
+                    for part in raw.split([',', ';', ' ']) {
+                        if let Some(email) = mds_types::clean_email(part) {
+                            push_unique(out, &format!("Email: {email}"));
+                        }
+                    }
+                } else if key == "sameAs" {
+                    let mut raw = String::new();
+                    push_scalar(child, &mut raw);
+                    for part in raw.split_whitespace() {
+                        if let Some((is_msg, url)) = mds_types::classify_contact_url(part) {
+                            let tag = if is_msg { "Msg" } else { "Soc" };
+                            push_unique(out, &format!("{tag}: {url}"));
+                        }
+                    }
                 } else {
                     walk_ld(child, out);
                 }
@@ -298,6 +435,14 @@ fn walk_ld(value: &Value, out: &mut String) {
             }
         }
         _ => {}
+    }
+}
+
+fn json_f64(value: &Value) -> Option<f64> {
+    match value {
+        Value::Number(num) => num.as_f64(),
+        Value::String(text) => text.trim().parse::<f64>().ok(),
+        _ => None,
     }
 }
 

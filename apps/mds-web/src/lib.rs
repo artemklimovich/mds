@@ -1,4 +1,7 @@
-use mds_types::{region_names, tab_mask, Hit};
+use std::collections::HashSet;
+
+use mds_types::{host_of_url, open_feed, press_feed, region_names, tab_mask, Hit};
+use serde::{Deserialize, Serialize};
 
 pub const PAGE_SIZE: usize = 25;
 pub const SOURCE_REPO: &str = "https://github.com/artemklimovich/mds";
@@ -18,6 +21,9 @@ const PUBLIC_PATHS: &[&str] = &[
     "/add",
     "/llms",
     "/help",
+    "/android",
+    "/hive",
+    "/computer",
     "/download",
     "/llms.txt",
     "/llms.md",
@@ -36,6 +42,7 @@ pub fn hive_card() -> String {
 - [Индексация](/indexing)
 - [Добавить сайт](/add)
 - [Карточка llms](/llms)
+- [Приложение для Android](/android)
 - [Скачать ноду](/download)
 - [Исходный код]({SOURCE_REPO})
 "#
@@ -83,7 +90,7 @@ pub fn render_results(
     tab: &str,
 ) -> String {
     let page = visible_page(page, hits.len());
-    let body = if let Some(error) = error {
+    let mut body = if let Some(error) = error {
         format!("<p class=\"error\">{}</p>", escape(error))
     } else if query.is_empty() {
         "<p class=\"hint\">Поиск по страницам, которые обошла эта пчела. Слова и смысл, на русском и на английском, без фильтра по языку.</p>".into()
@@ -105,6 +112,8 @@ pub fn render_results(
         );
         let mut band = "";
         let mut open_list = false;
+        let mut seen_hosts = HashSet::new();
+        let mut seen_shops = HashSet::new();
         for hit in &hits[start..end] {
             if let Some(region) = region {
                 let kind = if hit.region.as_deref() == Some(region) {
@@ -136,7 +145,14 @@ pub fn render_results(
                 list.push_str("<ol class=\"results\">");
                 open_list = true;
             }
-            let badges = badges(hit.via_words, hit.via_meaning, hit.volunteer, hit.region.as_deref());
+            let badges = badges(
+                hit.via_words,
+                hit.via_meaning,
+                hit.volunteer,
+                hit.region.as_deref(),
+                hit.place.as_deref(),
+                hit.distance_km,
+            );
             let shot = hit.media_url.as_ref().map(|src| {
                 format!(
                     "<a class=\"shot\" href=\"{url}\"><img src=\"{src}\" alt=\"\" referrerpolicy=\"no-referrer\"></a>",
@@ -145,15 +161,13 @@ pub fn render_results(
                 )
             }).unwrap_or_default();
             let price = hit.price.as_ref().map(|price| format!("<span class=\"price\">{}</span>", escape(price))).unwrap_or_default();
-            let feed = hit.feed_url.as_ref().map(|feed| {
-                format!(
-                    "<ul class=\"offers\" data-feed=\"{}\" data-q=\"{}\"></ul>",
-                    escape(feed),
-                    escape(query),
-                )
-            }).unwrap_or_default();
+            let rail = if tab == "news" {
+                news_rail(hit, &mut seen_hosts)
+            } else {
+                shop_rail(hit, &mut seen_shops)
+            };
             list.push_str(&format!(
-                "<li>{shot}<a href=\"{url}\">{title}</a>{price}<div class=\"url\">{url}</div><p>{snippet}</p>{badges}{feed}</li>",
+                "<li>{shot}<a href=\"{url}\">{title}</a>{price}<div class=\"url\">{url}</div><p>{snippet}</p>{badges}{rail}</li>",
                 url = escape(&hit.url),
                 title = escape(&hit.title),
                 snippet = escape(&hit.snippet),
@@ -163,51 +177,61 @@ pub fn render_results(
             list.push_str("</ol>");
         }
         list.push_str(&pager(query, region, tab, page, hits.len()));
-        if hits.iter().any(|hit| hit.feed_url.is_some()) {
-            list.push_str(FEED_SCRIPT);
-        }
         list.push_str(&adult_section(query, adult, adult_open));
         list
     };
-    let body = if tab == "news" && !query.trim().is_empty() {
-        format!("{}{body}", wire_strip(query))
-    } else {
-        body
-    };
+    if body.contains("class=\"wire") {
+        body.push_str(WIRE_SCRIPT);
+    }
     document(query, &body, true, query.is_empty() && error.is_none(), region, tab)
 }
 
-fn wire_strip(query: &str) -> String {
+fn news_rail(hit: &Hit, seen: &mut HashSet<String>) -> String {
+    let marked = hit.news_feed.as_deref().and_then(open_feed);
+    let feed = marked.or_else(|| host_of_url(&hit.url).and_then(|host| press_feed(&host).map(str::to_string)));
+    let Some(feed) = feed else {
+        return String::new();
+    };
+    let host = host_of_url(&hit.url).unwrap_or_default();
+    if !seen.insert(host) {
+        return String::new();
+    }
     format!(
-        r#"<section class="wire" data-q="{q}"><p class="wire-line"><button type="button" class="wire-open">Раскрыть</button> Свежие заголовки изданий</p><div class="rail" hidden><button type="button" class="nudge back" aria-label="Влево">‹</button><div class="wire-row"></div><button type="button" class="nudge forward" aria-label="Вправо">›</button></div></section>{script}"#,
-        q = escape(query),
-        script = WIRE_SCRIPT,
+        r#"<section class="wire site" data-feed="{feed}"><p class="wire-line"><button type="button" class="wire-open">Раскрыть</button> Свежие заголовки</p><div class="rail" hidden><button type="button" class="nudge back" aria-label="Влево">‹</button><div class="wire-row"></div><button type="button" class="nudge forward" aria-label="Вправо">›</button></div></section>"#,
+        feed = escape(&feed),
     )
 }
 
-fn wordmark() -> &'static str {
-    r##"<a class="logo" href="/" aria-label="Пчелопоиск"><svg viewBox="0 0 640 230" role="img">
-<defs>
-<g id="bloom">
-<ellipse cy="-12" rx="6.2" ry="10"/>
-<ellipse cy="-12" rx="6.2" ry="10" transform="rotate(72)"/>
-<ellipse cy="-12" rx="6.2" ry="10" transform="rotate(144)"/>
-<ellipse cy="-12" rx="6.2" ry="10" transform="rotate(216)"/>
-<ellipse cy="-12" rx="6.2" ry="10" transform="rotate(288)"/>
-<circle r="4" fill="#f6c445"/>
-</g>
-</defs>
-<use class="flower" href="#bloom" transform="translate(72,78)" fill="#f4a7b9"/>
-<use class="flower" href="#bloom" transform="translate(58,128)" fill="#fff4c8"/>
-<use class="flower" href="#bloom" transform="translate(78,176)" fill="#e7c6ff"/>
-<use class="flower" href="#bloom" transform="translate(568,78)" fill="#ffd6e0"/>
-<use class="flower" href="#bloom" transform="translate(582,128)" fill="#f4a7b9"/>
-<use class="flower" href="#bloom" transform="translate(562,176)" fill="#fff4c8"/>
-<text x="320" y="138" text-anchor="middle" font-family="Georgia, 'Times New Roman', serif" font-size="46"><tspan class="c1" fill="#e6a817">П</tspan><tspan fill="#1f1a17">ч</tspan><tspan fill="#f0c14b">е</tspan><tspan fill="#c47d12">л</tspan><tspan fill="#5c3a12">о</tspan><tspan fill="#e6a817">п</tspan><tspan fill="#1f1a17">о</tspan><tspan fill="#f0c14b">и</tspan><tspan fill="#c47d12">с</tspan><tspan fill="#5c3a12">к</tspan></text>
-<g class="flyer a"><ellipse class="w l" cx="-10" cy="-6" rx="11" ry="5" fill="#fffdf6" stroke="#ead9a0" stroke-width="0.6"/><ellipse class="w r" cx="10" cy="-6" rx="11" ry="5" fill="#fffdf6" stroke="#ead9a0" stroke-width="0.6"/><ellipse cy="2" rx="6.5" ry="8.5" fill="#f6c445"/><path d="M-6 0h12M-6.2 3h12.4M-5.2 6h10.4" stroke="#1f1a17" stroke-width="1.4" stroke-linecap="round"/><circle cy="-7.5" r="3.6" fill="#1f1a17"/></g>
-<g class="flyer b"><ellipse class="w l" cx="-8" cy="-5" rx="9" ry="4" fill="#fffdf6" stroke="#ead9a0" stroke-width="0.5"/><ellipse class="w r" cx="8" cy="-5" rx="9" ry="4" fill="#fffdf6" stroke="#ead9a0" stroke-width="0.5"/><ellipse cy="1.5" rx="5.2" ry="7" fill="#f6c445"/><path d="M-4.8 -0.2h9.6M-5 2.4h10M-4.2 5h8.4" stroke="#1f1a17" stroke-width="1.2" stroke-linecap="round"/><circle cy="-6" r="3" fill="#1f1a17"/></g>
-<g class="flyer c"><ellipse class="w l" cx="-7" cy="-4" rx="7.5" ry="3.4" fill="#fffdf6" stroke="#ead9a0" stroke-width="0.5"/><ellipse class="w r" cx="7" cy="-4" rx="7.5" ry="3.4" fill="#fffdf6" stroke="#ead9a0" stroke-width="0.5"/><ellipse cy="1" rx="4.4" ry="6" fill="#f6c445"/><path d="M-4 -0.2h8M-4.2 2h8.4M-3.5 4.2h7" stroke="#1f1a17" stroke-width="1.1" stroke-linecap="round"/><circle cy="-5" r="2.6" fill="#1f1a17"/></g>
-</svg></a>"##
+fn shop_rail(hit: &Hit, seen: &mut HashSet<String>) -> String {
+    let Some(feed) = hit.feed_url.as_deref().and_then(open_feed) else {
+        return String::new();
+    };
+    let host = host_of_url(&hit.url).unwrap_or_default();
+    if !seen.insert(host) {
+        return String::new();
+    }
+    format!(
+        r#"<section class="wire site" data-offers="{feed}"><p class="wire-line"><button type="button" class="wire-open">Раскрыть</button> Товары</p><div class="rail" hidden><button type="button" class="nudge back" aria-label="Влево">‹</button><div class="wire-row"></div><button type="button" class="nudge forward" aria-label="Вправо">›</button></div></section>"#,
+        feed = escape(&feed),
+    )
+}
+
+fn bee_svg(class_name: &str) -> String {
+    format!(
+        r##"<svg class="{class_name}" viewBox="0 0 512 512" aria-hidden="true"><g><path style="fill:#414B58;" d="M195.613,512c-5.301,0-10.592-2.086-14.538-6.227c-7.648-8.027-7.341-20.734,0.686-28.383 c21.12-20.124,21.12-44.704,21.12-62.651c0-11.087,8.988-20.075,20.075-20.075s20.075,8.988,20.075,20.075 c0,20.874,0,59.728-33.574,91.72C205.572,510.162,200.588,512,195.613,512z"/><path style="fill:#414B58;" d="M382.31,512c-5.301,0-10.592-2.086-14.538-6.227c-7.648-8.027-7.341-20.734,0.686-28.383 c21.12-20.124,21.12-44.704,21.12-62.651c0-11.087,8.988-20.075,20.075-20.075s20.076,8.988,20.076,20.075 c0,20.874,0,59.728-33.574,91.72C392.268,510.162,387.285,512,382.31,512z"/><path style="fill:#414B58;" d="M97.165,344.265L97.165,344.265c-30.469,0-59.833-11.415-82.301-31.995l-6.482-5.937 c-3.27-2.995-3.27-8.148,0-11.143l6.482-5.937c22.468-20.58,51.832-31.995,82.301-31.995l0,0V344.265z"/></g><path style="opacity:0.1;" d="M97.165,257.257c-17.054,0-33.761,3.579-49.107,10.337 c-2.254,10.743-3.441,21.841-3.441,33.167l0,0c0,11.326,1.187,22.424,3.441,33.167c15.346,6.758,32.053,10.337,49.107,10.337l0,0 L97.165,257.257L97.165,257.257z"/><path style="fill:#C9F4FF;" d="M278.466,172.689h61.742c47.687,0,86.344-38.658,86.344-86.344l0,0 C426.552,38.658,387.895,0,340.208,0l0,0c-47.687,0-86.344,38.658-86.344,86.344v61.742 C253.863,161.674,264.878,172.689,278.466,172.689z"/><path style="fill:#AEEAF9;" d="M282.341,22.267c-17.486,15.801-28.477,38.654-28.477,64.077v61.742 c0,13.587,11.015,24.602,24.602,24.602h61.742c18.536,0,35.692-5.86,49.76-15.801C293.8,156.554,283.193,63.008,282.341,22.267z"/><path style="fill:#FBDD56;" d="M381.149,457.852L381.149,457.852c-63.495,14.677-129.502,14.677-192.997,0l0,0 C115.023,440.948,63.23,375.819,63.23,300.761l0,0c0-75.057,51.792-140.187,124.922-157.091l0,0 c63.495-14.677,129.502-14.677,192.997,0l0,0c73.129,16.904,124.922,82.033,124.922,157.091l0,0 C506.071,375.819,454.278,440.948,381.149,457.852z"/><path style="fill:#596675;" d="M312.109,133.554c-38-2.44-76.243,0.188-113.713,7.889c-26.02,104.543-26.02,214.093,0,318.636 c37.471,7.701,75.714,10.329,113.713,7.889C277.549,359.294,277.549,242.228,312.109,133.554z"/><path style="opacity:0.1;" d="M141.449,162.53C93.94,191.068,63.23,242.969,63.23,300.761l0,0 c0,75.057,51.792,140.187,124.922,157.091l0,0c63.495,14.677,129.502,14.677,192.997,0l0,0c2.259-0.522,4.497-1.091,6.714-1.704 C179.894,463.353,134.688,271.517,141.449,162.53z"/><path style="fill:#C9F4FF;" d="M229.261,172.689h-61.742c-47.687,0-86.344-38.658-86.344-86.344l0,0 C81.175,38.658,119.832,0,167.519,0l0,0c47.687,0,86.344,38.658,86.344,86.344v61.742 C253.863,161.674,242.849,172.689,229.261,172.689z"/><g><ellipse style="fill:#FFA6BB;" cx="346.48" cy="304.81" rx="23.07" ry="18.372"/><ellipse style="fill:#FFA6BB;" cx="471.53" cy="304.81" rx="23.07" ry="18.372"/></g><g><path style="fill:#414B58;" d="M359.928,293.985c-4.143,0-7.5-3.358-7.5-7.5v-8.147c0-4.142,3.357-7.5,7.5-7.5s7.5,3.358,7.5,7.5 v8.147C367.428,290.627,364.07,293.985,359.928,293.985z"/><path style="fill:#414B58;" d="M458.087,293.985c-4.143,0-7.5-3.358-7.5-7.5v-8.147c0-4.142,3.357-7.5,7.5-7.5s7.5,3.358,7.5,7.5 v8.147C465.587,290.627,462.229,293.985,458.087,293.985z"/><path style="fill:#414B58;" d="M409.007,300.241c-7.127,0-13.903-3.086-18.594-8.467c-2.722-3.122-2.396-7.86,0.727-10.582 c3.122-2.721,7.859-2.397,10.582,0.727c1.84,2.112,4.495,3.323,7.285,3.323s5.445-1.211,7.284-3.322 c2.723-3.124,7.459-3.449,10.582-0.728s3.449,7.459,0.729,10.582C422.912,297.154,416.135,300.241,409.007,300.241z"/><path style="fill:#414B58;" d="M297.627,512c-5.301,0-10.592-2.086-14.538-6.227c-7.648-8.027-7.341-20.734,0.686-28.383 c21.12-20.124,21.12-44.704,21.12-62.651c0-11.087,8.988-20.075,20.075-20.075s20.076,8.988,20.076,20.075 c0,20.874,0,59.728-33.575,91.72C307.586,510.162,302.602,512,297.627,512z"/><path style="fill:#414B58;" d="M110.931,512c-5.301,0-10.592-2.086-14.538-6.227c-7.648-8.027-7.341-20.734,0.686-28.383 c21.12-20.124,21.12-44.704,21.12-62.651c0-11.087,8.988-20.075,20.075-20.075s20.075,8.988,20.075,20.075 c0,20.874,0,59.728-33.575,91.72C120.89,510.162,115.905,512,110.931,512z"/></g><path style="fill:#AEEAF9;" d="M137.795,5.253c-33.043,12.115-56.621,43.849-56.621,81.091l0,0 c0,47.687,38.658,86.344,86.344,86.344h54.07C135.028,162.9,122.447,44.153,137.795,5.253z"/></svg>"##,
+        class_name = class_name,
+    )
+}
+
+fn search_bee_svg() -> String {
+    r##"<svg class="go" viewBox="0 54 512 405" aria-hidden="true"><g fill="#1c1612"><path d="m453.724 212.315c6.019-22.869 26.671-39.016 50.773-39.016v-15.006c-29.469 0-54.913 18.79-63.995 45.93-3.898-2.088-7.909-3.989-12.023-5.693-1.413-29.878 22.517-55.328 52.52-55.242v-15.006c-36.407 0-66.159 28.967-67.463 65.061-11.64-3.28-23.912-5.039-36.587-5.039h-37.27c17.546-15.59 29.109-35.945 28.845-59.852 0-19.995-7.787-38.794-21.925-52.932-22.852-22.851-57.807-28.337-86.4-14.032-10.158-5.078-21.598-7.894-33.625-7.894-41.276 0-74.857 33.581-74.857 74.858 0 25.975 13.305 48.895 33.451 62.324-50.362 9.76-90.828 47.586-104.405 96.492l-80.763 29.61v12.588l80.783 30.007c2.919 10.547 7.098 20.733 12.501 30.284l13.062-7.389c-10.128-17.904-15.481-38.31-15.481-59.013 0-66.193 53.852-120.045 120.045-120.045h.053v240.09h-.053c-28.442 0-56.026-10.124-77.67-28.509l-9.715 11.437c24.354 20.685 55.387 32.077 87.384 32.077h166.041c74.467 0 135.05-60.583 135.05-135.05 0-45.968-23.091-86.637-58.276-111.04zm-427.437 110.908 50.884-18.656c-.859 6.143-1.313 12.413-1.313 18.789 0 6.299.456 12.571 1.325 18.773zm289.725-67.393v187.57h-45.155v-240.09h45.155v37.514h15.006v-37.514h29.884v240.09h-29.884v-187.57zm-149.29-127.378c0-33.003 26.849-59.852 59.851-59.852 27.894 0 51.848 18.929 58.251 46.033l14.603-3.45c-3.774-15.975-12.422-29.677-24.16-39.705 21.019-6.775 44.624-1.444 60.719 14.652 11.305 11.305 17.531 26.335 17.531 42.322s-6.226 31.017-17.531 42.321l-17.53 17.53h-17.026v-59.852h-15.006v59.852h-59.852c-33.001.002-59.85-26.848-59.85-59.851zm59.245 74.858h29.884v240.09h-29.884zm149.94 240.09v-240.09c66.551-.595 121.121 53.483 121.087 120.045 0 66.193-54.767 120.045-121.087 120.045z"/><path d="m101.872 403.055c3.157 4.312 6.605 8.479 10.248 12.385l10.975-10.234c-3.24-3.474-6.307-7.181-9.115-11.016z"/><path d="m451.528 285.841h15.006v30.011h-15.006z"/><path d="m143.373 241.889h15.006v15.006h-15.006z"/><path d="m173.384 241.889h15.006v15.006h-15.006z"/><path d="m203.395 90.768h15.006v15.006h-15.006z"/></g></svg>"##.to_string()
+}
+
+fn wordmark() -> String {
+    format!(
+        r##"<a class="logo" href="/" aria-label="ПчелоПоиск">{}<span class="name">Поиск</span></a>"##,
+        bee_svg("bee"),
+    )
 }
 
 fn document(query: &str, body: &str, autofocus: bool, home: bool, region: Option<&str>, tab: &str) -> String {
@@ -223,55 +247,51 @@ fn document(query: &str, body: &str, autofocus: bool, home: bool, region: Option
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Пчелопоиск</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%23f6f1e7'/%3E%3Cpath d='M8 12c-4-5-9-4-10 1 4 2 8 2 10-1zM14 16c2-2 7-2 9 1 1 4-2 8-7 8s-8-3-7-7c0-1 2-2 5-2z' fill='%231c1612'/%3E%3Cpath d='M16 26c0 0-2 2-2 3a2 2 0 0 0 4 0c0-1-2-3-2-3z' fill='%23c9a227'/%3E%3C/svg%3E">
 <style>
 body {{ margin: 0; min-height: 100vh; display: flex; flex-direction: column; font-family: Arial, Helvetica, sans-serif; color: #202124; background: #fff; }}
 main {{ flex: 1 0 auto; width: 100%; max-width: 680px; margin: 0 auto; padding: 28px 16px 32px; box-sizing: border-box; }}
 h1 {{ margin: 0 0 8px; text-align: center; }}
-.logo {{ display: inline-block; line-height: 0; text-decoration: none; }}
-.logo svg {{ width: 240px; height: auto; overflow: visible; }}
-.home .logo svg {{ width: min(460px, 94vw); }}
-.w {{ transform-box: fill-box; transform-origin: center; }}
-.w.l {{ animation: flap-l 0.22s ease-in-out infinite alternate; }}
-.w.r {{ animation: flap-r 0.22s ease-in-out infinite alternate; }}
-@keyframes flap-l {{ from {{ transform: rotate(-18deg); }} to {{ transform: rotate(-42deg); }} }}
-@keyframes flap-r {{ from {{ transform: rotate(18deg); }} to {{ transform: rotate(42deg); }} }}
-.flyer.a {{ animation: fly-a 6s ease-in-out infinite; }}
-.flyer.b {{ animation: fly-b 8s ease-in-out infinite; }}
-.flyer.c {{ animation: fly-c 7s ease-in-out infinite; }}
-@keyframes fly-a {{
-  0% {{ transform: translate(108px, 52px) rotate(-8deg); }}
-  50% {{ transform: translate(520px, 46px) rotate(8deg); }}
-  100% {{ transform: translate(108px, 52px) rotate(-8deg); }}
-}}
-@keyframes fly-b {{
-  0% {{ transform: translate(530px, 168px) rotate(170deg); }}
-  50% {{ transform: translate(100px, 160px) rotate(190deg); }}
-  100% {{ transform: translate(530px, 168px) rotate(170deg); }}
-}}
-@keyframes fly-c {{
-  0% {{ transform: translate(500px, 78px) rotate(172deg); }}
-  50% {{ transform: translate(120px, 70px) rotate(188deg); }}
-  100% {{ transform: translate(500px, 78px) rotate(172deg); }}
-}}
+.logo {{ display: inline-flex; align-items: center; gap: 2px; line-height: 1; text-decoration: none; color: #1c1612; }}
+.logo .bee {{ width: 84px; height: 84px; flex: 0 0 auto; }}
+.home .logo .bee {{ width: 109px; height: 109px; }}
+.logo .name {{ font-family: Georgia, "Times New Roman", serif; font-size: 42px; font-weight: 700; letter-spacing: -0.03em; }}
+.home .logo .name {{ font-size: 68px; }}
 .home main {{ max-width: 640px; padding-top: 10vh; text-align: center; }}
-.home .en {{ margin: 8px 0 28px; color: #70757a; font-size: 13px; letter-spacing: 0.22em; text-transform: uppercase; }}
+.home .en {{ margin: 4px 0 28px; color: #6b645c; font-size: 13px; letter-spacing: 0.22em; text-transform: uppercase; }}
 form {{ position: relative; margin: 12px 0 22px; }}
 form:has(details[open]) {{ margin-bottom: 58px; }}
-.ask {{ display: flex; align-items: center; gap: 4px; border: 1px solid #dfe1e5; border-radius: 24px; padding: 0 6px 0 8px; background: #fff; }}
-.home .ask {{ box-shadow: 0 1px 6px rgba(32,33,36,.16); }}
-.ask:focus-within {{ border-color: #4285f4; box-shadow: 0 1px 6px rgba(32,33,36,.28); }}
+.ask {{ display: flex; align-items: center; gap: 8px; border: 1px solid #e7e1d6; border-radius: 32px; padding: 6px 6px 6px 20px; background: #fff; box-shadow: 0 6px 18px rgba(28,22,18,.08); }}
+.ask:focus-within {{ border-color: #1c1612; box-shadow: 0 8px 22px rgba(28,22,18,.12); }}
 h2.band {{ font-size: 16px; font-weight: 600; margin: 8px 0 12px; }}
-input[type=search] {{ flex: 1; min-width: 0; height: 44px; border: 0; border-radius: 24px; padding: 0 12px; font-size: 16px; background: transparent; }}
-input[type=search]:focus {{ outline: none; }}
-button.go {{ height: 36px; border: 0; border-radius: 18px; padding: 0 14px; background: #1a73e8; color: #fff; font-size: 14px; cursor: pointer; }}
+textarea[name=q] {{ flex: 1; min-width: 0; box-sizing: border-box; min-height: 40px; max-height: 112px; border: 0; margin: 0; padding: 8px 2px; resize: none; overflow: hidden; font: inherit; font-size: 16px; line-height: 24px; background: transparent; }}
+textarea[name=q]:focus {{ outline: none; }}
+.ask button.go {{ display: grid; place-items: center; width: 54px; height: 54px; flex: 0 0 auto; padding: 0; border: 0; background: transparent; cursor: pointer; }}
+.ask button.go svg {{ width: 54px; height: 54px; display: block; }}
+.ask button.go:hover svg, .ask button.go:focus-visible svg {{ transform: scale(1.06); }}
+.ask button.go:focus-visible {{ outline: none; }}
+form.admit button.go {{ height: 44px; padding: 0 18px; border: 0; border-radius: 22px; background: #1c1612; color: #fff; font: inherit; font-size: 15px; cursor: pointer; }}
 details.tune {{ position: static; }}
-summary.settings {{ display: grid; place-items: center; width: 36px; height: 36px; border-radius: 50%; color: #5f6368; cursor: pointer; list-style: none; }}
+summary.settings {{ display: grid; place-items: center; width: 40px; height: 40px; margin-right: 2px; border-radius: 50%; color: #5f6368; cursor: pointer; list-style: none; }}
 summary.settings::-webkit-details-marker {{ display: none; }}
-details.tune[open] > summary.settings {{ background: #202124; color: #fff; }}
-.filters {{ position: absolute; left: 0; top: calc(100% + 10px); }}
-label.chip {{ position: relative; display: inline-flex; align-items: center; }}
-select.region {{ appearance: none; height: 36px; max-width: min(100%, 320px); border: 0; border-radius: 18px; padding: 0 36px 0 14px; font-size: 14px; background: #f1f3f4; color: #202124; cursor: pointer; }}
-label.chip svg {{ position: absolute; right: 12px; color: #5f6368; pointer-events: none; }}
+summary.settings:hover {{ background: #f6f1e7; }}
+details.tune[open] > summary.settings {{ background: #1c1612; color: #fff; }}
+.filters {{ position: absolute; left: 0; right: 0; top: calc(100% + 8px); z-index: 4; padding: 14px 14px 8px; border: 1px solid #e7e1d6; border-radius: 18px; background: #fff; box-shadow: 0 10px 28px rgba(28,22,18,.12); text-align: left; }}
+.filter-label {{ margin: 0 0 8px; color: #6b645c; font-size: 12px; letter-spacing: .08em; text-transform: uppercase; }}
+.themes {{ display: flex; flex-wrap: wrap; gap: 8px; margin: 0 0 14px; }}
+button.theme {{ border: 1px solid #e7e1d6; border-radius: 16px; padding: 6px 12px; background: #fff; color: #1c1612; font: inherit; font-size: 14px; cursor: pointer; }}
+button.theme.on, button.theme:hover {{ background: #fff8e1; border-color: #f0e2a8; }}
+input.region-find {{ box-sizing: border-box; width: 100%; height: 40px; margin: 0 0 8px; padding: 0 14px; border: 1px solid #e7e1d6; border-radius: 14px; background: #fff; color: #1c1612; font: inherit; font-size: 15px; }}
+input.region-find:focus {{ outline: none; border-color: #1c1612; }}
+.region-menu {{ max-height: 220px; overflow: auto; margin: 0 0 6px; padding: 4px; border-radius: 12px; background: #fbfaf7; scrollbar-color: #e4d39a transparent; scrollbar-width: thin; }}
+.region-menu::-webkit-scrollbar {{ width: 10px; }}
+.region-menu::-webkit-scrollbar-thumb {{ background: #e4d39a; border-radius: 8px; border: 2px solid #fbfaf7; }}
+button.region-opt {{ display: block; width: 100%; margin: 0; padding: 9px 12px; border: 0; border-radius: 10px; background: transparent; color: #1c1612; font: inherit; font-size: 14px; line-height: 1.3; text-align: left; cursor: pointer; }}
+button.region-opt[hidden] {{ display: none; }}
+button.region-opt:hover, button.region-opt:focus-visible {{ background: #fff8e1; outline: none; }}
+button.region-opt.on {{ background: #f6e7b0; font-weight: 600; }}
+p.region-now, p.subject-now {{ margin: 8px 0 0 18px; color: #5c3a12; font-size: 13px; text-align: left; }}
+p.region-now + p.subject-now, p.subject-now + p.region-now {{ margin-top: 2px; }}
 nav.kinds {{ display: flex; flex-wrap: wrap; gap: 8px 14px; margin: 4px 0 16px; }}
 nav.kinds a {{ color: #5f6368; text-decoration: none; font-size: 14px; padding-bottom: 6px; }}
 nav.kinds a.on {{ color: #202124; font-weight: 600; border-bottom: 2px solid #202124; }}
@@ -285,6 +305,7 @@ button.wire-open, button.nudge {{ height: 32px; border: 1px solid #dadce0; borde
 button.wire-open {{ padding: 0 14px; }}
 button.nudge {{ width: 32px; padding: 0; flex: 0 0 auto; }}
 .rail {{ display: flex; align-items: center; gap: 8px; }}
+.rail[hidden] {{ display: none; }}
 .wire-row {{ display: flex; gap: 10px; overflow-x: auto; scroll-behavior: smooth; flex: 1; min-width: 0; padding: 2px 0 8px; }}
 .wire-row a.card {{ flex: 0 0 220px; display: block; padding: 8px 10px; border: 1px solid #dadce0; border-radius: 8px; text-decoration: none; }}
 .wire-row a.card b {{ display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; color: #1a0dab; font-size: 14px; font-weight: 600; line-height: 1.35; }}
@@ -322,13 +343,42 @@ ul.check {{ list-style: none; padding: 0; margin: 8px 0 16px; }}
 ul.check li {{ margin: 0 0 8px; }}
 ul.check li.ok {{ color: #137333; }}
 ul.check li.fix {{ color: #8a4b08; }}
-footer {{ flex-shrink: 0; margin-top: auto; border-top: 1px solid #dadce0; background: #f8f9fa; }}
+footer {{ position: relative; flex-shrink: 0; margin-top: auto; border-top: 1px solid #dadce0; background: #f8f9fa; }}
 .foot {{ max-width: 680px; margin: 0 auto; padding: 22px 16px 28px; color: #4d5156; font-size: 14px; line-height: 1.5; }}
 .foot nav {{ display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 12px; }}
 .foot a {{ color: #1a0dab; }}
 p.census {{ margin: 0 0 10px; color: #70757a; font-size: 13px; }}
-p.credit {{ display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 0; }}
+p.credit {{ display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin: 0; }}
+p.credit span {{ margin-right: auto; }}
+.comb {{ position: absolute; right: 16px; bottom: 14px; width: 72px; height: 72px; }}
 a.help {{ flex: 0 0 auto; margin: 0; padding: 3px 10px; border-radius: 12px; background: #fff8e1; border: 1px solid #f0c14b; color: #5c3a12; font-size: 12px; font-weight: 600; line-height: 1.4; text-decoration: none; white-space: nowrap; }}
+body.cabinet main {{ max-width: 1080px; }}
+.cabinet {{ display: flex; gap: 28px; align-items: flex-start; }}
+.side {{ position: sticky; top: 12px; flex: 0 0 168px; display: grid; gap: 2px; }}
+.side a {{ display: block; padding: 8px 12px; border-radius: 8px; color: #3c4043; text-decoration: none; font-size: 14px; }}
+.side a:hover {{ background: #f1f3f4; }}
+.sheets {{ flex: 1; min-width: 0; }}
+.sheets section {{ scroll-margin-top: 12px; margin: 0 0 28px; padding-bottom: 8px; }}
+.bars {{ display: grid; gap: 8px; margin: 8px 0 16px; }}
+.bar {{ display: grid; grid-template-columns: minmax(72px, 150px) 1fr auto; gap: 8px; align-items: center; font-size: 13px; }}
+.bar i {{ display: block; height: 12px; background: #f1f3f4; border-radius: 6px; overflow: hidden; }}
+.bar i b {{ display: block; height: 100%; border-radius: 6px; }}
+.bar em {{ font-style: normal; font-weight: 600; }}
+.legend {{ color: #70757a; font-size: 13px; }}
+.bee-row {{ display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }}
+.bee-row .nums {{ color: #3c4043; font-size: 13px; text-align: right; }}
+.quiet {{ color: #8a4b08; font-weight: 600; }}
+svg.chart {{ width: min(100%, 720px); height: auto; margin: 8px 0 12px; }}
+.map {{ display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0 16px; }}
+.map b, .map span {{ padding: 6px 10px; border-radius: 14px; background: #f1f3f4; }}
+.map b {{ background: #fff8e1; }}
+form.inline {{ display: flex; flex-wrap: wrap; gap: 8px; align-items: end; margin: 8px 0 16px; }}
+form.inline input {{ height: 36px; border: 1px solid #dadce0; border-radius: 8px; padding: 0 10px; }}
+@media (max-width: 760px) {{
+  .cabinet {{ display: block; }}
+  .side {{ position: static; display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 16px; }}
+  .comb {{ position: static; margin-left: auto; }}
+}}
 </style>
 </head>
 <body{root}>
@@ -337,20 +387,27 @@ a.help {{ flex: 0 0 auto; margin: 0; padding: 3px 10px; border-radius: 12px; bac
 {english}
 <form action="/search" method="get">
 <div class="ask">
-<input type="search" name="q" value="{q}"{focus} placeholder="Запрос">
-<button class="go" type="submit">Найти</button>
+<textarea name="q" rows="1"{focus} placeholder="Запрос">{q}</textarea>
+<button class="go" type="submit" aria-label="Найти">{bee}</button>
 {region_select}
 </div>
+{region_line}
+{subject_line}
 </form>
 {tabs}
 {body}
 </main>
 {footer}
+{ask_script}
 </body>
 </html>"#,
         footer = footer(),
-        region_select = region_select(region),
+        region_select = search_settings(region, tab),
+        region_line = region_line(region),
+        subject_line = subject_line(tab),
         tabs = tab_row(query, region, tab),
+        bee = search_bee_svg(),
+        ask_script = ASK_SCRIPT,
     )
 }
 
@@ -364,11 +421,6 @@ fn tab_row(query: &str, region: Option<&str>, current: &str) -> String {
         ("gov", "Органы власти"),
         ("jobs", "Работа"),
         ("services", "Услуги"),
-        ("medicine", "Медицина"),
-        ("goods", "Товары"),
-        ("docs", "Документы"),
-        ("images", "Картинки"),
-        ("video", "Видео"),
     ];
     let mut out = String::from("<nav class=\"kinds\" aria-label=\"Тип страницы\">");
     for (id, label) in TABS {
@@ -382,37 +434,150 @@ fn tab_row(query: &str, region: Option<&str>, current: &str) -> String {
     out
 }
 
-const FEED_SCRIPT: &str = r#"<script>
-document.querySelectorAll("ul.offers").forEach(function (list) {
-  var feed = list.getAttribute("data-feed");
-  var query = (list.getAttribute("data-q") || "").toLowerCase().split(/\s+/).filter(Boolean);
-  if (!feed) return;
-  fetch(feed).then(function (response) { return response.text(); }).then(function (xml) {
-    var offers = xml.match(/<offer\b[\s\S]*?<\/offer>/gi) || [];
-    var shown = 0;
-    for (var i = 0; i < offers.length && shown < 5; i++) {
-      var name = tagText(offers[i], "name");
-      var href = tagText(offers[i], "url");
-      var price = tagText(offers[i], "price");
-      if (!name || !href) continue;
-      var hay = name.toLowerCase();
-      if (query.length && !query.every(function (word) { return hay.indexOf(word) !== -1; })) continue;
-      var item = document.createElement("li");
-      var link = document.createElement("a");
-      link.href = href;
-      link.textContent = price ? name + " — " + price : name;
-      item.appendChild(link);
-      list.appendChild(item);
-      shown++;
+const ASK_SCRIPT: &str = r#"<script>
+(function () {
+  var menu = document.querySelector(".region-menu");
+  var hidden = document.querySelector("input[name=region]");
+  var form = document.querySelector("form[action='/search']");
+  function showRegion(name) {
+    var line = document.querySelector("p.region-now");
+    if (!name) {
+      if (line) line.remove();
+      return;
     }
-  }).catch(function () {});
-});
-function tagText(block, tag) {
-  var match = block.match(new RegExp("<" + tag + "[^>]*>([\\s\\S]*?)</" + tag + ">", "i"));
-  if (!match) return "";
-  return match[1].replace(/<!\[CDATA\[|\]\]>/g, "").replace(/<[^>]+>/g, "").trim();
-}
-</script>"#;
+    if (!line && form) {
+      line = document.createElement("p");
+      line.className = "region-now";
+      var ask = form.querySelector(".ask");
+      if (ask && ask.nextSibling) form.insertBefore(line, ask.nextSibling);
+      else form.appendChild(line);
+    }
+    if (line) line.textContent = name;
+  }
+  if (menu && hidden) {
+    menu.addEventListener("click", function (event) {
+      var button = event.target.closest("button.region-opt");
+      if (!button) return;
+      hidden.value = button.getAttribute("data-region") || "";
+      var items = menu.querySelectorAll("button.region-opt");
+      for (var i = 0; i < items.length; i++) {
+        if (items[i] === button) items[i].classList.add("on");
+        else items[i].classList.remove("on");
+      }
+      showRegion(hidden.value ? button.textContent : "");
+      var tune = menu.closest("details");
+      if (tune) tune.open = false;
+    });
+  }
+  var find = document.querySelector("input.region-find");
+  var tune = document.querySelector("details.tune");
+  if (find && menu) {
+    find.addEventListener("keydown", function (event) {
+      if (event.key === "Enter") event.preventDefault();
+    });
+    find.addEventListener("input", function () {
+      var needle = find.value.trim().toLowerCase();
+      var items = menu.querySelectorAll("button.region-opt");
+      for (var i = 0; i < items.length; i++) {
+        var button = items[i];
+        var all = !button.getAttribute("data-region");
+        var show = !needle || all || button.textContent.toLowerCase().indexOf(needle) !== -1;
+        button.hidden = !show;
+      }
+    });
+  }
+  if (tune && find) {
+    tune.addEventListener("toggle", function () {
+      if (tune.open) return;
+      find.value = "";
+      find.dispatchEvent(new Event("input"));
+    });
+  }
+  var themes = document.querySelector(".themes");
+  var tabInput = document.querySelector("input[name=tab]");
+  if (themes && tabInput) {
+    themes.addEventListener("click", function (event) {
+      var button = event.target.closest("button.theme[data-tab]");
+      if (!button) return;
+      tabInput.value = button.getAttribute("data-tab") || "";
+      var items = themes.querySelectorAll("button.theme[data-tab]");
+      for (var i = 0; i < items.length; i++) {
+        if (items[i] === button) items[i].classList.add("on");
+        else items[i].classList.remove("on");
+      }
+      var box = document.querySelector("textarea[name=q]");
+      if (box && box.value.trim() && box.form) box.form.requestSubmit();
+    });
+  }
+  var radii = document.querySelector(".radii");
+  var radiusInput = document.querySelector("input[name=radius]");
+  var latInput = document.querySelector("input[name=lat]");
+  var lonInput = document.querySelector("input[name=lon]");
+  if (radii && radiusInput && latInput && lonInput) {
+    var params = new URLSearchParams(window.location.search);
+    var curRadius = params.get("radius") || "";
+    radiusInput.value = curRadius;
+    latInput.value = params.get("lat") || "";
+    lonInput.value = params.get("lon") || "";
+    var rButtons = radii.querySelectorAll("button.radius-opt");
+    for (var r = 0; r < rButtons.length; r++) {
+      if ((rButtons[r].getAttribute("data-radius") || "") === curRadius) rButtons[r].classList.add("on");
+      else rButtons[r].classList.remove("on");
+    }
+    radii.addEventListener("click", function (event) {
+      var button = event.target.closest("button.radius-opt");
+      if (!button) return;
+      var rad = button.getAttribute("data-radius") || "";
+      var items = radii.querySelectorAll("button.radius-opt");
+      for (var i = 0; i < items.length; i++) {
+        if (items[i] === button) items[i].classList.add("on");
+        else items[i].classList.remove("on");
+      }
+      if (!rad) {
+        radiusInput.value = "";
+        latInput.value = "";
+        lonInput.value = "";
+        var box = document.querySelector("textarea[name=q]");
+        if (box && box.value.trim() && box.form) box.form.requestSubmit();
+        return;
+      }
+      radiusInput.value = rad;
+      if (latInput.value && lonInput.value) {
+        var boxReady = document.querySelector("textarea[name=q]");
+        if (boxReady && boxReady.value.trim() && boxReady.form) boxReady.form.requestSubmit();
+        return;
+      }
+      if (navigator.geolocation) {
+        navigator.geolocation.getCurrentPosition(function (pos) {
+          latInput.value = pos.coords.latitude.toFixed(3);
+          lonInput.value = pos.coords.longitude.toFixed(3);
+          var boxNow = document.querySelector("textarea[name=q]");
+          if (boxNow && boxNow.value.trim() && boxNow.form) boxNow.form.requestSubmit();
+        });
+      }
+    });
+  }
+  var box = document.querySelector("textarea[name=q]");
+  if (!box) return;
+  var max = 24 * 4 + 16;
+  function grow() {
+    box.style.height = "0px";
+    var full = box.scrollHeight;
+    var next = full > max ? max : full;
+    box.style.height = next + "px";
+    box.style.overflowY = full > max ? "auto" : "hidden";
+  }
+  box.addEventListener("input", grow);
+  box.addEventListener("keydown", function (event) {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      if (box.form) box.form.requestSubmit();
+    }
+  });
+  grow();
+})();
+</script>
+"#;
 
 const WIRE_SCRIPT: &str = r#"<script>
 document.querySelectorAll("section.wire").forEach(function (box) {
@@ -420,6 +585,8 @@ document.querySelectorAll("section.wire").forEach(function (box) {
   var rail = box.querySelector(".rail");
   var row = box.querySelector(".wire-row");
   var query = (box.getAttribute("data-q") || "").toLowerCase().split(/\s+/).filter(Boolean);
+  var feed = box.getAttribute("data-feed") || "";
+  var offers = box.getAttribute("data-offers") || "";
   var loaded = false;
   button.addEventListener("click", function () {
     if (!rail.hidden) {
@@ -432,18 +599,20 @@ document.querySelectorAll("section.wire").forEach(function (box) {
     if (loaded) return;
     loaded = true;
     button.textContent = "Загрузка";
-    fetch("/wire").then(function (response) { return response.json(); }).then(function (items) {
+    var address = offers ? "/offers?feed=" + encodeURIComponent(offers) : (feed ? "/wire?feed=" + encodeURIComponent(feed) : "/wire");
+    fetch(address).then(function (response) { return response.json(); }).then(function (items) {
       button.textContent = "Скрыть";
       var shown = 0;
       (items || []).forEach(function (item) {
-        if (shown >= 40 || !item || !item.title || !item.url) return;
-        var hay = String(item.title).toLowerCase();
+        var titleText = item && (item.title || item.name);
+        if (shown >= 40 || !titleText || !item.url) return;
+        var hay = String(titleText).toLowerCase();
         if (query.length && !query.every(function (word) { return hay.indexOf(word) !== -1; })) return;
         var card = document.createElement("a");
         card.className = "card";
         card.href = item.url;
         var title = document.createElement("b");
-        title.textContent = item.title;
+        title.textContent = item.price ? titleText + " — " + item.price : titleText;
         var source = document.createElement("span");
         source.textContent = item.source || "";
         card.appendChild(title);
@@ -454,7 +623,7 @@ document.querySelectorAll("section.wire").forEach(function (box) {
       if (!shown) {
         var empty = document.createElement("p");
         empty.className = "hint";
-        empty.textContent = "В свежих лентах этого запроса нет.";
+        empty.textContent = offers ? "В фиде товаров сейчас нет." : "В свежих лентах этого запроса нет.";
         row.appendChild(empty);
       }
     }).catch(function () {
@@ -474,21 +643,104 @@ document.querySelectorAll("section.wire").forEach(function (box) {
 });
 </script>"#;
 
-fn region_select(selected: Option<&str>) -> String {
-    let open = if selected.is_some() { " open" } else { "" };
-    let mut options = String::from("<option value=\"\">Все регионы</option>");
+fn subject_line(tab: &str) -> String {
+    let Some(label) = subject_label(tab) else {
+        return String::new();
+    };
+    format!("<p class=\"subject-now\">{label}</p>")
+}
+
+fn subject_label(tab: &str) -> Option<&'static str> {
+    match tab {
+        "medicine" => Some("Медицина"),
+        "shop" => Some("Интернет-магазины"),
+        "haul" => Some("Перевозки"),
+        "auto" => Some("Авто"),
+        "realty" => Some("Недвижимость"),
+        "build" => Some("Стройка и ремонт"),
+        "edu" => Some("Образование"),
+        "ads" => Some("Реклама и маркетинг"),
+        "ai" => Some("Искусственный интеллект"),
+        _ => None,
+    }
+}
+
+fn region_line(selected: Option<&str>) -> String {
+    match selected {
+        Some(name) if !name.is_empty() => format!("<p class=\"region-now\">{}</p>", escape(name)),
+        _ => String::new(),
+    }
+}
+
+fn search_settings(selected: Option<&str>, tab: &str) -> String {
+    let current = selected.unwrap_or("");
+    let mut options = String::new();
+    let all_on = if current.is_empty() { " on" } else { "" };
+    options.push_str(&format!(
+        r#"<button type="button" class="region-opt{all_on}" data-region="" role="option">Все регионы</button>"#
+    ));
     for name in region_names() {
-        if Some(*name) == selected {
-            options.push_str(&format!("<option value=\"{}\" selected>{name}</option>", escape(name)));
-        } else {
-            options.push_str(&format!("<option value=\"{}\">{name}</option>", escape(name)));
-        }
+        let on = if Some(*name) == selected { " on" } else { "" };
+        options.push_str(&format!(
+            "<button type=\"button\" class=\"region-opt{on}\" data-region=\"{}\" role=\"option\">{name}</button>",
+            escape(name)
+        ));
+    }
+    let mut themes = String::new();
+    let clear_on = if subject_label(tab).is_none() { " on" } else { "" };
+    themes.push_str(&format!(
+        "<button type=\"button\" class=\"theme{clear_on}\" data-tab=\"\">Без тематики</button>"
+    ));
+    for (id, label) in [
+        ("medicine", "Медицина"),
+        ("shop", "Интернет-магазины"),
+        ("haul", "Перевозки"),
+        ("auto", "Авто"),
+        ("realty", "Недвижимость"),
+        ("build", "Стройка и ремонт"),
+        ("edu", "Образование"),
+        ("ads", "Реклама и маркетинг"),
+        ("ai", "Искусственный интеллект"),
+    ] {
+        let on = if id == tab { " on" } else { "" };
+        themes.push_str(&format!(
+            "<button type=\"button\" class=\"theme{on}\" data-tab=\"{id}\">{label}</button>"
+        ));
+    }
+    let mut radii = String::new();
+    for (val, label) in [
+        ("", "Выкл"),
+        ("0.5", "500 м"),
+        ("1", "1 км"),
+        ("5", "5 км"),
+        ("50", "50 км"),
+        ("100", "100 км"),
+    ] {
+        let on = if val.is_empty() { " on" } else { "" };
+        radii.push_str(&format!(
+            "<button type=\"button\" class=\"theme radius-opt{on}\" data-radius=\"{val}\">{label}</button>"
+        ));
     }
     format!(
-        r#"<details class="tune"{open}>
+        r#"<details class="tune">
 <summary class="settings" aria-label="Настройки поиска"><svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" d="M4 7h16M4 12h16M4 17h16"/><circle cx="9" cy="7" r="1.7" fill="currentColor" stroke="none"/><circle cx="15" cy="12" r="1.7" fill="currentColor" stroke="none"/><circle cx="8" cy="17" r="1.7" fill="currentColor" stroke="none"/></svg></summary>
-<div class="filters"><label class="chip"><select class="region" name="region" aria-label="Регион">{options}</select><svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path fill="currentColor" d="M3 17.2V21h3.8L17.8 9.9l-3.8-3.8L3 17.2zm15.1-9.3 1.6-1.6a1 1 0 0 0 0-1.4l-2.3-2.3a1 1 0 0 0-1.4 0l-1.6 1.6 3.7 3.7z"/></svg></label></div>
-</details>"#
+<div class="filters">
+<p class="filter-label">Тематика</p>
+<div class="themes">{themes}</div>
+<p class="filter-label">Рядом со мной</p>
+<div class="themes radii">{radii}</div>
+<p class="filter-label">Регион</p>
+<input class="region-find" type="text" placeholder="Найти регион" aria-label="Найти регион" autocomplete="off">
+<div class="region-menu" role="listbox" aria-label="Регион">{options}</div>
+<input type="hidden" name="region" value="{current}">
+<input type="hidden" name="tab" value="{tab}">
+<input type="hidden" name="lat" value="">
+<input type="hidden" name="lon" value="">
+<input type="hidden" name="radius" value="">
+</div>
+</details>"#,
+        current = escape(current),
+        tab = escape(tab),
     )
 }
 
@@ -590,6 +842,7 @@ fn adult_section(query: &str, adult: &[Hit], adult_open: bool) -> String {
     out
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PeerLine {
     pub name: String,
     pub latency_ms: u64,
@@ -598,6 +851,58 @@ pub struct PeerLine {
     pub pages: u32,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ShellLine {
+    pub day_apps: i64,
+    pub day_pages: i64,
+    pub week_apps: i64,
+    pub week_pages: i64,
+    pub month_apps: i64,
+    pub month_pages: i64,
+    pub all_apps: i64,
+    pub all_pages: i64,
+    pub batch: i64,
+    pub gap_min: i64,
+    pub window_max: i64,
+    #[serde(default = "default_shell_max")]
+    pub max_batch: i64,
+    #[serde(default = "default_shell_gap")]
+    pub min_gap: i64,
+    #[serde(default = "default_grants")]
+    pub grants: i64,
+}
+
+fn default_shell_max() -> i64 {
+    8
+}
+
+fn default_shell_gap() -> i64 {
+    1
+}
+
+fn default_grants() -> i64 {
+    60
+}
+
+fn default_refresh_batch() -> i64 {
+    1
+}
+
+fn default_refresh_gap() -> i64 {
+    120
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct BeeLine {
+    pub host: String,
+    pub day: i64,
+    pub week: i64,
+    pub month: i64,
+    pub all: i64,
+    pub quiet: bool,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OperatorReport {
     pub pages: u64,
     pub queue: u64,
@@ -605,28 +910,423 @@ pub struct OperatorReport {
     pub searches_per_minute: u64,
     pub avg_ms: u64,
     pub peers: Vec<PeerLine>,
-    pub volunteers: Vec<String>,
+    pub shells: ShellLine,
+    pub bees: Vec<BeeLine>,
     pub refused: Vec<String>,
     pub rows: Vec<(String, i64, i64, i64, i64)>,
+    pub note: String,
     pub csrf: String,
+    pub base: String,
+    #[serde(default)]
+    pub sites: u64,
+    #[serde(default)]
+    pub new_today: i64,
+    #[serde(default)]
+    pub new_yesterday: i64,
+    #[serde(default)]
+    pub new_week: i64,
+    #[serde(default)]
+    pub new_month: i64,
+    #[serde(default)]
+    pub changed_today: i64,
+    #[serde(default)]
+    pub same_today: i64,
+    #[serde(default)]
+    pub hosts_today: i64,
+    #[serde(default)]
+    pub crawl_batch: i64,
+    #[serde(default)]
+    pub crawl_gap: i64,
+    #[serde(default)]
+    pub bee_batch: i64,
+    #[serde(default)]
+    pub bee_gap: i64,
+    #[serde(default)]
+    pub intake_days: Vec<(String, i64)>,
+    #[serde(default)]
+    pub cpu_hours: Vec<(String, i64)>,
+    #[serde(default)]
+    pub ram_hours: Vec<(String, i64)>,
+    #[serde(default)]
+    pub leased: u64,
+    #[serde(default)]
+    pub refresh_due: i64,
+    #[serde(default = "default_refresh_batch")]
+    pub refresh_batch: i64,
+    #[serde(default = "default_refresh_gap")]
+    pub refresh_gap: i64,
 }
 
-pub fn page_operator(report: &OperatorReport) -> String {
-    let mut body = format!(
-        "<p>Обезличенный журнал этой ноды. Адреса людей сюда не пишутся.</p>
-<ul class=\"load\">
-<li>Страниц в индексе: {}</li>
-<li>Очередь обхода: {}</li>
-<li>База: {} МБ</li>
-<li>Поисков за минуту: {}</li>
-<li>Среднее время ответа: {} мс</li>
-</ul>",
-        report.pages,
-        report.queue,
-        report.db_bytes / 1_048_576,
-        report.searches_per_minute,
-        report.avg_ms
+pub fn time_chart(points: &[(String, i64)], color: &str) -> String {
+    if points.is_empty() || points.iter().all(|(_, value)| *value == 0) {
+        return "<p>За этот срок чисел ещё нет.</p>".into();
+    }
+    let max = points.iter().map(|(_, value)| *value).max().unwrap_or(1).max(1) as f64;
+    let step = if points.len() < 2 { 640.0 } else { 640.0 / (points.len() - 1) as f64 };
+    let mut line = String::new();
+    let mut marks = String::new();
+    let mut labels = String::new();
+    for (index, (label, value)) in points.iter().enumerate() {
+        let x = index as f64 * step;
+        let y = 132.0 - (*value as f64 / max) * 112.0;
+        if index > 0 {
+            line.push(' ');
+        }
+        line.push_str(&format!("{x:.1},{y:.1}"));
+        marks.push_str(&format!(
+            "<circle cx=\"{x:.1}\" cy=\"{y:.1}\" r=\"3.5\" fill=\"{color}\"><title>{}: {value}</title></circle>",
+            escape(label)
+        ));
+        if index == 0 || index + 1 == points.len() || (points.len() > 4 && index == points.len() / 2) {
+            labels.push_str(&format!(
+                "<text x=\"{x:.1}\" y=\"156\" text-anchor=\"middle\" fill=\"#70757a\" font-size=\"11\">{}</text>",
+                escape(label)
+            ));
+        }
+    }
+    format!(
+        "<svg class=\"chart\" viewBox=\"0 0 640 168\" role=\"img\"><polyline fill=\"none\" stroke=\"{color}\" stroke-width=\"2\" points=\"{line}\"/>{marks}{labels}</svg>"
+    )
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+pub struct VisitNumbers {
+    pub visits: i64,
+    pub views: i64,
+    pub searches: i64,
+    pub bounces: i64,
+    pub dwell_seconds: i64,
+    pub timed_visits: i64,
+    pub empty_searches: i64,
+    pub search_errors: i64,
+    pub refused: i64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NodeChip {
+    pub base: String,
+    pub alive: bool,
+    pub latency_ms: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MapLine {
+    pub country: String,
+    pub region: String,
+    pub door: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CabinetSheets {
+    pub version: String,
+    pub region_label: String,
+    pub model: String,
+    pub days: Vec<(String, i64, i64)>,
+    pub visits_day: VisitNumbers,
+    pub visits_week: VisitNumbers,
+    pub visits_month: VisitNumbers,
+    pub queries_day: Vec<(String, i64)>,
+    pub queries_week: Vec<(String, i64)>,
+    pub queries_month: Vec<(String, i64)>,
+    pub index_urls: Vec<String>,
+    #[serde(default)]
+    pub kind_counts: Vec<(String, String, String, i64)>,
+    #[serde(default)]
+    pub muted: Vec<String>,
+    pub bee_hosts: Vec<String>,
+    pub nodes: Vec<NodeChip>,
+    pub map_version: Option<u64>,
+    pub map_places: Vec<MapLine>,
+    pub csrf: String,
+    pub base: String,
+}
+
+pub fn cabinet_sheets(view: &CabinetSheets, sheet: &str) -> (String, String) {
+    let mut stats = String::from(
+        "<section id=\"visits\"><h2>Заходы</h2><p>Это браузеры, не имена людей. Адрес не пишется и к запросу не привязывается. Время — от первого запроса визита до последнего; одна открытая страница времени не даёт. Отказ — ушёл, не поискав и не открыв вторую страницу.</p>",
     );
+    stats.push_str("<h3>По дням</h3>");
+    stats.push_str(&time_chart(
+        &view.days.iter().map(|(day, visits, _)| (short_label(day), *visits)).collect::<Vec<_>>(),
+        "#1a73e8",
+    ));
+    stats.push_str("<p class=\"legend\">Точки — заходы по дням.</p>");
+    for (title, report) in [
+        ("Сегодня", view.visits_day),
+        ("За неделю", view.visits_week),
+        ("За месяц", view.visits_month),
+    ] {
+        stats.push_str(&format!("<h3>{title}</h3>{}", visit_block(report)));
+    }
+    if sheet == "visits" {
+        stats.push_str("</section>");
+        return (stats, String::new());
+    }
+    stats.clear();
+    if sheet != "queries" {
+        stats.push_str("");
+    } else {
+    stats.push_str("<section id=\"queries\"><h2>Запросы</h2><p>Одинаковый текст склеен. Число — сколько раз его спросили за этот срок. Буквы ё и е не склеиваются.</p>");
+    stats.push_str(&time_chart(
+        &view.days.iter().map(|(day, _, searches)| (short_label(day), *searches)).collect::<Vec<_>>(),
+        "#e6a817",
+    ));
+    stats.push_str("<p class=\"legend\">Точки — поиски по дням.</p>");
+    stats.push_str("<h3>Сегодня</h3><ul class=\"check\">");
+    for (query, count) in view.queries_day.iter().take(8) {
+        stats.push_str(&format!("<li>{} — {}</li>", escape(query), count));
+    }
+    stats.push_str("</ul>");
+    for (title, rows) in [("За неделю", &view.queries_week), ("За месяц", &view.queries_month)] {
+        stats.push_str(&format!("<h3>{title}</h3><ul class=\"check\">"));
+        for (query, count) in rows.iter().take(8) {
+            stats.push_str(&format!("<li>{} — {}</li>", escape(query), count));
+        }
+        stats.push_str("</ul>");
+    }
+    stats.push_str("</section>");
+    }
+    let csrf = escape(&view.csrf);
+    let base = escape(&view.base);
+    let mut rest = format!(
+        "<section id=\"index\"><h2>Индекс</h2><ul class=\"load\"><li>Версия: {}</li><li>Край: {}</li><li>Поколение модели: {}</li></ul>
+<p>Ниже первые страницы, с которых индекс начал расти. Это стартовые цветки. Пчела читает такой сайт, находит на нём ссылки и несёт текст в улей. Новая ссылка встаёт в очередь обхода. Следующий заход берёт очередь, снова находит ссылки, и индекс растёт. Весь индекс в этот список не входит: число сайтов и страниц стоит на странице «Нода».</p>
+<p>Поле добавляет свой сайт в этот старт. Улей ставит адрес в очередь и обходит его по обычным правилам: robots.txt, noindex и потолок страниц.</p>
+<form class=\"inline\" method=\"post\" action=\"{base}/operator?sheet=index\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\"><input name=\"url\" placeholder=\"https://сайт/страница\" required><button name=\"action\" value=\"enqueue\">Добавить в индекс</button></form>
+<h3>Первые страницы</h3><ul class=\"check\">",
+        escape(&view.version),
+        escape(&view.region_label),
+        escape(&view.model)
+    );
+    for url in &view.index_urls {
+        rest.push_str(&format!("<li>{}</li>", escape(url)));
+    }
+    rest.push_str("</ul><h3>Метки индекса</h3><p>Публичные метки видны человеку в полосе типа страницы и в шестерёнке тематик. Скрытые метки (<code>docs</code>, <code>goods</code>, <code>images</code>, <code>video</code>, <code>channel</code>) человеку не показываются и нужны для поиска и отбора через MCP (параметр <code>kind</code> в <code>search</code> и <code>index_pages</code>, сводка <code>kind_counts</code>).</p><table class=\"log\"><tr><th>Метка</th><th>Код для MCP</th><th>Где живёт</th><th>Страниц</th></tr>");
+    for (code, label, place, count) in &view.kind_counts {
+        rest.push_str(&format!(
+            "<tr><td>{}</td><td><code>{}</code></td><td>{}</td><td>{count}</td></tr>",
+            escape(label),
+            escape(code),
+            escape(place),
+        ));
+    }
+    rest.push_str("</table><h3>Скрыть сайт из выдачи</h3>");
+    rest.push_str("<p>Страницы сайта остаются в базе этой ноды. В поиске этой ноды сайт не показывается, пока оператор его не вернёт. Другой улей этот список не получает и решает сам. Удаления страниц здесь нет: обход иначе принёс бы их снова. Остановить пчелу, которая приносит страницы, — отдельная кнопка на странице «Пчёлы».</p>");
+    rest.push_str(&format!(
+        "<form class=\"inline\" method=\"post\" action=\"{base}/operator?sheet=index\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\"><input name=\"host\" placeholder=\"сайт или https://сайт\" required><button name=\"action\" value=\"mute\">Скрыть из выдачи</button><button name=\"action\" value=\"unmute\">Вернуть в выдачу</button></form>"
+    ));
+    if view.muted.is_empty() {
+        rest.push_str("<p>Скрытых сайтов нет.</p>");
+    } else {
+        rest.push_str("<ul class=\"check\">");
+        for host in &view.muted {
+            rest.push_str(&format!("<li>{}</li>", escape(host)));
+        }
+        rest.push_str("</ul>");
+    }
+    rest.push_str("</section><section id=\"door\"><h2>Дверь</h2><h3>Связи</h3><div class=\"map\"><b>Этот улей</b>");
+    for host in &view.bee_hosts {
+        rest.push_str(&format!("<span>пчела {}</span>", escape(host)));
+    }
+    for node in &view.nodes {
+        let mark = if node.alive { "жива" } else { "не отвечает" };
+        rest.push_str(&format!("<span>{} · {mark}</span>", escape(&node.base)));
+    }
+    rest.push_str("</div>");
+    rest.push_str(&format!(
+        "<form class=\"inline\" method=\"post\" action=\"{base}/operator\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\"><input name=\"base\" placeholder=\"https://хост:порт\" required><button name=\"action\" value=\"handshake\">Рукопожатие</button></form>"
+    ));
+    if !view.nodes.is_empty() {
+        rest.push_str("<ul class=\"check\">");
+        for node in &view.nodes {
+            let state_text = if node.alive {
+                format!("жива, {} мс", node.latency_ms)
+            } else {
+                "не отвечает".into()
+            };
+            rest.push_str(&format!(
+                "<li>{} — {state_text} <form class=\"inline\" method=\"post\" action=\"{base}/operator\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\"><input type=\"hidden\" name=\"base\" value=\"{}\"><button name=\"action\" value=\"forget_node\">Убрать</button></form></li>",
+                escape(&node.base),
+                escape(&node.base)
+            ));
+        }
+        rest.push_str("</ul>");
+    }
+    rest.push_str("<h3>Карта сети</h3>");
+    if let Some(version) = view.map_version {
+        rest.push_str(&format!("<p>Версия карты {version}.</p><ul class=\"check\">"));
+        for place in &view.map_places {
+            rest.push_str(&format!(
+                "<li>{} / {} — {}</li>",
+                escape(&place.country),
+                escape(&place.region),
+                escape(&place.door)
+            ));
+        }
+        rest.push_str("</ul>");
+    } else {
+        rest.push_str("<p>Подписанной карты нет, поэтому кнопка другого края не показывается.</p>");
+    }
+    rest.push_str(&format!(
+        "<h3>MCP</h3><p>Сейчас адрес <code>{base}/mcp</code> на этом же сайте. Когда появится домен, ключ пойдёт на https://admin.&lt;домен&gt;/mcp, порт 443. Ключ отдельно от пароля кабинета.</p>
+<form method=\"post\" action=\"{base}/operator\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\"><button name=\"action\" value=\"issue_mcp\">Выдать ключ</button><button name=\"action\" value=\"revoke_mcp\">Отозвать</button></form></section>"
+    ));
+    let door_at = rest.find("<section id=\"door\">").unwrap_or(rest.len());
+    let index_html = rest[..door_at].to_string();
+    let door_html = rest[door_at..].to_string();
+    let rest = match sheet {
+        "index" => index_html,
+        "door" => door_html,
+        _ => String::new(),
+    };
+    (stats, rest)
+}
+
+fn short_hour(hour: &str) -> String {
+    hour.rsplit(' ').next().unwrap_or(hour).to_string()
+}
+
+fn short_label(day: &str) -> String {
+    let mut parts = day.split('-');
+    let _year = parts.next();
+    match (parts.next(), parts.next()) {
+        (Some(month), Some(date)) if !month.is_empty() && !date.is_empty() => format!("{date}.{month}"),
+        _ => day.to_string(),
+    }
+}
+
+fn visit_block(report: VisitNumbers) -> String {
+    let time = if report.timed_visits > 0 {
+        format!("{} с", report.dwell_seconds / report.timed_visits)
+    } else {
+        "ещё не измерено".into()
+    };
+    let bounces = if report.visits > 0 {
+        format!("{} ({}%)", report.bounces, report.bounces * 100 / report.visits)
+    } else {
+        "0".into()
+    };
+    format!(
+        "<ul class=\"load\"><li>Заходы: {}</li><li>Просмотры: {}</li><li>Среднее время: {time}</li><li>Отказы: {bounces}</li><li>Поиски: {}</li><li>Пустая выдача: {}</li><li>Ошибки поиска: {}</li><li>Запросы, которые нода не ищет: {}</li></ul>",
+        report.visits, report.views, report.searches, report.empty_searches, report.search_errors, report.refused
+    )
+}
+
+pub fn page_operator(report: &OperatorReport, stats: &str, rest: &str, sheet: &str) -> String {
+    let sheet = match sheet {
+        "visits" | "queries" | "journal" | "bees" | "index" | "door" => sheet,
+        _ => "node",
+    };
+    let pace = if report.searches_per_minute == 0 {
+        "Поисков за последнюю минуту не было.".to_string()
+    } else if report.avg_ms == 0 {
+        format!(
+            "Поисков за последнюю минуту: {}. Время ответа в этом запуске ещё не измерено.",
+            report.searches_per_minute
+        )
+    } else {
+        format!(
+            "Поисков за последнюю минуту: {}. Среднее время ответа: {} мс.",
+            report.searches_per_minute, report.avg_ms
+        )
+    };
+    let base_nav = escape(&report.base);
+    let mut body = format!(
+        "<div class=\"cabinet\"><nav class=\"side\"><a href=\"{base_nav}/operator?sheet=node\">Нода</a><a href=\"{base_nav}/operator?sheet=visits\">Заходы</a><a href=\"{base_nav}/operator?sheet=queries\">Запросы</a><a href=\"{base_nav}/operator?sheet=journal\">Журнал</a><a href=\"{base_nav}/operator?sheet=bees\">Пчёлы</a><a href=\"{base_nav}/operator?sheet=index\">Индекс</a><a href=\"{base_nav}/operator?sheet=door\">Дверь</a></nav><div class=\"sheets\">"
+    );
+    if sheet == "node" {
+    body.push_str(&format!(
+        "<section id=\"node\"><h2>Нода</h2>
+<p>Адреса людей сюда не пишутся. Новая страница — адрес, которого в индексе ещё не было. Повтор без изменений в это число не входит.</p>
+<ul class=\"load\">
+<li>Сайтов в поиске: {sites}</li>
+<li>Страниц в индексе: {pages}</li>
+<li>Новых страниц сегодня: {new_today}, вчера: {new_yesterday}</li>
+<li>Новых за неделю: {new_week}, за месяц: {new_month}</li>
+<li>Новых сайтов сегодня: {hosts_today}</li>
+<li>Сегодня изменённых: {changed_today}, без изменений: {same_today}</li>
+<li>Очередь обхода: {queue}</li>
+<li>Сейчас закреплено адресов: {leased}</li>
+<li>Переобход уже пора: {refresh_due}</li>
+<li>База: {db} МБ</li>
+<li>{pace}</li>
+</ul>
+<h3>Новые страницы по дням</h3>
+{intake}
+<p class=\"legend\">Точки — страницы, которых в индексе ещё не было. Дни до включения счётчика пустые.</p>
+<h3>Нагрузка улья</h3>
+<p>Доля процессора и памяти машины, на которой стоит улей. Точка — средний час. Если линия упирается в верх, скорость лучше снизить.</p>
+{cpu}
+<p class=\"legend\">Процессор, проценты.</p>
+{ram}
+<p class=\"legend\">Память, проценты.</p>
+<form class=\"inline\" method=\"post\" action=\"{base}/operator?sheet=node\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">
+<label>Страниц за заход улья <input name=\"batch\" type=\"number\" min=\"1\" max=\"24\" value=\"{crawl_batch}\"></label>
+<label>Пауза улья, секунд <input name=\"gap\" type=\"number\" min=\"2\" max=\"300\" value=\"{crawl_gap}\"></label>
+<button name=\"action\" value=\"crawl_pace\">Скорость улья</button></form>
+<p>Сейчас улей берёт {crawl_batch} адресов и ждёт {crawl_gap} секунд. Это и есть скорость добавления. Поднять числа — больше страниц в сутки, пока график нагрузки не упрётся вверх. Снизить — если машина занята.</p>
+<form class=\"inline\" method=\"post\" action=\"{base}/operator?sheet=node\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">
+<label>Страниц переобхода за заход <input name=\"batch\" type=\"number\" min=\"1\" max=\"4\" value=\"{refresh_batch}\"></label>
+<label>Пауза переобхода, секунд <input name=\"gap\" type=\"number\" min=\"60\" max=\"3600\" value=\"{refresh_gap}\"></label>
+<button name=\"action\" value=\"refresh_pace\">Скорость переобхода</button></form>
+<p>Переобход не встаёт в очередь новых адресов. Сначала улей спрашивает метку страницы. Если она не менялась, тело не качается. Обычный сайт без своей пчелы проверяется этим темпом. Сайт, на котором стоит пчела, сюда не входит.</p>
+<h3>Телефоны</h3>
+<p>Разные приложения и страницы, которые улей записал как новые или изменённые. Повтор той же страницы не считается. Идентификатор приложения к запросу не привязывается. Каждый телефон получает свой темп, а не одну общую очередь на всех.</p>
+<ul class=\"load\">
+<li>Сегодня: {day_apps} приложений, {day_pages} страниц</li>
+<li>За неделю: {week_apps} приложений, {week_pages} страниц</li>
+<li>За месяц: {month_apps} приложений, {month_pages} страниц</li>
+<li>За всё время: {all_apps} приложений, {all_pages} страниц</li>
+</ul>
+<form class=\"inline\" method=\"post\" action=\"{base}/operator?sheet=node\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">
+<label>Страниц за заход <input name=\"batch\" type=\"number\" min=\"2\" max=\"8\" value=\"{batch}\"></label>
+<label>Пауза, минут <input name=\"gap\" type=\"number\" min=\"2\" max=\"10\" value=\"{gap}\"></label>
+<label>Заходов телефона за 10 минут <input name=\"window\" type=\"number\" min=\"4\" max=\"16\" value=\"{window}\"></label>
+<label>Потолок страниц <input name=\"max_batch\" type=\"number\" min=\"2\" max=\"30\" value=\"{max_batch}\"></label>
+<label>Минимальная пауза, минут <input name=\"min_gap\" type=\"number\" min=\"1\" max=\"60\" value=\"{min_gap}\"></label>
+<label>Выдач всем помощникам за 10 минут <input name=\"grants\" type=\"number\" min=\"4\" max=\"600\" value=\"{grants}\"></label>
+<button name=\"action\" value=\"shell_pace\">Сохранить</button></form>
+<p>Обычный режим телефона берёт первые три числа: две страницы и десять минут. Приложение 0.1.9 слушает паузу улья от одной минуты. Общий потолок выдач держит эту машину: смысл считает она одна, и писатель базы тоже один. Поднимать его стоит, пока график процессора не упирается вверх.</p>",
+        sites = report.sites,
+        pages = report.pages,
+        new_today = report.new_today,
+        new_yesterday = report.new_yesterday,
+        new_week = report.new_week,
+        new_month = report.new_month,
+        hosts_today = report.hosts_today,
+        changed_today = report.changed_today,
+        same_today = report.same_today,
+        queue = report.queue,
+        db = report.db_bytes / 1_048_576,
+        intake = time_chart(&report.intake_days.iter().map(|(day, value)| (short_label(day), *value)).collect::<Vec<_>>(), "#1a73e8"),
+        cpu = time_chart(&report.cpu_hours.iter().map(|(hour, value)| (short_hour(hour), *value)).collect::<Vec<_>>(), "#188038"),
+        ram = time_chart(&report.ram_hours.iter().map(|(hour, value)| (short_hour(hour), *value)).collect::<Vec<_>>(), "#a142f4"),
+        crawl_batch = report.crawl_batch,
+        crawl_gap = report.crawl_gap,
+        leased = report.leased,
+        refresh_due = report.refresh_due,
+        refresh_batch = report.refresh_batch,
+        refresh_gap = report.refresh_gap,
+        day_apps = report.shells.day_apps,
+        day_pages = report.shells.day_pages,
+        week_apps = report.shells.week_apps,
+        week_pages = report.shells.week_pages,
+        month_apps = report.shells.month_apps,
+        month_pages = report.shells.month_pages,
+        all_apps = report.shells.all_apps,
+        all_pages = report.shells.all_pages,
+        batch = report.shells.batch,
+        gap = report.shells.gap_min,
+        window = report.shells.window_max,
+        max_batch = report.shells.max_batch,
+        min_gap = report.shells.min_gap,
+        grants = report.shells.grants,
+        base = escape(&report.base),
+        csrf = escape(&report.csrf),
+    ));
+    if !report.note.is_empty() {
+        body.push_str(&format!("<p class=\"hint\">{}</p>", escape(&report.note)));
+    }
     if report.peers.is_empty() {
         body.push_str("<p>Соседей в этом запуске нет. Нода отвечает своим индексом.</p>");
     } else {
@@ -647,13 +1347,46 @@ pub fn page_operator(report: &OperatorReport) -> String {
         }
         body.push_str("</table>");
     }
-    body.push_str("<h3>Лёгкие пчёлы</h3>");
-    if report.volunteers.is_empty() {
+    body.push_str("</section>");
+    }
+    body.push_str(stats);
+    if sheet == "journal" {
+    body.push_str("<section id=\"journal\"><h2>Журнал</h2><p>Каждая строка — один поиск, не сводка за день. «Найдено» — сколько обычных ссылок открылось. «По словам» и «По смыслу» — сколько из них нашлось точным текстом и близким смыслом. «18+» — сколько ссылок ушло в закрытый блок. Ноль значит, что таких ссылок в том поиске не было. Сколько раз спросили одно и то же, видно в разделе «Запросы».</p>");
+    if report.rows.is_empty() {
+        body.push_str("<p>Запросов пока нет.</p>");
+    } else {
+        body.push_str("<table class=\"log\"><tr><th>Запрос</th><th>Найдено</th><th>По словам</th><th>По смыслу</th><th>18+</th></tr>");
+        for (text, results, words, meaning, adult) in &report.rows {
+            body.push_str(&format!(
+                "<tr><td>{}</td><td>{results}</td><td>{words}</td><td>{meaning}</td><td>{adult}</td></tr>",
+                escape(text)
+            ));
+        }
+        body.push_str("</table>");
+    }
+    body.push_str("</section>");
+    }
+    if sheet == "bees" {
+    body.push_str("<section id=\"bees\"><h2>Пчёлы</h2>");
+    body.push_str("<p>Числа справа — страницы, которые улей записал как новые или изменённые. Та же страница без изменений больше не считается. Свой сайт идёт первым: новые и изменённые страницы забираются сразу. Когда своих изменений нет, пчела берёт чужие адреса из очереди улья.</p>");
+    body.push_str("<p>Компьютер без своего сайта запускается так: <code>mds node --lite --hive https://адрес-улья</code>. Модель и база ему не нужны. Он разбирает чужую очередь темпом ниже. На сайте пчела по-прежнему доказывает себя файлом <code>/.well-known/pchela.txt</code>.</p>");
+    body.push_str(&format!(
+        "<form class=\"inline\" method=\"post\" action=\"{}/operator?sheet=bees\"><input type=\"hidden\" name=\"csrf\" value=\"{}\"><label>Чужих адресов за заход <input name=\"batch\" type=\"number\" min=\"1\" max=\"24\" value=\"{}\"></label><label>Пауза, секунд <input name=\"gap\" type=\"number\" min=\"60\" max=\"3600\" value=\"{}\"></label><button name=\"action\" value=\"bee_pace\">Скорость пчёл</button></form>",
+        escape(&report.base),
+        escape(&report.csrf),
+        if report.bee_batch == 0 { 4 } else { report.bee_batch },
+        if report.bee_gap == 0 { 600 } else { report.bee_gap },
+    ));
+    if report.bees.is_empty() {
         body.push_str("<p>Подтверждённых сайтов нет.</p>");
     } else {
         body.push_str("<ul class=\"check\">");
-        for host in &report.volunteers {
-            body.push_str(&format!("<li class=\"ok\">{}</li>", escape(host)));
+        for bee in &report.bees {
+            let mark = if bee.quiet { " <span class=\"quiet\">молчит</span>" } else { "" };
+            body.push_str(&format!(
+                "<li class=\"bee-row\"><span class=\"ok\">{}</span><span class=\"nums\">день {} · неделя {} · месяц {} · всего {}{mark}</span></li>",
+                escape(&bee.host), bee.day, bee.week, bee.month, bee.all
+            ));
         }
         body.push_str("</ul>");
     }
@@ -666,23 +1399,19 @@ pub fn page_operator(report: &OperatorReport) -> String {
     }
     body.push_str(
         &format!(
-            "<form class=\"admit\" method=\"post\" action=\"/operator\"><input type=\"hidden\" name=\"csrf\" value=\"{}\"><input name=\"host\" placeholder=\"сайт пчелы\" required><button name=\"action\" value=\"refuse\">Остановить</button><button name=\"action\" value=\"restore\">Вернуть</button></form>",
+            "<form class=\"admit\" method=\"post\" action=\"{}/operator\"><input type=\"hidden\" name=\"csrf\" value=\"{}\"><input name=\"host\" placeholder=\"сайт пчелы\" required><button name=\"action\" value=\"refuse\">Остановить</button><button name=\"action\" value=\"restore\">Вернуть</button></form>",
+            escape(&report.base),
             escape(&report.csrf)
         ),
     );
-    if report.rows.is_empty() {
-        body.push_str("<p>Запросов пока нет.</p>");
-    } else {
-        body.push_str("<table class=\"log\"><tr><th>Запрос</th><th>Обычные</th><th>Слова</th><th>Смысл</th><th>18+</th></tr>");
-        for (text, results, words, meaning, adult) in &report.rows {
-            body.push_str(&format!(
-                "<tr><td>{}</td><td>{results}</td><td>{words}</td><td>{meaning}</td><td>{adult}</td></tr>",
-                escape(text)
-            ));
-        }
-        body.push_str("</table>");
+    body.push_str("</section>");
     }
-    document("", &format!("<article><h2>Журнал запросов</h2>{body}</article>"), false, false, None, "")
+    if sheet != "node" && !report.note.is_empty() {
+        body.push_str(&format!("<p class=\"hint\">{}</p>", escape(&report.note)));
+    }
+    body.push_str(rest);
+    body.push_str("</div></div>");
+    document("", &body, false, false, None, "").replacen("<body>", "<body class=\"cabinet\">", 1)
 }
 
 pub fn page_how() -> String {
@@ -699,9 +1428,9 @@ pub fn page_how() -> String {
 <h3>Пчела, рой, улей, пасека</h3>
 <p>Одна нода — это пчела. Несколько нод, соединённых в одну сеть, — рой. Улей — региональный вход, домен, с которого люди ищут. Пасека — страна, сеть таких ульев. Робот при обходе по-прежнему называется MDS-Bot.</p>
 <h3>Несколько нод</h3>
-<p>Сервер, компьютер и телефон говорят одним протоколом. Главной ноды, которой подчиняются остальные, нет. Сервер и компьютер держат крупный кусок индекса и отдают сайт со строкой поиска. Телефон хранит маленький шард и отвечает по тому же ключу. Экран на телефоне — для владельца, чужой трафик через него не идёт.</p>
+<p>Сервер, компьютер и телефон говорят одним протоколом. Главной ноды, которой подчиняются остальные, нет. Сервер и компьютер держат крупный кусок индекса и отдают сайт со строкой поиска. Телефон открывает поиск улья и раз в десять минут читает несколько страниц из очереди, в том числе когда приложение свёрнуто. Чужой трафик через него не идёт.</p>
 <p>Запрос идёт к тем пчёлам, которые держат нужный шард, и не больше чем к трём копиям. Если одна копия отвечает заметно медленнее остальных, улей в этот раз её не ждёт. Пока сосед ещё не сообщил свои бакеты, улей спрашивает его как запасной.</p>
-<p>Пчела за домашним роутером не открывает порт наружу. Лёгкая пчела сама звонит улью: <code>mds node --lite --site https://ваш-сайт --hive https://45.158.46.52</code>. На сайте лежит файл <code>/.well-known/pchela.txt</code>, в нём одна строка — имя, которое пчела печатает при запуске. Улей читает этот файл и принимает страницы этого сайта и несколько чужих адресов из своей очереди. Общий пароль для входа не нужен. Белый статический IP нужен улью, на который смотрит домен. Домашней пчеле хватает обычного интернета.</p>
+<p>Пчела за домашним роутером не открывает порт наружу. Лёгкая пчела сама звонит улью: <code>mds node --lite --site https://ваш-сайт --hive https://45.158.46.52</code>. На сайте лежит файл <code>/.well-known/pchela.txt</code>, в нём одна строка — имя, которое пчела печатает при запуске. Улей принимает новые и изменённые страницы этого сайта. Когда своих изменений нет, пчела берёт чужие адреса из очереди. Компьютер без своего сайта запускается без <code>--site</code>, команда на странице <a href="/computer">Компьютер</a>. Общий пароль для входа не нужен. Белый статический IP нужен улью, на который смотрит домен. Домашней пчеле хватает обычного интернета.</p>
 <p>Страницы с нарушением закона в выдачу не попадают. Материалы 18+ стоят отдельным блоком и замкнуты, пока человек не подтвердит возраст. Журнал запросов хранит только текст и числа на этой ноде, без адреса человека, и открывается только с компьютера, где нода запущена.</p>
 <h3>Сколько страниц берётся с одного сайта</h3>
 <p>Обычный сайт обходится до 100 страниц: этого хватает, чтобы его найти, и один каталог не заполняет поиск. Если страниц больше, владелец перечисляет до ста своих ссылок в <a href="/llms">/llms.txt</a>. Индексируются они. Сайт, на сервере которого стоит лёгкая пчела, отдаёт все свои страницы. Подробности и ответы, зачем ставить ноду, — на странице <a href="/indexing">Индексация</a>.</p>
@@ -771,10 +1500,17 @@ pub fn page_for_sites() -> String {
 </ul>
 <p>Сайт на React или Vite, который без JavaScript показывает только заставку, находится по текстам из страницы и из своего скрипта. Готовый HTML с заголовком и описанием нода читает сразу.</p>
 <h3>Своя пчела на сервере сайта</h3>
-<p>Полный индекс рядом с сайтом не ставится: модель занимает около 1 ГБ, а общий индекс — десятки гигабайт. Серверу на 2 ядра, 3–4 ГБ памяти и 20 ГБ диска хватает лёгкой пчелы. Она не открывает поиск для чужих людей и не считает векторы. Человека никуда не перекидывает: человек остаётся на улье. Раз в десять минут пчела отдаёт улью несколько своих страниц и до четырёх чужих адресов из очереди улья. Пауза между загрузками не меньше двух секунд, чтобы не мешать сайту.</p>
+<p>Полный индекс рядом с сайтом не ставится: модель занимает около 1 ГБ, а общий индекс — десятки гигабайт. Серверу на 2 ядра, 3–4 ГБ памяти и 20 ГБ диска хватает лёгкой пчелы. Она не открывает поиск для чужих людей и не считает векторы. Человек остаётся на улье.</p>
+<p>Сначала пчела отдаёт свои новые и изменённые страницы, сразу и по обычным правилам обхода. Страница, в которой ничего не изменилось, по кругу не гоняется. Когда своих изменений нет, пчела берёт чужие адреса из очереди улья и помогает сети. Сколько чужих адресов за заход и какая пауза — решает оператор улья в кабинете. Пауза между загрузками страниц своего сайта не меньше двух секунд.</p>
 <pre>mds node --lite --site https://ваш-сайт --hive https://45.158.46.52</pre>
 <p>Имя из журнала пчелы кладётся одной строкой в <code>https://ваш-сайт/.well-known/pchela.txt</code>.</p>
-<p>В выдаче у такого сайта появляется значок «держит пчелу» и небольшой подъём среди близких результатов. Страница с более точным совпадением слов остаётся выше. Зачем это сайту и чем лёгкая пчела отличается от полной ноды — на странице <a href="/indexing">Индексация</a>.</p>"#,
+<h3>Что это даёт сайту</h3>
+<ul>
+<li>Свои новые и изменённые страницы попадают в индекс сразу. Потолок в сто страниц для такой пчелы снимается: улей принимает страницы, которые она отдаёт.</li>
+<li>В выдаче появляется значок «держит пчелу» и небольшой подъём среди близких результатов. Страница с более точным совпадением слов остаётся выше.</li>
+<li>Когда на сайте тихо, пчела разбирает чужую очередь и ускоряет общий индекс.</li>
+</ul>
+<p>Новую сборку кладёт администратор этого сайта и перезапускает службу. Лёгкая пчела файл сама не меняет, и кабинет улья на чужой сервер обновление не присылает. Чем пчела отличается от полной ноды — на странице <a href="/indexing">Индексация</a>.</p>"#,
     )
 }
 
@@ -818,15 +1554,15 @@ pub fn page_indexing() -> String {
 <p>Если страниц больше ста, владелец сам выбирает, какие важнее. В корне сайта, в <a href="/llms">/llms.txt</a> или <a href="/llms">/llms.md</a>, он пишет ссылки своего сайта, не больше ста. Индексируются они. Ссылки на чужие сайты из этой карточки в список не входят. Остальные адреса этого сайта в очередь не ставятся.</p>
 <p>Сайт завода и мастерской остаётся со своими изделиями: у производства короткий свой список. Интернет-магазин в индекс целиком не копируется. В выдаче виден сам магазин, а несколько подходящих предложений браузер может подгрузить с сайта магазина в момент запроса, если магазин это разрешает. Сто магазинов с одним и тем же товаром поиск не собирает.</p>
 <h3>Зачем нода рядом с сайтом</h3>
-<p>Лёгкая пчела стоит на том же сервере, что и сайт. Она не открывает чужой поиск и не держит модель: модели нужен примерно 1 ГБ, а общий индекс — десятки гигабайт. Раз в десять минут она отдаёт улью свои страницы и помогает обойти несколько чужих адресов из очереди. Человек по-прежнему ищет на улье, сайт не становится чужим входом.</p>
+<p>Лёгкая пчела стоит на том же сервере, что и сайт. Она не открывает чужой поиск и не держит модель: модели нужен примерно 1 ГБ, а общий индекс — десятки гигабайт. Сначала она отдаёт свои новые и изменённые страницы. Страница без изменений по кругу не гоняется. Когда своих изменений нет, она помогает обойти чужую очередь улья. Темп этой очереди задаёт кабинет улья. Человек ищет на улье.</p>
 <p>Польза для сайта: потолок в сто страниц снимается, улей принимает страницы, которые отдаёт пчела. В выдаче появляется значок «держит пчелу» и небольшой подъём среди близких ссылок. Более точное совпадение слов остаётся выше. Как поставить:</p>
 <pre>mds node --lite --site https://ваш-сайт --hive https://45.158.46.52</pre>
 <p>Имя из журнала пчелы кладётся одной строкой в <code>/.well-known/pchela.txt</code> на этом сайте. Новую сборку лёгкой пчелы на сервер кладут вручную и перезапускают службу: сама она файл не меняет.</p>
 <h3>Зачем полная нода</h3>
 <p>Полная нода — свой улей. Она держит кусок индекса, считает смысл запроса и открывает страницу поиска для людей своего края или своей компании. Журнал запросов остаётся на этой ноде и не уезжает в общий центр. Нужны память под модель и диск под страницы. Без соседней ноды она отвечает только своим индексом. С соседями запрос идёт к тем, кто держит нужный шард, и не больше чем к трём копиям.</p>
 <p>Её ставят, когда нужен свой адрес поиска в той же сети. Лёгкая пчела для этого не подходит: она поиск для людей не открывает. Файл и подключение — на странице <a href="/download">Скачать ноду</a>.</p>
-<h3>Зачем шард на телефоне</h3>
-<p>Телефон хранит маленькую копию куска индекса. Это запасная копия, а не вход для чужих людей и не прокси: чужой трафик через телефон не идёт, экран нужен владельцу. Обход идёт по Wi-Fi и с зарядки. Если серверная нода встанет, телефон всё ещё может ответить по своему шарду. Сборки для телефона на странице загрузки нет.</p>
+<h3>Зачем приложение на телефоне</h3>
+<p>Приложение открывает поиск улья. Сайт из выдачи открывается в том же окне, кнопка «К поиску» возвращает к строке. Раз в десять минут, и по мобильной сети, и когда приложение свёрнуто, оно читает до двух страниц из очереди и отдаёт текст улью. Это не шард и не кабинет. Подробно — на странице <a href="/android">Приложение для Android</a>.</p>
 <h3>Если сломается Яндекс или Гугл</h3>
 <p>Их выдача стоит на их дата-центрах. Сбой там гасит поиск сразу для всех, кто им пользуется. У Пчелопоиска нет одной компании и одного центра. Запрос принимает любая живая нода. Кусок индекса лежит в трёх копиях. Пока нод мало, каждая держит весь индекс, который успела собрать. Падение одного улья не гасит остальные. Свой адрес может открыть регион или компания, и он остаётся в той же сети.</p>
 <p><a href="/for-sites">Что сделать на сайте</a></p>"#,
@@ -850,7 +1586,7 @@ pub fn page_manifesto() -> String {
 <p>Пчелопоиск задуман как чистый поиск реальных сайтов компаний: без рекламы и без навязанного мусора. В выдаче остаётся ссылка на страницу, а не чужая карточка и не сгенерированный пересказ. Если в запросе есть намерение купить, известный маркетплейс получает штраф, прямой сайт остаётся выше.</p>
 <p>Это попытка собрать другой поиск. Ноду ставит тот, кто хочет. Несколько таких нод держат общий индекс, и компании-владельца у сети нет. Регион может открыть свой адрес и остаться в той же сети.</p>
 <h3>Если крупный поиск встанет</h3>
-<p>Яндекс и Гугл отвечают со своих дата-центров. Сбой там гасит выдачу сразу для всех, кто ими пользуется. Здесь индекс разобран по отдельным нодам. Если один улей встанет, остальные продолжают отвечать своим куском. Зачем ставить ноду рядом с сайтом, полную ноду или шард на телефоне — на странице <a href="/indexing">Индексация</a>.</p>
+<p>Яндекс и Гугл отвечают со своих дата-центров. Сбой там гасит выдачу сразу для всех, кто ими пользуется. Здесь индекс разобран по отдельным нодам. Если один улей встанет, остальные продолжают отвечать своим куском. Зачем ставить ноду рядом с сайтом, полную ноду или приложение на телефоне — на странице <a href="/indexing">Индексация</a>.</p>
 <p><a href="/download">Поставить свою ноду</a></p>"#,
     )
 }
@@ -876,10 +1612,10 @@ pub fn page_download(release_version: Option<&str>) -> String {
 <li><a href="/download/pchela-linux-x64.tar.gz">Linux x86_64 с этого улья: Ubuntu 24.04 и другие Linux с glibc 2.39</a></li>
 <li><a href="{RELEASE_WINDOWS}">Windows, 64-бит, копия на GitHub</a></li>
 <li><a href="{RELEASE_LINUX}">Linux x86_64, копия на GitHub</a></li>
-<li><a href="{RELEASE_ANDROID}">Android, оболочка владельца</a></li>
+<li><a href="/android">Приложение для Android</a></li>
 </ul>
 <p>В программу вписана доверенная нода <a href="https://45.158.46.52/">https://45.158.46.52/</a>. Если адрес соседа не указан, нода подключается к ней сама. Улей запускают с <code>--alone</code>, чтобы он не звонил сам себе. Новый адрес появится в следующей версии.</p>
-<p>Полная нода подхватывает новую версию сама, если в сети лежит подписанный файл новее того, что у неё запущен. На странице поиска появляется строка «Нужно обновиться». Архив со страницы загрузки сам программу не подменяет. Лёгкая пчела свой файл не меняет: новую сборку кладут на сервер сайта вручную и перезапускают службу. Телефон публичным входом не является: приложение открывает поиск доверенной ноды и показывает то же сообщение.</p>
+<p>Полная нода подхватывает новую версию сама, если в сети лежит подписанный файл новее того, что у неё запущен. На странице поиска появляется строка «Нужно обновиться». Архив со страницы загрузки сам программу не подменяет. Лёгкая пчела свой файл не меняет: новую сборку кладут на сервер сайта вручную и перезапускают службу. Телефон публичным входом не является. Приложение и то, как оно помогает индексу, — на странице <a href="/android">Приложение для Android</a>.</p>
 <p>Исходный код: <a href="{SOURCE_REPO}">{SOURCE_REPO}</a>.</p>
 <h3>Как подключить её к поиску</h3>
 <p>После запуска нода открывает свой сайт со строкой поиска. Чтобы она вошла в общую сеть, при старте укажите хотя бы один адрес соседней ноды. Без соседа нода отвечает только своим индексом.</p>
@@ -890,16 +1626,79 @@ pub fn page_download(release_version: Option<&str>) -> String {
 <li>Пчела дома или на старом компьютере сидит за динамическим IP. Ей белый адрес не нужен: она сама соединяется с ульем.</li>
 </ul>
 <pre>mds node --lite --site https://ваш-сайт --hive https://45.158.46.52</pre>
-<p>Лёгкая пчела не открывает свою страницу поиска. Она подтверждает сайт файлом <code>/.well-known/pchela.txt</code>: в файле одна строка, имя пчелы из её журнала. Дальше улей берёт страницы этого сайта и даёт пчеле до четырёх чужих адресов из очереди.</p>
+<p>Лёгкая пчела не открывает свою страницу поиска. Она подтверждает сайт файлом <code>/.well-known/pchela.txt</code>: в файле одна строка, имя пчелы из её журнала. Сначала улей берёт новые и изменённые страницы этого сайта. Когда своих изменений нет, пчела разбирает чужую очередь. Подробно — на страницах <a href="/for-sites">Сайту</a>, <a href="/hive">Улей</a> и <a href="/computer">Компьютер</a>.</p>
 <ul>
 <li>Своя страница поиска будет на том адресе, который указан в --listen. Для людей снаружи на этот адрес ставят домен.</li>
-<li>Телефон к этой кнопке не относится: сборка для телефона здесь не раздаётся, и телефон не является публичным входом.</li>
+<li>Телефон к команде полной ноды не относится и публичным входом не является. Приложение ставится со страницы <a href="/android">Приложение для Android</a>.</li>
 <li>Обезличенный журнал запросов открывается только с компьютера, где запущена нода, по адресу /operator.</li>
 </ul>
 <h3>Какую ноду ставить</h3>
-<p>Рядом с сайтом достаточно лёгкой пчелы: она не открывает поиск для чужих и отдаёт улью все страницы своего сайта. Полную ноду ставят, когда нужен свой вход в поиск и свой кусок индекса. Телефон хранит маленький шард для владельца и не является публичным входом. Зачем каждая из них — на странице <a href="/indexing">Индексация</a>.</p>
+<p>Рядом с сайтом достаточно лёгкой пчелы: она не открывает поиск для чужих и отдаёт улью страницы своего сайта. Полную ноду ставят, когда нужен свой вход в поиск и свой кусок индекса. Компьютер без сайта разбирает чужую очередь и свою страницу поиска не открывает. Приложение на телефоне — поиск улья и короткий обход очереди, в том числе в фоне. Зачем каждая роль — на страницах <a href="/hive">Сервер-улей</a>, <a href="/computer">Компьютер без сайта</a>, <a href="/indexing">Индексация</a> и <a href="/android">Приложение для Android</a>.</p>
 <p><a href="/how">Как устроен поиск</a></p>"#
         ),
+    )
+}
+
+pub fn page_hive() -> String {
+    article(
+        "Сервер-улей",
+        r#"<p>Улей — вход, с которого люди ищут. На нём лежат индекс, модель смысла и кабинет оператора. Лёгкая пчела, компьютер без сайта и телефон приносят ему текст. Пишет индекс улей.</p>
+<h3>Что ставить</h3>
+<p>Та же программа, что на странице <a href="/download">Скачать ноду</a>. В Windows это <code>mds.exe</code>, в Linux — <code>mds</code>. При первом запуске полная нода забирает модель с улья, около 1 ГБ. Ссылки на файл весов на странице загрузки нет.</p>
+<pre>mds node --listen 0.0.0.0:8080 --seeds urls.txt --follow-external --peers https://45.158.46.52</pre>
+<ul>
+<li>В urls.txt — стартовые адреса сайтов, по одному в строке. С них обход находит ссылки и ставит новые адреса в очередь.</li>
+<li>Публичный улей, на который смотрит домен, запускают с <code>--alone</code>, чтобы он не звонил сам себе.</li>
+<li>Второй улей, который входит в ту же сеть, указывает соседа в <code>--peers</code>.</li>
+<li>Для людей снаружи на адрес из <code>--listen</code> ставят домен.</li>
+</ul>
+<h3>Сколько нужно машине</h3>
+<p>Один публичный улей — 4 ядра, 8 ГБ памяти и SSD около 100 ГБ. Модель занимает около 1 ГБ из этой памяти. База растёт вместе со страницами, её пишет один процесс. Узкий канал не подходит: с этой машины идут и ответы людям, и обход.</p>
+<h3>Как это работает с шардами</h3>
+<p>Шард — сохранённый кусок индекса. Пока улей один, он отвечает всем индексом, который собрал сам. Когда полных нод несколько, запрос идёт к тем, кто держит нужный шард, и не больше чем к трём копиям. Если одна копия отвечает заметно медленнее, улей в этот раз её не ждёт.</p>
+<p>Лёгкая пчела, компьютер без сайта и телефон шард не держат и на чужой поиск не отвечают. Они приносят текст, индекс остаётся на улье. Журнал запросов хранится на той ноде, которая ответила, без адреса человека.</p>
+<h3>Обновление</h3>
+<p>Полная нода подхватывает новую версию сама, если в сети лежит подписанный файл новее того, что у неё запущен. На странице поиска появляется строка «Нужно обновиться». Пока такого выпуска нет, новую сборку кладут вручную и перезапускают службу. Архив со страницы загрузки сам программу не подменяет.</p>
+<p><a href="/computer">Компьютер без сайта</a></p>"#,
+    )
+}
+
+pub fn page_computer() -> String {
+    article(
+        "Компьютер без сайта",
+        r#"<p>Это старый или свободный компьютер с интернетом. Белый адрес и открытый порт ему не нужны: он сам соединяется с ульем. Свою страницу поиска он не открывает. Люди по-прежнему ищут на улье.</p>
+<h3>Что ставить</h3>
+<p>Та же программа, что на странице <a href="/download">Скачать ноду</a>. Модель и свою базу он не качает. Памяти хватает обычной: гигабайт под модель ему не нужен.</p>
+<pre>mds node --lite --hive https://45.158.46.52</pre>
+<p>В Windows та же команда у <code>mds.exe</code>. Компьютер можно оставить включённым на сутки: он разбирает чужую очередь, пока работает.</p>
+<h3>Как он работает</h3>
+<p>Улей выдаёт адреса из очереди. Компьютер открывает страницы, забирает текст и отдаёт его улью. Улей записывает текст в индекс и сам считает смысл. Страница без изменений в индекс повторно не встраивается. Своего сайта у этой пчелы нет, поэтому файл <code>/.well-known/pchela.txt</code> не нужен.</p>
+<p>Темп берётся из кабинета улья, из потолка на странице «Нода»: сколько страниц за заход и какая минимальная пауза. Это тот же потолок, что у телефона в режиме «как сервер». Пчела рядом с сайтом ходит другим темпом, его задают на странице «Пчёлы»: сначала свои новые и изменённые страницы, потом чужая очередь.</p>
+<h3>Обновление</h3>
+<p>Файл на этом компьютере сам не меняется. Новую сборку скачивают со страницы загрузки, кладут на место старой и перезапускают программу. Кабинет улья обновление на чужой компьютер не отправляет: это было бы управление чужой машиной.</p>
+<p>Если у компьютера есть свой сайт, команда другая: <code>mds node --lite --site https://ваш-сайт --hive https://45.158.46.52</code>. Как её подтвердить — на странице <a href="/for-sites">Сайту</a>.</p>
+<p><a href="/hive">Сервер-улей</a></p>"#,
+    )
+}
+
+pub fn page_android() -> String {
+    article(
+        "Приложение для Android",
+        r#"<p>Это поиск Пчелопоиска на телефоне. Это не кабинет оператора и не админская программа. Кабинет открывается только на компьютере, где запущена нода.</p>
+<p><a class="button" href="/download/pchela-android.apk">Скачать приложение для Android</a></p>
+<h3>Что видно на экране</h3>
+<p>Приложение открывает поиск этого улья. Ссылка из выдачи открывается в том же окне: это браузер внутри приложения, отдельное приложение браузера не запускается. Кнопка «К поиску» возвращает на строку поиска. Сайт из выдачи отдаёт сам сайт. Улей в этот момент страницу сайта не качает и этим не нагружается: он уже отдал только страницу поиска.</p>
+<h3>Как телефон помогает сети</h3>
+<p>Примерно раз в десять минут телефон берёт у улья до двух адресов из очереди. Эти адреса улей и так собирался прочитать. Телефон сам открывает их, забирает текст и отдаёт улью. Улей записывает текст в индекс и сам считает смысл страницы. Эти две страницы улей уже не качает, поэтому очередь обхода идёт быстрее. Телефон индекс у себя не хранит и не разбирает: он приносит текст, а индекс пишет улей.</p>
+<p>Так происходит и по Wi-Fi, и по мобильной сети, и когда приложение свёрнуто. На экране телефона остаётся короткое уведомление «Пчелопоиск». Кнопка «Остановить» в уведомлении помощь прекращает. У каждого телефона свой темп. Обычный режим — две страницы и пауза десять минут. В приложении 0.1.9 кнопка «Темп» может взять больше, до потолка, который оператор задал в кабинете, и пауза слушается от одной минуты. Старый телефон у розетки в режиме «как сервер» разбирает очередь круглосуточно в этих пределах.</p>
+<p>Чужой поиск через телефон не идёт: люди по-прежнему ищут на улье.</p>
+<h3>Что такое шард</h3>
+<p>Шард — это сохранённый кусок индекса. Нода, которая его держит, отвечает по этому куску на чужие запросы. Телефон такой кусок не хранит и на чужие запросы не отвечает. Поэтому приложение шардом не называется: оно не запасная копия поиска и не вход в сеть для других людей.</p>
+<h3>Безопасно ли это</h3>
+<p>Телефон читает только те адреса, которые только что назвал улей, и не больше двух за раз. Свои запросы человека в этот обход не входят. Улей не записывает адрес телефона и не связывает обход с человеком. Порт наружу телефон не открывает, чужой трафик через него не проходит.</p>
+<h3>Обновление</h3>
+<p>Если улей объявил версию новее той, что стоит на телефоне, поиск не открывается, пока человек не поставит файл. Android один раз просит подтвердить установку. Если приложение уже стояло из старой сборки с другим ключом, его сначала удаляют: Android не кладёт новую сборку поверх.</p>
+<p><a href="/download">Скачать ноду</a></p>"#,
     )
 }
 
@@ -918,7 +1717,7 @@ fn article(title: &str, body: &str) -> String {
 }
 
 fn footer() -> String {
-    r#"<footer>
+    r##"<footer>
 <div class="foot">
 <nav>
 <a href="/">Поиск</a>
@@ -927,13 +1726,16 @@ fn footer() -> String {
 <a href="/for-sites">Сайту</a>
 <a href="/indexing">Индексация</a>
 <a href="/llms">llms.md</a>
+<a href="/android">Приложение</a>
+<a href="/hive">Улей</a>
+<a href="/computer">Компьютер</a>
 <a href="/download">Скачать ноду</a>
 <a href="/add">Добавить сайт</a>
 </nav>
 <p class="census">В поиске %%SITES%% и %%PAGES%%.</p>
-<p class="credit"><span>Разработка креативной лаборатории <a href="https://dartalab.ru/">DARTA</a>.</span><a class="help" href="/help">Помочь проекту</a></p>
+<p class="credit"><span>Разработка креативной лаборатории <a href="https://dartalab.ru/">DARTA</a>.</span><a class="help" href="/help">Помочь проекту</a><svg class="comb" viewBox="0 0 128 128" aria-hidden="true"><g fill="#f9cb0b"><path d="m59.86475 67.82129a1.48481 1.48481 0 0 1 -.74463-.19922l-14.39258-8.25293-5.50635 3.08447a1.49985 1.49985 0 0 1 -1.46582-2.61718l6.248-3.5a1.49964 1.49964 0 0 1 1.479.00732l15.12993 8.67676a1.49973 1.49973 0 0 1 -.74755 2.80078z"/><path d="m54.354 107.72754a1.50024 1.50024 0 0 1 -.75244-2.79883l13.09668-7.57422-.0166-25.32812-.94922-.54688a1.50018 1.50018 0 1 1 1.498-2.59961l1.69922.9795a1.49827 1.49827 0 0 1 .751 1.29882l.01856 27.06055a1.50127 1.50127 0 0 1 -.749 1.2998l-13.84668 8.00782a1.49211 1.49211 0 0 1 -.74952.20117z"/><path d="m44.77344 113.2666a1.49676 1.49676 0 0 1 -.749-.20019l-23.44436-13.51465a1.50034 1.50034 0 0 1 -.751-1.29883l-.00342-4.55371a1.5004 1.5004 0 0 1 1.499-1.501h.001a1.49986 1.49986 0 0 1 1.5 1.499l.00293 3.6875 21.94385 12.64941 2.63428-1.52344a1.50031 1.50031 0 0 1 1.502 2.59766l-3.38428 1.957a1.5049 1.5049 0 0 1 -.751.20125z"/><path d="m76.32324 23.25293a1.49178 1.49178 0 0 1 -.748-.20117l-6.37797-3.67676a1.49975 1.49975 0 1 1 1.498-2.59863l6.37793 3.67676a1.50014 1.50014 0 0 1 -.75 2.7998z"/><path d="m68.18555 72.66016a1.50009 1.50009 0 0 1 -.752-2.79883l22.67583-13.11328-.001-2.24366a1.49976 1.49976 0 0 1 1.499-1.501h.001a1.50018 1.50018 0 0 1 1.5 1.499l.00195 3.10986a1.49988 1.49988 0 0 1 -.749 1.29932l-23.42578 13.54743a1.49387 1.49387 0 0 1 -.75.20116z"/><path d="m44.73975 59.146a1.49986 1.49986 0 0 1 -1.5-1.499l-.01856-27.061a1.49947 1.49947 0 0 1 .749-1.29932l23.42629-13.54645a1.49707 1.49707 0 0 1 1.5-.001l1.79883 1.03711a1.49975 1.49975 0 1 1 -1.498 2.59863l-1.04883-.60449-21.9268 12.67972.01807 26.1948a1.49977 1.49977 0 0 1 -1.499 1.501z"/><path d="m107.92871 103.81836a1.50008 1.50008 0 0 1 -.75195-2.79883l6.39355-3.69726-.0166-25.32813-21.94433-12.64941-21.92579 12.67968.01661 25.32813 6.32617 3.64648a1.50018 1.50018 0 0 1 -1.49805 2.59961l-7.07617-4.0791a1.49827 1.49827 0 0 1 -.751-1.29883l-.01855-27.06054a1.50127 1.50127 0 0 1 .749-1.29981l23.42578-13.5459a1.49825 1.49825 0 0 1 1.5-.001l23.44434 13.51367a1.49828 1.49828 0 0 1 .751 1.29883l.01856 27.06054a1.50129 1.50129 0 0 1 -.749 1.29981l-7.14356 4.13086a1.49386 1.49386 0 0 1 -.75001.2012z"/></g><path d="m39.56354 76.5401c.32348-.35632.64062-.72253.94281-1.10846a16.814 16.814 0 0 0 3.54785-7.876c.38721-2.8916-.37354-5.24658-2.14209-6.63134-1.76856-1.38575-4.23779-1.55762-6.95117-.48828a16.13117 16.13117 0 0 0 -5.81757 4.18774c-4.15484-4.55859-9.57715-6.1994-12.77325-3.69946-3.46 2.70947-2.84229 9.08154 1.40576 14.50732.247.31531.50018.6308.75622.94226a9.20241 9.20241 0 0 0 2.10315 18.16223h16.18409a9.20737 9.20737 0 0 0 2.7442-17.996zm-12.95026 14.996a35 35 0 0 0 .54541-6.207 35.46647 35.46647 0 0 0 -.36389-5.03 5.72943 5.72943 0 0 0 3.569 1.15985 8.512 8.512 0 0 0 2.317-.3493 32.74556 32.74556 0 0 1 .26941 4.21942 31.76 31.76 0 0 1 -.60749 6.207zm9.44824-28.30908a6.16994 6.16994 0 0 1 2.229-.47559 2.82389 2.82389 0 0 1 1.772.53516c.88379.6919 1.25488 2.103 1.01807 3.87061a13.78553 13.78553 0 0 1 -2.93659 6.4248 13.791 13.791 0 0 1 -5.5332 4.39258c-1.65967.65332-3.11719.63281-4.00146-.05957-1.80127-1.41016-1.45606-5.98535 1.91845-10.2959a13.78338 13.78338 0 0 1 5.53373-4.39206zm-17.84179.05957c1.70953-1.33856 5.74981-.09717 9.04364 3.74207a14.06909 14.06909 0 0 0 -2.6695 9.09338h-2.20849a20.31311 20.31311 0 0 1 -2.2472-2.54c-3.375-4.30958-3.71972-8.88526-1.91845-10.29542zm-3.791 22.04248a6.21359 6.21359 0 0 1 6.20654-6.207h2.91651a31.78523 31.78523 0 0 1 .60693 6.207 31.70458 31.70458 0 0 1 -.60821 6.207h-2.91525a6.21359 6.21359 0 0 1 -6.20654-6.20697zm22.39063 6.207h-1.42178a35.00225 35.00225 0 0 0 .55262-6.207 35.3936 35.3936 0 0 0 -.42414-5.45233c.38855-.22748.7713-.48444 1.15058-.7547h.1427a6.207 6.207 0 0 1 0 12.41406z" fill="#153d45"/><circle cx="18.544" cy="84.209" fill="#153d45" r="1.821"/><path d="m104.79517 34.35016q.71245-.75742 1.38256-1.60993a19.48713 19.48713 0 0 0 4.11622-9.12988c.44238-3.30127-.417-5.98291-2.41895-7.55029-3.70154-2.89795-10.03082-.89856-14.848 4.52472-4.8121-5.41321-11.148-7.41535-14.84341-4.52472-2.00195 1.56738-2.86132 4.249-2.41894 7.55029a19.48711 19.48711 0 0 0 4.11621 9.12988c.37726.48188.767.962 1.16095 1.43024a10.554 10.554 0 0 0 1.99139 20.91889h19.01953a10.5502 10.5502 0 0 0 2.74244-20.7392zm-18.12256 17.7392h-3.63941a7.55665 7.55665 0 0 1 0-15.11329h3.645a37.89224 37.89224 0 0 1 -.00555 15.11329zm1.19751-19.22071a9.76145 9.76145 0 0 0 .11029 1.10742h-2.99414a23.47223 23.47223 0 0 1 -2.74408-3.08544 16.471 16.471 0 0 1 -3.50391-7.67823c-.1709-1.27685-.23047-3.59619 1.29492-4.79 2.42542-1.90149 7.41877.198 11.11347 4.58185a21.07219 21.07219 0 0 0 -2.09491 3.89175 1.49991 1.49991 0 1 0 2.77929 1.1289 18.68337 18.68337 0 0 1 2.62012-4.46631c3.73731-4.77148 9.03906-7.12255 11.57422-5.13623 1.52539 1.19385 1.46582 3.51319 1.29492 4.79a16.47084 16.47084 0 0 1 -3.5039 7.67823c-3.73633 4.77148-9.03418 7.12255-11.57422 5.13671a4.28061 4.28061 0 0 1 -1.374-3.27 1.50005 1.50005 0 1 0 -2.998.11133zm9.13714 19.22071h-7.27185a40.6984 40.6984 0 0 0 .70111-7.55665 41.20461 41.20461 0 0 0 -.51751-6.56347 6.04962 6.04962 0 0 0 .47357.41992 6.49577 6.49577 0 0 0 4.084 1.32813 9.97228 9.97228 0 0 0 2.92749-.47107 38.50108 38.50108 0 0 1 .3645 5.28649 37.46367 37.46367 0 0 1 -.76131 7.55665zm5.04547 0h-1.9898a40.729 40.729 0 0 0 .70562-7.55665 41.27586 41.27586 0 0 0 -.52215-6.54229 17.61976 17.61976 0 0 0 1.57342-1.01435h.23291a7.55665 7.55665 0 0 1 0 15.11329z" fill="#153d45"/><path d="m80.57617 41.33887a1.87744 1.87744 0 1 0 1.87793 1.87744 1.87924 1.87924 0 0 0 -1.87793-1.87744z" fill="#153d45"/><path d="m102.56335 94.54c.32343-.35633.64045-.72241.94251-1.10834a16.80326 16.80326 0 0 0 3.54785-7.877c.3877-2.89063-.373-5.2461-2.1416-6.62989-3.204-2.50964-8.61322-.8645-12.76959 3.69751-4.15515-4.55694-9.5774-6.19781-12.7724-3.69848-1.76856 1.38476-2.5293 3.74023-2.1416 6.63086a16.80335 16.80335 0 0 0 3.54687 7.876c.24689.31586.50012.63166.75629.94342a9.20236 9.20236 0 0 0 2.10406 18.162h16.1836a9.20732 9.20732 0 0 0 2.744-17.99615zm-12.94989 14.99613a35.00845 35.00845 0 0 0 .54572-6.207 35.41766 35.41766 0 0 0 -.36414-5.02978 5.72948 5.72948 0 0 0 3.56824 1.15965 8.51228 8.51228 0 0 0 2.31677-.34912 32.68884 32.68884 0 0 1 .27015 4.21924 31.71952 31.71952 0 0 1 -.60834 6.207zm11.69416-28.77343a2.79691 2.79691 0 0 1 1.75488.52441c.88379.69141 1.25488 2.10156 1.01855 3.86914a13.794 13.794 0 0 1 -2.93652 6.42578h-.001a13.78539 13.78539 0 0 1 -5.53222 4.39258c-1.6582.6543-3.11817.63379-4.00195-.06055-.88379-.6914-1.25489-2.10156-1.01856-3.86914a13.80279 13.80279 0 0 1 2.93652-6.42578c2.54006-3.24314 5.63577-4.85644 7.7803-4.85644zm-21.10645 4.39355c-.23633-1.76758.13477-3.17773 1.01856-3.87012 1.70648-1.33453 5.74768-.09784 9.04431 3.74451a16.10514 16.10514 0 0 0 -2.64588 6.61584 9.82692 9.82692 0 0 0 -.02545 2.47559h-2.20782a20.29205 20.29205 0 0 1 -2.24719-2.54 13.79411 13.79411 0 0 1 -2.93653-6.42582zm-2.77246 18.17285a6.2137 6.2137 0 0 1 6.207-6.207h2.91663a32.00952 32.00952 0 0 1 -.00153 12.41406h-2.9151a6.2137 6.2137 0 0 1 -6.207-6.20706zm22.39063 6.207h-1.42182a35.00923 35.00923 0 0 0 .55268-6.207 35.38662 35.38662 0 0 0 -.42414-5.45233c.38855-.22748.7713-.48444 1.15058-.7547h.1427a6.207 6.207 0 0 1 0 12.41406z" fill="#153d45"/><path d="m81.54492 100.3877a1.82129 1.82129 0 1 0 1.82031 1.82128 1.82381 1.82381 0 0 0 -1.82031-1.82128z" fill="#153d45"/></svg></p>
 </div>
-</footer>"#
+</footer>"##
         .to_string()
 }
 
@@ -982,10 +1784,32 @@ fn ru_count(n: usize, one: &str, few: &str, many: &str) -> String {
     format!("{n} {word}")
 }
 
-fn badges(words: bool, meaning: bool, volunteer: bool, region: Option<&str>) -> String {
+fn badges(
+    words: bool,
+    meaning: bool,
+    volunteer: bool,
+    region: Option<&str>,
+    place: Option<&str>,
+    distance_km: Option<f32>,
+) -> String {
     let mut out = String::new();
+    if let Some(km) = distance_km {
+        let label = if km < 1.0 {
+            format!("{} м", ((km * 1000.0).round() as i64).max(10))
+        } else if km < 10.0 {
+            format!("{km:.1} км").replace('.', ",")
+        } else {
+            format!("{} км", km.round() as i64)
+        };
+        out.push_str(&format!("<span class=\"badge\">{label}</span>"));
+    }
     if let Some(region) = region {
         out.push_str(&format!("<span class=\"badge\">{region}</span>", region = escape(region)));
+    }
+    if let Some(place) = place {
+        if Some(place) != region {
+            out.push_str(&format!("<span class=\"badge\">{place}</span>", place = escape(place)));
+        }
     }
     if words {
         out.push_str("<span class=\"badge\">слова</span>");
@@ -1040,9 +1864,14 @@ mod tests {
             adult: false,
             volunteer: false,
             region: None,
+            place: None,
+            distance_km: None,
+            lat: None,
+            lon: None,
             kind: 0,
             media_url: None,
             feed_url: None,
+            news_feed: None,
             price: None,
         }
     }
@@ -1051,7 +1880,8 @@ mod tests {
     fn query_is_escaped() {
         let html = render("<script>", &[], 1, None);
         assert!(html.contains("&lt;script&gt;"));
-        assert!(!html.contains("<script>"));
+        assert!(html.contains("<textarea name=\"q\" rows=\"1\" autofocus placeholder=\"Запрос\">&lt;script&gt;</textarea>"));
+        assert_eq!(html.matches("<script>").count(), 1);
         assert!(html.contains("https://dartalab.ru/"));
         assert!(html.contains("<title>Пчелопоиск</title>"));
         let home = render("", &[], 1, None);
@@ -1059,7 +1889,12 @@ mod tests {
         assert!(home.contains("Bee search"));
         assert!(home.contains("Пчелопоиск"));
         assert!(home.contains("без фильтра по языку"));
-        assert!(home.contains("class=\"c1\""));
+        assert!(home.contains("ПчелоПоиск"));
+        assert!(home.contains("class=\"name\">Поиск"));
+        assert!(home.contains("class=\"bee\""));
+        assert!(home.contains("<textarea name=\"q\""));
+        assert!(home.contains("aria-label=\"Найти\""));
+        assert!(!home.contains("class=\"eye\""));
         assert!(home.contains("<svg"));
         assert!(home.contains("Помочь проекту"));
         assert!(home.contains("class=\"credit\""));
@@ -1071,7 +1906,9 @@ mod tests {
         assert_eq!(stamped, "21 сайт и 5 страниц");
         assert_eq!(stamp_census("%%SITES%% %%PAGES%%".into(), 11, 22), "11 сайтов 22 страницы");
         assert_eq!(stamp_census("%%SITES%% %%PAGES%%".into(), 2, 1), "2 сайта 1 страница");
-        assert!(home.contains("class=\"flyer"));
+        assert!(home.contains("class=\"comb\""));
+        let comb = home.find("class=\"comb\"").unwrap();
+        assert!(help < comb);
         let mut bee = sample(1);
         bee.volunteer = true;
         let marked = render("мёд", &[bee], 1, None);
@@ -1116,11 +1953,27 @@ mod tests {
         let indexing = page_indexing();
         assert!(indexing.contains("Зачем нода рядом с сайтом"));
         assert!(indexing.contains("Зачем полная нода"));
-        assert!(indexing.contains("Зачем шард на телефоне"));
+        assert!(indexing.contains("Зачем приложение на телефоне"));
+        assert!(indexing.contains("href=\"/android\""));
+        let phone = page_android();
+        assert!(phone.contains("не кабинет"));
+        assert!(phone.contains("Что такое шард"));
+        assert!(phone.contains("браузер внутри приложения"));
+        assert!(phone.contains("когда приложение свёрнуто"));
+        assert!(phone.contains("индекс пишет улей"));
+        assert!(phone.contains("К поиску"));
+        assert!(phone.contains("/download/pchela-android.apk"));
         assert!(indexing.contains("Если сломается Яндекс или Гугл"));
         assert!(indexing.contains("до ста страниц"));
         assert!(page_manifesto().contains("Если крупный поиск встанет"));
         assert!(page_how().contains("href=\"/indexing\""));
+        assert!(page_for_sites().contains("чужие адреса"));
+        assert!(page_hive().contains("4 ядра"));
+        assert!(page_hive().contains("--alone"));
+        assert!(page_computer().contains("--lite --hive"));
+        assert!(page_computer().contains("сам не меняется"));
+        assert!(page_download(None).contains("href=\"/hive\""));
+        assert!(page_download(None).contains("href=\"/computer\""));
         assert!(page_download(None).contains("Какую ноду ставить"));
         assert!(page_download(None).contains("Лёгкая пчела свой файл не меняет"));
         let add = page_add("https://пасека.рф", None, false);
@@ -1132,7 +1985,7 @@ mod tests {
         assert!(missing.contains("ещё не выложен"));
         assert!(missing.contains(RELEASE_WINDOWS));
         assert!(missing.contains(RELEASE_LINUX));
-        assert!(missing.contains(RELEASE_ANDROID));
+        assert!(missing.contains("href=\"/android\""));
         assert!(missing.contains("/download/pchela-linux-x64.tar.gz"));
         assert!(missing.contains("/download/pchela-windows-x64.zip"));
         assert!(missing.contains("забирает модель с улья"));
@@ -1167,9 +2020,14 @@ mod tests {
             adult: true,
             volunteer: false,
             region: None,
+            place: None,
+            distance_km: None,
+            lat: None,
+            lon: None,
             kind: 0,
             media_url: None,
             feed_url: None,
+            news_feed: None,
             price: None,
         };
         let closed = render_results("мёд", &[], &[adult.clone()], false, 1, None, None, "");
@@ -1217,17 +2075,30 @@ mod tests {
         let other = html.find("В других регионах").unwrap();
         assert!(home < other);
         assert!(html.contains("Банки Камышин"));
-        assert!(html.contains(">Волгоградская область</option>"));
+        assert!(html.contains("data-region=\"Волгоградская область\""));
+        assert!(html.contains("class=\"region-opt on\""));
+        assert!(html.contains("name=\"region\" value=\"Волгоградская область\""));
         assert!(html.contains("aria-label=\"Настройки поиска\""));
         let news = render_results("мёд", &[], &[], false, 1, None, None, "news");
-        assert!(news.contains("class=\"wire\""));
-        assert!(news.contains("Раскрыть"));
-        assert!(news.contains("fetch(\"/wire\")"));
+        assert!(!news.contains("Свежие заголовки изданий"));
+        let mut paper = sample(1);
+        paper.url = "https://www.kommersant.ru/".into();
+        let with_paper = render_results("мёд", &[paper], &[], false, 1, None, None, "news");
+        assert!(with_paper.contains("data-feed="));
+        assert!(with_paper.contains("kommersant.ru/rss"));
+        assert!(with_paper.contains("/wire?feed="));
+        assert!(!with_paper.contains("Свежие заголовки изданий"));
+        let mut shop = sample(2);
+        shop.url = "https://shop.example/".into();
+        shop.feed_url = Some("https://shop.example/feed.yml".into());
+        let goods = render_results("болт", &[shop], &[], false, 1, None, None, "goods");
+        assert!(goods.contains("data-offers="));
+        assert!(goods.contains("/offers?feed="));
+        assert!(goods.contains("Товары"));
         assert!(!html.contains("class=\"wire\""));
-        assert!(html.contains("<details class=\"tune\" open>"));
-        let closed = render("банки", &[], 1, None);
-        assert!(closed.contains("<details class=\"tune\">"));
-        assert!(!closed.contains("<details class=\"tune\" open>"));
+        assert!(html.contains("<p class=\"region-now\">Волгоградская область</p>"));
+        assert!(html.contains("<details class=\"tune\">"));
+        assert!(!html.contains("<details class=\"tune\" open>"));
     }
 
     #[test]

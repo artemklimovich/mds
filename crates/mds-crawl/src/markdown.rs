@@ -41,9 +41,11 @@ pub fn page_from_markdown(url: &str, host: &str, markdown: &str) -> FetchedPage 
         title,
         text,
         links: markdown_links(url, markdown),
+        anchors: Vec::new(),
         kind,
         media_url: None,
         feed_url: None,
+        news_feed: None,
         price: None,
         docs: Vec::new(),
         priority: if Url::parse(url).ok().as_ref().is_some_and(is_llms_card) {

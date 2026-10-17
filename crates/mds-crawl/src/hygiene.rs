@@ -242,6 +242,38 @@ fn end_of_element(lower: &str, mut from: usize, tag: &str) -> usize {
     from
 }
 
+/// Убирает хвост после `#` и метки перехода (`utm_*`, клики рекламы). Остальной запрос остаётся.
+pub fn tidy_url(url: &str) -> String {
+    let trimmed = url.trim();
+    let Ok(mut parsed) = Url::parse(trimmed) else {
+        return trimmed.to_string();
+    };
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return trimmed.to_string();
+    }
+    parsed.set_fragment(None);
+    let kept: Vec<(String, String)> = parsed
+        .query_pairs()
+        .filter(|(key, _)| !is_track_param(key))
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    if kept.is_empty() {
+        parsed.set_query(None);
+    } else {
+        parsed.query_pairs_mut().clear().extend_pairs(&kept);
+    }
+    parsed.to_string()
+}
+
+fn is_track_param(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    key.starts_with("utm_")
+        || matches!(
+            key.as_str(),
+            "gclid" | "yclid" | "fbclid" | "ysclid" | "gclsrc" | "_openstat" | "mc_cid" | "mc_eid"
+        )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -263,6 +295,17 @@ mod tests {
         assert!(!joined.path().contains("thelivecoffee"));
         let ordinary = resolve_href(&base, "/members/").unwrap();
         assert_eq!(ordinary.host_str(), Some("rusprodsoyuz.ru"));
+    }
+
+    #[test]
+    fn track_marks_and_fragment_leave_the_address() {
+        let tidy = tidy_url("https://shop.example/jar.html?id=3&utm_source=ads&utm_medium=cpc#top");
+        assert_eq!(tidy, "https://shop.example/jar.html?id=3");
+        assert_eq!(
+            tidy_url("https://shop.example/jar.html?utm_campaign=spring#x"),
+            "https://shop.example/jar.html"
+        );
+        assert_eq!(tidy_url("https://shop.example/jar.html?id=3"), "https://shop.example/jar.html?id=3");
     }
 
     #[test]

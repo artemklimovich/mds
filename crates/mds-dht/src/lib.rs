@@ -120,6 +120,43 @@ pub fn assign_holders(nodes: &[NodeId], key: &ShardKey) -> Vec<NodeId> {
     ranked.into_iter().take(REPLICATION).map(|(_, node)| node).collect()
 }
 
+/// Имя, которому принадлежит домен, когда ульев несколько.
+/// Пока список соседей пуст, домен никому отдельно не отдан.
+pub fn keeps_domain(self_name: &str, peers: &[String], host: &str) -> bool {
+    let self_name = normalize_base(self_name);
+    if self_name.is_empty() {
+        return true;
+    }
+    let mut names = vec![self_name.clone()];
+    for peer in peers {
+        let peer = normalize_base(peer);
+        if peer.is_empty() || names.iter().any(|item| item == &peer) {
+            continue;
+        }
+        names.push(peer);
+    }
+    if names.len() < 2 {
+        return true;
+    }
+    domain_owner(&names, host).is_some_and(|owner| owner == &self_name)
+}
+
+fn domain_owner<'a>(names: &'a [String], host: &str) -> Option<&'a String> {
+    let hash = domain_hash(host);
+    let mut best: Option<(&String, String)> = None;
+    for name in names {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(name.as_bytes());
+        hasher.update(&hash);
+        let score = hasher.finalize().to_hex().to_string();
+        match &best {
+            Some((_, have)) if score.as_str() >= have.as_str() => {}
+            _ => best = Some((name, score)),
+        }
+    }
+    best.map(|(name, _)| name)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CopyState {
     Active,
@@ -328,6 +365,26 @@ fn normalize_base(base: &str) -> String {
 mod tests {
     use super::*;
     use mds_types::EMBED_DIMS;
+
+    #[test]
+    fn one_hive_keeps_every_domain_and_two_hives_split_them() {
+        assert!(keeps_domain("https://a.example", &[], "shop.example"));
+        let peers = vec!["https://b.example".into()];
+        let mut only_a = 0;
+        let mut only_b = 0;
+        for n in 0..40 {
+            let host = format!("site{n}.example");
+            let a = keeps_domain("https://a.example", &peers, &host);
+            let b = keeps_domain("https://b.example", &["https://a.example".into()], &host);
+            assert!(a ^ b, "{host}");
+            if a {
+                only_a += 1;
+            } else {
+                only_b += 1;
+            }
+        }
+        assert!(only_a > 0 && only_b > 0);
+    }
 
     #[test]
     fn bucket_is_stable() {

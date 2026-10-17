@@ -169,20 +169,43 @@ pub fn cookie_token(headers: &axum::http::HeaderMap) -> Option<String> {
     None
 }
 
-pub fn login_page(error: bool) -> String {
+pub fn login_page(error: bool, base: &str) -> String {
     let note = if error {
         "<p class=\"error\">Имя или пароль не подошли.</p>"
     } else {
         ""
     };
     format!(
-        "<!doctype html><meta charset=\"utf-8\"><title>Кабинет</title>
-<body><main><h1>Кабинет ноды</h1>{note}
-<form method=\"post\" action=\"/login\">
-<label>Имя <input name=\"user\" autocomplete=\"username\"></label>
-<label>Пароль <input name=\"password\" type=\"password\" autocomplete=\"current-password\"></label>
-<button type=\"submit\">Войти</button>
-</form></main></body>"
+        r#"<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Кабинет</title>
+<style>
+body {{ margin: 0; min-height: 100vh; display: grid; place-items: center; font-family: Arial, Helvetica, sans-serif; color: #202124; background: #f8f9fa; }}
+main {{ width: min(100% - 32px, 380px); padding: 32px 28px 28px; background: #fff; border: 1px solid #dadce0; border-radius: 16px; box-shadow: 0 1px 6px rgba(32,33,36,.12); box-sizing: border-box; }}
+h1 {{ margin: 0 0 22px; text-align: center; font-family: Georgia, "Times New Roman", serif; font-size: 28px; font-weight: 500; color: #5c3a12; }}
+form {{ display: grid; gap: 14px; }}
+label {{ display: grid; gap: 6px; font-size: 14px; color: #3c4043; }}
+input {{ height: 44px; border: 1px solid #dfe1e5; border-radius: 22px; padding: 0 16px; font-size: 16px; font-family: inherit; box-sizing: border-box; }}
+input:focus {{ outline: none; border-color: #e6a817; box-shadow: 0 0 0 3px rgba(230,168,23,.22); }}
+button {{ height: 44px; margin-top: 4px; border: 0; border-radius: 22px; background: #1a73e8; color: #fff; font-size: 15px; cursor: pointer; }}
+p.error {{ margin: 0 0 14px; text-align: center; color: #a50e0e; font-size: 14px; }}
+</style>
+</head>
+<body>
+<main>
+<h1>Кабинет ноды</h1>
+{note}
+<form method="post" action="{base}/login">
+<label>Имя <input name="user" autocomplete="username" required></label>
+<label>Пароль <input name="password" type="password" autocomplete="current-password" required></label>
+<button type="submit">Войти</button>
+</form>
+</main>
+</body>
+</html>"#
     )
 }
 

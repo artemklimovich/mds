@@ -31,11 +31,21 @@ pub struct SearchHit {
     #[serde(default)]
     pub region: Option<String>,
     #[serde(default)]
+    pub place: Option<String>,
+    #[serde(default)]
+    pub distance_km: Option<f32>,
+    #[serde(default)]
+    pub lat: Option<f64>,
+    #[serde(default)]
+    pub lon: Option<f64>,
+    #[serde(default)]
     pub kind: u32,
     #[serde(default)]
     pub media_url: Option<String>,
     #[serde(default)]
     pub feed_url: Option<String>,
+    #[serde(default)]
+    pub news_feed: Option<String>,
     #[serde(default)]
     pub price: Option<String>,
 }
@@ -52,9 +62,14 @@ impl From<Hit> for SearchHit {
             adult: hit.adult,
             volunteer: hit.volunteer,
             region: hit.region,
+            place: hit.place,
+            distance_km: hit.distance_km,
+            lat: hit.lat,
+            lon: hit.lon,
             kind: hit.kind,
             media_url: hit.media_url,
             feed_url: hit.feed_url,
+            news_feed: hit.news_feed,
             price: hit.price,
         }
     }
@@ -104,6 +119,9 @@ pub struct PeerStatus {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CrawlWork {
     pub urls: Vec<String>,
+    /// Сколько секунд приложению ждать до следующего захода. Старые приложения поле пропускают.
+    #[serde(default)]
+    pub pause_secs: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -112,6 +130,41 @@ pub struct PushedPage {
     pub title: String,
     pub host: String,
     pub text: String,
+    /// До 20 абсолютных ссылок того же сайта. Старая пчела поле не шлёт.
+    #[serde(default)]
+    pub links: Vec<String>,
+    /// Отпечаток полного текста до обрезки. Ноль значит, что его не прислали.
+    #[serde(default)]
+    pub simhash: u64,
+    /// Слова ссылки и адрес, на который она ведёт. Старая пчела поле не шлёт.
+    #[serde(default)]
+    pub anchors: Vec<PushedAnchor>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PushedAnchor {
+    pub url: String,
+    #[serde(default)]
+    pub text: String,
+}
+
+/// Страница в снимке шарда. Вектор считает улей, который её принимает.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShardLeaf {
+    pub url: String,
+    pub host: String,
+    pub title: String,
+    pub text: String,
+    pub simhash: u64,
+    pub revision: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShardBlockV1 {
+    pub from_revision: u64,
+    pub to_revision: u64,
+    pub pages: Vec<ShardLeaf>,
+    pub block_sha256: String,
 }
 
 #[cfg(test)]

@@ -7,3 +7,4 @@ publish.workspace = true
 
 [dependencies]
 mds-types = { workspace = true }
+serde = { workspace = true }

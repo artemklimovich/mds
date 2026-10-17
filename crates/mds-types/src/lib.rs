@@ -1,15 +1,20 @@
+mod contacts;
 mod kind;
 mod region;
 mod rss;
 
+pub use contacts::{classify_contact_url, clean_email, clean_phone, contacts_in_text, Contacts};
 pub use kind::{
-    bare_host, host_of_url, in_general, is_channel_host, is_document_url, is_government_host, is_job_board,
-    is_marketplace_host, is_press_front, is_press_host, is_product_url, is_webshop, kind_from_stored, press_feeds,
-    tab_mask, HostFeed, HOST_PAGE_CAP, KIND_CHANNEL, KIND_DOC, KIND_GOODS, KIND_GOV, KIND_IMAGE, KIND_JOBS,
-    KIND_MEDICINE, KIND_NEWS, KIND_SERVICE, KIND_VIDEO,
+    all_kinds, bare_host, host_of_url, in_general, is_channel_host, is_document_url, is_government_host, is_job_board, kind_codes, site_ask, KindSpec, SiteAsk,
+    is_marketplace_host, is_press_front, is_press_host, is_product_card, is_product_url, is_webshop, kind_from_stored, open_feed, press_feed, press_feeds, press_rss,
+    tab_mask, HostFeed, HOST_PAGE_CAP, KIND_ADS, KIND_AI, KIND_AUTO, KIND_BUILD, KIND_CHANNEL, KIND_DOC, KIND_EDU, KIND_GOODS, KIND_GOV, KIND_HAUL, KIND_IMAGE, KIND_JOBS,
+    KIND_MEDICINE, KIND_NEWS, KIND_REALTY, KIND_SERVICE, KIND_SHOP, KIND_VIDEO,
 };
 pub use rss::rss_headlines;
-pub use region::{canonical_region, region_in, region_names};
+pub use region::{
+    canonical_region, coords_in_html_maps, coords_in_text, geo_for_page, geo_in, haversine_km, is_geo_word,
+    parse_lat_lon_pair, place_in, region_in, region_names, valid_coords, GeoTag,
+};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -119,6 +124,17 @@ pub struct Hit {
     /// Край, который написан на странице. Пусто, если страница его не назвала.
     #[serde(default)]
     pub region: Option<String>,
+    /// Более точное место внутри края: район области, район Москвы или город.
+    #[serde(default)]
+    pub place: Option<String>,
+    /// Расстояние от точки пользователя в километрах (считается на лету, в базу не пишется).
+    #[serde(default)]
+    pub distance_km: Option<f32>,
+    /// Координаты бизнеса со страницы или сайта (широта и долгота).
+    #[serde(default)]
+    pub lat: Option<f64>,
+    #[serde(default)]
+    pub lon: Option<f64>,
     /// Маска вкладок. Ноль значит обычная веб-страница, она видна только во «Всех».
     #[serde(default)]
     pub kind: u32,
@@ -126,6 +142,8 @@ pub struct Hit {
     pub media_url: Option<String>,
     #[serde(default)]
     pub feed_url: Option<String>,
+    #[serde(default)]
+    pub news_feed: Option<String>,
     #[serde(default)]
     pub price: Option<String>,
 }
