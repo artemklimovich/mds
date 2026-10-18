@@ -1462,6 +1462,14 @@ pub fn parse_lat_lon_pair(raw: &str) -> Option<(f64, f64)> {
     }
 }
 
+fn cut(text: &str, start: usize, end: usize) -> &str {
+    let end = end.min(text.len());
+    let start = start.min(end);
+    let start = (0..=start).rev().find(|at| text.is_char_boundary(*at)).unwrap_or(0);
+    let end = (end..=text.len()).find(|at| text.is_char_boundary(*at)).unwrap_or(text.len());
+    &text[start..end]
+}
+
 /// Извлекает координаты из ссылок и виджетов Яндекс.Карт, Google Maps и OpenStreetMap в HTML.
 pub fn coords_in_html_maps(html: &str) -> Option<(f64, f64)> {
     let lower = html.to_ascii_lowercase();
@@ -1471,11 +1479,11 @@ pub fn coords_in_html_maps(html: &str) -> Option<(f64, f64)> {
         while let Some(rel) = lower[from..].find(marker) {
             let start = from + rel + marker.len();
             from = start;
-            let window = &lower[start.saturating_sub(120)..(start + 80).min(lower.len())];
+            let window = cut(&lower, start.saturating_sub(120), start + 80);
             if !(window.contains("yandex.") || window.contains("ya.ru") || window.contains("api-maps")) {
                 continue;
             }
-            let tail = &lower[start..(start + 48).min(lower.len())];
+            let tail = cut(&lower, start, start + 48);
             let decoded = tail.replace("%2c", ",");
             if let Some((lon, lat)) = parse_lat_lon_pair(&decoded) {
                 if valid_coords(lat, lon) {
@@ -1486,7 +1494,7 @@ pub fn coords_in_html_maps(html: &str) -> Option<(f64, f64)> {
     }
     // Google Maps: !3dLAT!4dLON или @LAT,LON
     if let Some(d3) = lower.find("!3d") {
-        let rest = &lower[d3 + 3..(d3 + 60).min(lower.len())];
+        let rest = cut(&lower, d3 + 3, d3 + 60);
         if let Some((lat_str, after)) = rest.split_once("!4d") {
             let lon_str: String = after
                 .chars()
@@ -1501,7 +1509,7 @@ pub fn coords_in_html_maps(html: &str) -> Option<(f64, f64)> {
     }
     for host_hint in ["google.com/maps", "maps.google."] {
         if let Some(pos) = lower.find(host_hint) {
-            let slice = &lower[pos..(pos + 200).min(lower.len())];
+            let slice = cut(&lower, pos, pos + 200);
             if let Some(at) = slice.find('@') {
                 if let Some(pair) = parse_lat_lon_pair(&slice[at + 1..]) {
                     return Some(pair);
@@ -1511,7 +1519,7 @@ pub fn coords_in_html_maps(html: &str) -> Option<(f64, f64)> {
     }
     // OpenStreetMap: mlat=LAT&mlon=LON
     if let Some(mlat) = lower.find("mlat=") {
-        let slice = &lower[mlat + 5..(mlat + 64).min(lower.len())];
+        let slice = cut(&lower, mlat + 5, mlat + 64);
         let lat_str: String = slice
             .chars()
             .take_while(|ch| ch.is_ascii_digit() || matches!(*ch, '.' | '-' | '+'))
@@ -1599,5 +1607,7 @@ mod tests {
         let (lat2, lon2) = coords_in_text(llms).unwrap();
         let km = haversine_km(lat, lon, lat2, lon2);
         assert!(km > 0.3 && km < 0.8);
+        let cyrillic = format!("{}ll=37.61,55.75", "я".repeat(80));
+        assert!(coords_in_html_maps(&cyrillic).is_none());
     }
 }

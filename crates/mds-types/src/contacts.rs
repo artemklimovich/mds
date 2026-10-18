@@ -313,7 +313,9 @@ pub fn contacts_in_text(text: &str) -> Contacts {
 
     // Extract Tel: +7... tokens when push_unique joins them with spaces
     for (idx, _) in text.match_indices("Tel:") {
-        let slice = &text[idx + 4..(idx + 120).min(text.len())];
+        let rest = text.get(idx + 4..).unwrap_or("");
+        let end = rest.char_indices().nth(120).map(|(at, _)| at).unwrap_or(rest.len());
+        let slice = &rest[..end];
         let stop = slice
             .find("Email:")
             .or_else(|| slice.find("Msg:"))
@@ -421,5 +423,14 @@ mod tests {
             vec!["https://t.me/zavod_stroy", "https://wa.me/79991234567"]
         );
         assert_eq!(c.socials, vec!["https://vk.com/zavod_stroy"]);
+    }
+
+    #[test]
+    fn tel_marker_before_cyrillic_does_not_cut_a_letter() {
+        let sample = format!("Адрес Tel: {}", "я".repeat(80));
+        let c = contacts_in_text(&sample);
+        assert!(c.phones.is_empty());
+        let with_phone = contacts_in_text("Tel: +74951234567, дальше текст");
+        assert_eq!(with_phone.phones, vec!["+74951234567"]);
     }
 }

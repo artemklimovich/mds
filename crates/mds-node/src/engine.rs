@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
+use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use mds_crawl::{is_broken_url, is_not_found, strip_boilerplate, tidy_url, CrawlPolicy, Crawler, FetchedPage};
@@ -19,6 +20,138 @@ struct CachedQuery {
     hits: Vec<Hit>,
     vector: QuantVector,
     saved_at: Instant,
+}
+
+/// Несколько чтений базы сразу. Писатель обхода их не держит.
+pub struct ReadPool {
+    free: Mutex<Vec<Index>>,
+    wait: Condvar,
+}
+
+struct ReaderLoan<'a> {
+    pool: &'a ReadPool,
+    index: Option<Index>,
+}
+
+impl Drop for ReaderLoan<'_> {
+    fn drop(&mut self) {
+        if let Some(index) = self.index.take() {
+            self.pool
+                .free
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .push(index);
+            self.pool.wait.notify_one();
+        }
+    }
+}
+
+impl ReadPool {
+    pub fn open(path: &Path) -> Result<Self, NodeError> {
+        let size = std::thread::available_parallelism()
+            .map(|count| count.get().clamp(4, 8))
+            .unwrap_or(4);
+        let mut free = Vec::with_capacity(size);
+        for _ in 0..size {
+            free.push(Index::open_read(path)?);
+        }
+        Ok(Self {
+            free: Mutex::new(free),
+            wait: Condvar::new(),
+        })
+    }
+
+    pub fn call<T>(&self, body: impl FnOnce(&Index) -> Result<T, NodeError>) -> Result<T, NodeError> {
+        let loan = self.loan();
+        let index = loan.index.as_ref().expect("читатель пула");
+        body(index)
+    }
+
+    fn loan(&self) -> ReaderLoan<'_> {
+        let mut free = self.free.lock().unwrap_or_else(|poison| poison.into_inner());
+        loop {
+            if let Some(index) = free.pop() {
+                return ReaderLoan {
+                    pool: self,
+                    index: Some(index),
+                };
+            }
+            free = self.wait.wait(free).unwrap_or_else(|poison| poison.into_inner());
+        }
+    }
+}
+
+pub fn hits_for(
+    index: &Index,
+    lsh: &Lsh,
+    query: &str,
+    vector: &[f32],
+    kind_mask: u32,
+) -> Result<Vec<Hit>, NodeError> {
+    let bucket = lsh.bucket(vector);
+    let words = index.search_words(query, 100, kind_mask)?;
+    let meanings = index.search_vectors(vector, Some(bucket), 100, kind_mask)?;
+    let mut ids: Vec<i64> = words
+        .iter()
+        .map(|hit| hit.id)
+        .chain(meanings.iter().map(|hit| hit.id))
+        .collect();
+    ids.sort_unstable();
+    ids.dedup();
+    let pages = index.pages_by_ids(&ids)?;
+    let muted = index.muted_hosts().unwrap_or_default();
+    let mut hits = fuse(query, &words, &meanings, &pages);
+    let bees = index.volunteers().unwrap_or_default();
+    hits = drop_near_copies(hits, &pages, &bees);
+    if !muted.is_empty() {
+        hits.retain(|hit| {
+            host_of_url(&hit.url)
+                .map(|host| !muted.iter().any(|item| item == &bare_host(&host)))
+                .unwrap_or(true)
+        });
+    }
+    Ok(hits)
+}
+
+pub fn site_hits(index: &Index, host: &str, words: &str, kind_mask: u32) -> Result<Vec<Hit>, NodeError> {
+    let pages = index.pages_of_host(host, kind_mask, 100)?;
+    let needles: Vec<String> = words
+        .split_whitespace()
+        .map(|word| word.to_lowercase())
+        .filter(|word| !word.is_empty())
+        .collect();
+    let mut hits = Vec::new();
+    for page in pages {
+        let lane = page_lane(&page.url, &page.title, &page.text);
+        if lane == Lane::Hidden {
+            continue;
+        }
+        let hay = format!("{}\n{}", page.title, page.text).to_lowercase();
+        if !needles.iter().all(|word| hay.contains(word)) {
+            continue;
+        }
+        hits.push(Hit {
+            url: page.url,
+            title: page.title.clone(),
+            snippet: mds_types::snippet(&page.text, if words.trim().is_empty() { page.title.as_str() } else { words }),
+            score: 1.0,
+            via_words: !needles.is_empty(),
+            via_meaning: false,
+            adult: lane == Lane::Adult,
+            volunteer: false,
+            region: page.region,
+            place: page.place,
+            distance_km: None,
+            lat: page.lat,
+            lon: page.lon,
+            kind: page.kind,
+            media_url: page.media_url,
+            feed_url: page.feed_url,
+            news_feed: page.news_feed,
+            price: page.price,
+        });
+    }
+    Ok(hits)
 }
 
 /// Пишет `warm` и ждёт появления `go`. База в это время не открывается.
@@ -259,6 +392,7 @@ impl Engine {
         self.remember_priorities(&pages)?;
         self.note_page_anchors(&pages)?;
         self.index.enqueue_urls(discovered)?;
+        self.index.pull_ahead(discovered)?;
         self.index.delete_urls(gone)?;
         self.cache.clear();
         self.park_pages(&pages, false)?;
@@ -277,6 +411,7 @@ impl Engine {
         }
         self.remember_priorities(&pages)?;
         self.index.enqueue_urls(&discovered)?;
+        self.index.pull_ahead(&discovered)?;
         self.index.delete_urls(&gone)?;
         self.cache.clear();
         self.ingest_upsert(pages)
@@ -303,6 +438,7 @@ impl Engine {
         self.remember_priorities(&pages)?;
         self.note_page_anchors(&pages)?;
         self.index.enqueue_urls(&discovered)?;
+        self.index.pull_ahead(&discovered)?;
         self.index.delete_urls(&gone)?;
         self.cache.clear();
         self.park_pages(&pages, false)?;
@@ -360,6 +496,10 @@ impl Engine {
         self.finish_search(query, kind_mask, vector)
     }
 
+    pub fn keep_search(&mut self, query: &str, kind_mask: u32, hits: &[Hit], vector: QuantVector) {
+        self.remember_cached(query, kind_mask, hits, vector);
+    }
+
     fn remember_cached(&mut self, query: &str, kind_mask: u32, hits: &[Hit], vector: QuantVector) {
         let key = format!("{kind_mask}:{}", query.trim().to_lowercase());
         if self.cache.len() >= CACHE_MAX {
@@ -381,29 +521,7 @@ impl Engine {
     }
 
     fn search_local(&self, query: &str, vector: &[f32], kind_mask: u32) -> Result<Vec<Hit>, NodeError> {
-        let bucket = self.lsh.bucket(vector);
-        let words = self.index.search_words(query, 100, kind_mask)?;
-        let meanings = self.index.search_vectors(vector, Some(bucket), 100, kind_mask)?;
-        let mut ids: Vec<i64> = words
-            .iter()
-            .map(|hit| hit.id)
-            .chain(meanings.iter().map(|hit| hit.id))
-            .collect();
-        ids.sort_unstable();
-        ids.dedup();
-        let pages = self.index.pages_by_ids(&ids)?;
-        let muted = self.index.muted_hosts().unwrap_or_default();
-        let mut hits = fuse(query, &words, &meanings, &pages);
-        let bees = self.index.volunteers().unwrap_or_default();
-        hits = drop_near_copies(hits, &pages, &bees);
-        if !muted.is_empty() {
-            hits.retain(|hit| {
-                host_of_url(&hit.url)
-                    .map(|host| !muted.iter().any(|item| item == &bare_host(&host)))
-                    .unwrap_or(true)
-            });
-        }
-        Ok(hits)
+        hits_for(&self.index, &self.lsh, query, vector, kind_mask)
     }
 
     fn ingest(&mut self, pages: Vec<FetchedPage>) -> Result<usize, NodeError> {
@@ -563,44 +681,7 @@ impl Engine {
     }
 
     pub fn pages_of_site(&self, host: &str, words: &str, kind_mask: u32) -> Result<Vec<Hit>, NodeError> {
-        let pages = self.index.pages_of_host(host, kind_mask, 100)?;
-        let needles: Vec<String> = words
-            .split_whitespace()
-            .map(|word| word.to_lowercase())
-            .filter(|word| !word.is_empty())
-            .collect();
-        let mut hits = Vec::new();
-        for page in pages {
-            let lane = page_lane(&page.url, &page.title, &page.text);
-            if lane == Lane::Hidden {
-                continue;
-            }
-            let hay = format!("{}\n{}", page.title, page.text).to_lowercase();
-            if !needles.iter().all(|word| hay.contains(word)) {
-                continue;
-            }
-            hits.push(Hit {
-                url: page.url,
-                title: page.title.clone(),
-                snippet: mds_types::snippet(&page.text, if words.trim().is_empty() { page.title.as_str() } else { words }),
-                score: 1.0,
-                via_words: !needles.is_empty(),
-                via_meaning: false,
-                adult: lane == Lane::Adult,
-                volunteer: false,
-                region: page.region,
-                place: page.place,
-                distance_km: None,
-                lat: page.lat,
-                lon: page.lon,
-                kind: page.kind,
-                media_url: page.media_url,
-                feed_url: page.feed_url,
-                news_feed: page.news_feed,
-                price: page.price,
-            });
-        }
-        Ok(hits)
+        site_hits(&self.index, host, words, kind_mask)
     }
 
     pub fn searches_last_minute(&self) -> Result<u64, NodeError> {
@@ -746,6 +827,7 @@ impl Engine {
         let url = page.url.clone();
         let hash = page.simhash;
         self.index.enqueue_urls(&links)?;
+        self.index.pull_ahead(&links)?;
         if self.index.stored_simhash(&url)? == Some(hash) {
             self.index.note_intake(0, 0, 1, 0)?;
             self.index.refresh_quiet(&url, etag.as_deref(), modified.as_deref())?;
@@ -790,6 +872,10 @@ impl Engine {
 
     pub fn load_hours(&self, limit: usize) -> Result<Vec<mds_index::LoadHour>, NodeError> {
         Ok(self.index.load_hours(limit)?)
+    }
+
+    pub fn activity_span(&self, grain: &str, limit: usize) -> Result<Vec<mds_index::ActivitySlot>, NodeError> {
+        Ok(self.index.activity_span(grain, limit)?)
     }
 
     pub fn fresh_urls(&self, pages: &[(String, u64)]) -> Result<Vec<String>, NodeError> {
@@ -876,6 +962,10 @@ impl Engine {
 
     pub fn db_bytes(&self) -> u64 {
         std::fs::metadata(&self.db).map(|meta| meta.len()).unwrap_or(0)
+    }
+
+    pub fn database_path(&self) -> &std::path::Path {
+        &self.db
     }
 
     pub fn semantic_bucket(&self, vector: &QuantVector) -> u16 {

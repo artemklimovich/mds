@@ -9,7 +9,7 @@ use axum::routing::{get, post};
 use axum::Router;
 use mds_types::Hit;
 use mds_web::{
-    cabinet_sheets, offer_region, page_add, page_android, page_computer, page_download, page_for_sites, page_help, page_hive, page_how,
+    cabinet_sheets, offer_region, page_add, page_android, page_computer, page_download, page_for_sites, page_help, page_hive, page_how, page_lost,
     page_indexing, page_llms, page_manifesto, page_operator, render, render_results, stamp_census, stamp_notice,
     CabinetSheets, OperatorReport,
 };
@@ -144,11 +144,20 @@ pub async fn serve_face(config: FaceConfig) -> Result<(), NodeError> {
         .route("/admin/operator", get(cabinet_page).post(proxy_admin))
         .route("/admin/logout", post(proxy_admin))
         .route("/admin/mcp", post(proxy_admin))
+        .fallback(lost_page)
         .with_state(state);
     let listener = TcpListener::bind(&config.listen).await?;
     eprintln!("MDS: лицо на http://{}/", config.listen);
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+async fn lost_page() -> Response {
+    Response::builder()
+        .status(StatusCode::NOT_FOUND)
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .body(Body::from(page_lost()))
+        .unwrap_or_else(|_| StatusCode::NOT_FOUND.into_response())
 }
 
 fn stamp(html: String, meta: &FaceMeta) -> Html<String> {
@@ -356,15 +365,14 @@ async fn cabinet_page(State(state): State<FaceState>, headers: HeaderMap, reques
             .body(Body::empty())
             .unwrap_or_else(|_| StatusCode::NO_CONTENT.into_response()));
     }
-    let Some(report) = pack.report else {
+    let Some(mut report) = pack.report else {
         return Err(StatusCode::BAD_GATEWAY);
     };
     let Some(sheets) = pack.sheets else {
         return Err(StatusCode::BAD_GATEWAY);
     };
-    let sheet = request
-        .uri()
-        .query()
+    let query = request.uri().query();
+    let sheet = query
         .and_then(|query| {
             query.split('&').find_map(|part| {
                 let (key, value) = part.split_once('=')?;
@@ -372,8 +380,17 @@ async fn cabinet_page(State(state): State<FaceState>, headers: HeaderMap, reques
             })
         })
         .unwrap_or_else(|| "node".into());
+    report.span = query
+        .and_then(|query| {
+            query.split('&').find_map(|part| {
+                let (key, value) = part.split_once('=')?;
+                if key == "span" { Some(value.to_string()) } else { None }
+            })
+        })
+        .unwrap_or_default();
     let (stats, rest) = cabinet_sheets(&sheets, &sheet);
-    Ok(mark_face(Html(page_operator(&report, &stats, &rest, &sheet)).into_response()))
+    let html = stamp_census(page_operator(&report, &stats, &rest, &sheet), report.sites as usize, report.pages as usize);
+    Ok(mark_face(Html(html).into_response()))
 }
 
 async fn proxy_hive(State(state): State<FaceState>, request: Request) -> Result<Response, StatusCode> {

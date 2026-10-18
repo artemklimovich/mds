@@ -218,7 +218,7 @@ fn shop_rail(hit: &Hit, seen: &mut HashSet<String>) -> String {
 
 fn bee_svg(class_name: &str) -> String {
     format!(
-        r##"<svg class="{class_name}" viewBox="0 0 512 512" aria-hidden="true"><g><path style="fill:#414B58;" d="M195.613,512c-5.301,0-10.592-2.086-14.538-6.227c-7.648-8.027-7.341-20.734,0.686-28.383 c21.12-20.124,21.12-44.704,21.12-62.651c0-11.087,8.988-20.075,20.075-20.075s20.075,8.988,20.075,20.075 c0,20.874,0,59.728-33.574,91.72C205.572,510.162,200.588,512,195.613,512z"/><path style="fill:#414B58;" d="M382.31,512c-5.301,0-10.592-2.086-14.538-6.227c-7.648-8.027-7.341-20.734,0.686-28.383 c21.12-20.124,21.12-44.704,21.12-62.651c0-11.087,8.988-20.075,20.075-20.075s20.076,8.988,20.076,20.075 c0,20.874,0,59.728-33.574,91.72C392.268,510.162,387.285,512,382.31,512z"/><path style="fill:#414B58;" d="M97.165,344.265L97.165,344.265c-30.469,0-59.833-11.415-82.301-31.995l-6.482-5.937 c-3.27-2.995-3.27-8.148,0-11.143l6.482-5.937c22.468-20.58,51.832-31.995,82.301-31.995l0,0V344.265z"/></g><path style="opacity:0.1;" d="M97.165,257.257c-17.054,0-33.761,3.579-49.107,10.337 c-2.254,10.743-3.441,21.841-3.441,33.167l0,0c0,11.326,1.187,22.424,3.441,33.167c15.346,6.758,32.053,10.337,49.107,10.337l0,0 L97.165,257.257L97.165,257.257z"/><path style="fill:#C9F4FF;" d="M278.466,172.689h61.742c47.687,0,86.344-38.658,86.344-86.344l0,0 C426.552,38.658,387.895,0,340.208,0l0,0c-47.687,0-86.344,38.658-86.344,86.344v61.742 C253.863,161.674,264.878,172.689,278.466,172.689z"/><path style="fill:#AEEAF9;" d="M282.341,22.267c-17.486,15.801-28.477,38.654-28.477,64.077v61.742 c0,13.587,11.015,24.602,24.602,24.602h61.742c18.536,0,35.692-5.86,49.76-15.801C293.8,156.554,283.193,63.008,282.341,22.267z"/><path style="fill:#FBDD56;" d="M381.149,457.852L381.149,457.852c-63.495,14.677-129.502,14.677-192.997,0l0,0 C115.023,440.948,63.23,375.819,63.23,300.761l0,0c0-75.057,51.792-140.187,124.922-157.091l0,0 c63.495-14.677,129.502-14.677,192.997,0l0,0c73.129,16.904,124.922,82.033,124.922,157.091l0,0 C506.071,375.819,454.278,440.948,381.149,457.852z"/><path style="fill:#596675;" d="M312.109,133.554c-38-2.44-76.243,0.188-113.713,7.889c-26.02,104.543-26.02,214.093,0,318.636 c37.471,7.701,75.714,10.329,113.713,7.889C277.549,359.294,277.549,242.228,312.109,133.554z"/><path style="opacity:0.1;" d="M141.449,162.53C93.94,191.068,63.23,242.969,63.23,300.761l0,0 c0,75.057,51.792,140.187,124.922,157.091l0,0c63.495,14.677,129.502,14.677,192.997,0l0,0c2.259-0.522,4.497-1.091,6.714-1.704 C179.894,463.353,134.688,271.517,141.449,162.53z"/><path style="fill:#C9F4FF;" d="M229.261,172.689h-61.742c-47.687,0-86.344-38.658-86.344-86.344l0,0 C81.175,38.658,119.832,0,167.519,0l0,0c47.687,0,86.344,38.658,86.344,86.344v61.742 C253.863,161.674,242.849,172.689,229.261,172.689z"/><g><ellipse style="fill:#FFA6BB;" cx="346.48" cy="304.81" rx="23.07" ry="18.372"/><ellipse style="fill:#FFA6BB;" cx="471.53" cy="304.81" rx="23.07" ry="18.372"/></g><g><path style="fill:#414B58;" d="M359.928,293.985c-4.143,0-7.5-3.358-7.5-7.5v-8.147c0-4.142,3.357-7.5,7.5-7.5s7.5,3.358,7.5,7.5 v8.147C367.428,290.627,364.07,293.985,359.928,293.985z"/><path style="fill:#414B58;" d="M458.087,293.985c-4.143,0-7.5-3.358-7.5-7.5v-8.147c0-4.142,3.357-7.5,7.5-7.5s7.5,3.358,7.5,7.5 v8.147C465.587,290.627,462.229,293.985,458.087,293.985z"/><path style="fill:#414B58;" d="M409.007,300.241c-7.127,0-13.903-3.086-18.594-8.467c-2.722-3.122-2.396-7.86,0.727-10.582 c3.122-2.721,7.859-2.397,10.582,0.727c1.84,2.112,4.495,3.323,7.285,3.323s5.445-1.211,7.284-3.322 c2.723-3.124,7.459-3.449,10.582-0.728s3.449,7.459,0.729,10.582C422.912,297.154,416.135,300.241,409.007,300.241z"/><path style="fill:#414B58;" d="M297.627,512c-5.301,0-10.592-2.086-14.538-6.227c-7.648-8.027-7.341-20.734,0.686-28.383 c21.12-20.124,21.12-44.704,21.12-62.651c0-11.087,8.988-20.075,20.075-20.075s20.076,8.988,20.076,20.075 c0,20.874,0,59.728-33.575,91.72C307.586,510.162,302.602,512,297.627,512z"/><path style="fill:#414B58;" d="M110.931,512c-5.301,0-10.592-2.086-14.538-6.227c-7.648-8.027-7.341-20.734,0.686-28.383 c21.12-20.124,21.12-44.704,21.12-62.651c0-11.087,8.988-20.075,20.075-20.075s20.075,8.988,20.075,20.075 c0,20.874,0,59.728-33.575,91.72C120.89,510.162,115.905,512,110.931,512z"/></g><path style="fill:#AEEAF9;" d="M137.795,5.253c-33.043,12.115-56.621,43.849-56.621,81.091l0,0 c0,47.687,38.658,86.344,86.344,86.344h54.07C135.028,162.9,122.447,44.153,137.795,5.253z"/></svg>"##,
+        r##"<svg class="{class_name}" viewBox="0 0 512 512" aria-hidden="true"><g><path style="fill:#414B58;" d="M195.613,512c-5.301,0-10.592-2.086-14.538-6.227c-7.648-8.027-7.341-20.734,0.686-28.383 c21.12-20.124,21.12-44.704,21.12-62.651c0-11.087,8.988-20.075,20.075-20.075s20.075,8.988,20.075,20.075 c0,20.874,0,59.728-33.574,91.72C205.572,510.162,200.588,512,195.613,512z"/><path style="fill:#414B58;" d="M382.31,512c-5.301,0-10.592-2.086-14.538-6.227c-7.648-8.027-7.341-20.734,0.686-28.383 c21.12-20.124,21.12-44.704,21.12-62.651c0-11.087,8.988-20.075,20.075-20.075s20.076,8.988,20.076,20.075 c0,20.874,0,59.728-33.574,91.72C392.268,510.162,387.285,512,382.31,512z"/><path style="fill:#414B58;" d="M97.165,344.265L97.165,344.265c-30.469,0-59.833-11.415-82.301-31.995l-6.482-5.937 c-3.27-2.995-3.27-8.148,0-11.143l6.482-5.937c22.468-20.58,51.832-31.995,82.301-31.995l0,0V344.265z"/></g><path style="opacity:0.1;" d="M97.165,257.257c-17.054,0-33.761,3.579-49.107,10.337 c-2.254,10.743-3.441,21.841-3.441,33.167l0,0c0,11.326,1.187,22.424,3.441,33.167c15.346,6.758,32.053,10.337,49.107,10.337l0,0 L97.165,257.257L97.165,257.257z"/><g class="wing right"><path style="fill:#C9F4FF;" d="M278.466,172.689h61.742c47.687,0,86.344-38.658,86.344-86.344l0,0 C426.552,38.658,387.895,0,340.208,0l0,0c-47.687,0-86.344,38.658-86.344,86.344v61.742 C253.863,161.674,264.878,172.689,278.466,172.689z"/><path style="fill:#AEEAF9;" d="M282.341,22.267c-17.486,15.801-28.477,38.654-28.477,64.077v61.742 c0,13.587,11.015,24.602,24.602,24.602h61.742c18.536,0,35.692-5.86,49.76-15.801C293.8,156.554,283.193,63.008,282.341,22.267z"/></g><path style="fill:#FBDD56;" d="M381.149,457.852L381.149,457.852c-63.495,14.677-129.502,14.677-192.997,0l0,0 C115.023,440.948,63.23,375.819,63.23,300.761l0,0c0-75.057,51.792-140.187,124.922-157.091l0,0 c63.495-14.677,129.502-14.677,192.997,0l0,0c73.129,16.904,124.922,82.033,124.922,157.091l0,0 C506.071,375.819,454.278,440.948,381.149,457.852z"/><path style="fill:#596675;" d="M312.109,133.554c-38-2.44-76.243,0.188-113.713,7.889c-26.02,104.543-26.02,214.093,0,318.636 c37.471,7.701,75.714,10.329,113.713,7.889C277.549,359.294,277.549,242.228,312.109,133.554z"/><path style="opacity:0.1;" d="M141.449,162.53C93.94,191.068,63.23,242.969,63.23,300.761l0,0 c0,75.057,51.792,140.187,124.922,157.091l0,0c63.495,14.677,129.502,14.677,192.997,0l0,0c2.259-0.522,4.497-1.091,6.714-1.704 C179.894,463.353,134.688,271.517,141.449,162.53z"/><g class="wing left"><path style="fill:#C9F4FF;" d="M229.261,172.689h-61.742c-47.687,0-86.344-38.658-86.344-86.344l0,0 C81.175,38.658,119.832,0,167.519,0l0,0c47.687,0,86.344,38.658,86.344,86.344v61.742 C253.863,161.674,242.849,172.689,229.261,172.689z"/></g><g><ellipse style="fill:#FFA6BB;" cx="346.48" cy="304.81" rx="23.07" ry="18.372"/><ellipse style="fill:#FFA6BB;" cx="471.53" cy="304.81" rx="23.07" ry="18.372"/></g><g><path style="fill:#414B58;" d="M359.928,293.985c-4.143,0-7.5-3.358-7.5-7.5v-8.147c0-4.142,3.357-7.5,7.5-7.5s7.5,3.358,7.5,7.5 v8.147C367.428,290.627,364.07,293.985,359.928,293.985z"/><path style="fill:#414B58;" d="M458.087,293.985c-4.143,0-7.5-3.358-7.5-7.5v-8.147c0-4.142,3.357-7.5,7.5-7.5s7.5,3.358,7.5,7.5 v8.147C465.587,290.627,462.229,293.985,458.087,293.985z"/><path style="fill:#414B58;" d="M409.007,300.241c-7.127,0-13.903-3.086-18.594-8.467c-2.722-3.122-2.396-7.86,0.727-10.582 c3.122-2.721,7.859-2.397,10.582,0.727c1.84,2.112,4.495,3.323,7.285,3.323s5.445-1.211,7.284-3.322 c2.723-3.124,7.459-3.449,10.582-0.728s3.449,7.459,0.729,10.582C422.912,297.154,416.135,300.241,409.007,300.241z"/><path style="fill:#414B58;" d="M297.627,512c-5.301,0-10.592-2.086-14.538-6.227c-7.648-8.027-7.341-20.734,0.686-28.383 c21.12-20.124,21.12-44.704,21.12-62.651c0-11.087,8.988-20.075,20.075-20.075s20.076,8.988,20.076,20.075 c0,20.874,0,59.728-33.575,91.72C307.586,510.162,302.602,512,297.627,512z"/><path style="fill:#414B58;" d="M110.931,512c-5.301,0-10.592-2.086-14.538-6.227c-7.648-8.027-7.341-20.734,0.686-28.383 c21.12-20.124,21.12-44.704,21.12-62.651c0-11.087,8.988-20.075,20.075-20.075s20.075,8.988,20.075,20.075 c0,20.874,0,59.728-33.575,91.72C120.89,510.162,115.905,512,110.931,512z"/></g><g class="wing left"><path style="fill:#AEEAF9;" d="M137.795,5.253c-33.043,12.115-56.621,43.849-56.621,81.091l0,0 c0,47.687,38.658,86.344,86.344,86.344h54.07C135.028,162.9,122.447,44.153,137.795,5.253z"/></g></svg>"##,
         class_name = class_name,
     )
 }
@@ -331,6 +331,8 @@ button.nudge {{ width: 32px; padding: 0; flex: 0 0 auto; }}
 a.confirm {{ display: inline-block; margin: 8px 0 16px; padding: 10px 16px; border-radius: 4px; background: #1a73e8; color: #fff; text-decoration: none; }}
 table.log {{ width: 100%; border-collapse: collapse; font-size: 14px; }}
 table.log th, table.log td {{ text-align: left; padding: 6px 8px; border-bottom: 1px solid #dadce0; }}
+table.bees th, table.bees td {{ text-align: right; }}
+table.bees th:first-child, table.bees td:first-child {{ text-align: left; }}
 article h2 {{ font-size: 28px; font-weight: 500; margin: 8px 0 12px; }}
 article h3 {{ font-size: 18px; font-weight: 600; margin: 26px 0 8px; }}
 article p, article li {{ color: #3c4043; line-height: 1.5; }}
@@ -344,13 +346,12 @@ ul.check li {{ margin: 0 0 8px; }}
 ul.check li.ok {{ color: #137333; }}
 ul.check li.fix {{ color: #8a4b08; }}
 footer {{ position: relative; flex-shrink: 0; margin-top: auto; border-top: 1px solid #dadce0; background: #f8f9fa; }}
-.foot {{ max-width: 680px; margin: 0 auto; padding: 22px 16px 28px; color: #4d5156; font-size: 14px; line-height: 1.5; }}
-.foot nav {{ display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 12px; }}
+.foot {{ max-width: 680px; margin: 0 auto; padding: 22px 16px 28px; color: #4d5156; font-size: 14px; line-height: 1.5; text-align: center; }}
+.foot nav {{ display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 12px; justify-content: center; }}
 .foot a {{ color: #1a0dab; }}
-p.census {{ margin: 0 0 10px; color: #70757a; font-size: 13px; }}
-p.credit {{ display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin: 0; }}
-p.credit span {{ margin-right: auto; }}
-.comb {{ position: absolute; right: 16px; bottom: 14px; width: 72px; height: 72px; }}
+p.census {{ margin: 0 0 10px; color: #70757a; font-size: 13px; text-align: center; }}
+p.credit {{ display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin: 0; justify-content: center; }}
+.comb {{ position: static; display: block; width: 72px; height: 72px; margin: 12px auto 0; }}
 a.help {{ flex: 0 0 auto; margin: 0; padding: 3px 10px; border-radius: 12px; background: #fff8e1; border: 1px solid #f0c14b; color: #5c3a12; font-size: 12px; font-weight: 600; line-height: 1.4; text-decoration: none; white-space: nowrap; }}
 body.cabinet main {{ max-width: 1080px; }}
 .cabinet {{ display: flex; gap: 28px; align-items: flex-start; }}
@@ -368,7 +369,14 @@ body.cabinet main {{ max-width: 1080px; }}
 .bee-row {{ display: flex; justify-content: space-between; gap: 12px; align-items: baseline; }}
 .bee-row .nums {{ color: #3c4043; font-size: 13px; text-align: right; }}
 .quiet {{ color: #8a4b08; font-weight: 600; }}
-svg.chart {{ width: min(100%, 720px); height: auto; margin: 8px 0 12px; }}
+svg.chart {{ width: min(100%, 720px); height: auto; margin: 4px 0 12px; }}
+p.series {{ display: flex; align-items: center; gap: 8px; margin: 10px 0 2px; font-size: 14px; }}
+p.series i {{ width: 12px; height: 12px; border-radius: 3px; flex: 0 0 auto; }}
+p.series b {{ margin-left: auto; font-size: 20px; font-weight: 650; }}
+h2 a.refresh {{ float: right; margin-top: 2px; padding: 6px 12px; border-radius: 8px; background: #1c1612; color: #fff; font-size: 14px; font-weight: 600; text-decoration: none; }}
+nav.spans {{ display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 14px; }}
+nav.spans a {{ padding: 6px 12px; border-radius: 14px; background: #f1f3f4; color: #202124; text-decoration: none; font-size: 14px; }}
+nav.spans a.on {{ background: #1c1612; color: #fff; }}
 .map {{ display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0 16px; }}
 .map b, .map span {{ padding: 6px 10px; border-radius: 14px; background: #f1f3f4; }}
 .map b {{ background: #fff8e1; }}
@@ -377,7 +385,7 @@ form.inline input {{ height: 36px; border: 1px solid #dadce0; border-radius: 8px
 @media (max-width: 760px) {{
   .cabinet {{ display: block; }}
   .side {{ position: static; display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 16px; }}
-  .comb {{ position: static; margin-left: auto; }}
+  .comb {{ margin: 12px auto 0; }}
 }}
 </style>
 </head>
@@ -902,6 +910,26 @@ pub struct BeeLine {
     pub quiet: bool,
 }
 
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ActivityPoint {
+    pub label: String,
+    pub new_pages: i64,
+    pub new_hosts: i64,
+    pub walked: i64,
+    pub shell_pages: i64,
+    pub cpu: i64,
+    pub ram: i64,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ActivityBook {
+    pub minutes: Vec<ActivityPoint>,
+    pub hours: Vec<ActivityPoint>,
+    pub days: Vec<ActivityPoint>,
+    pub weeks: Vec<ActivityPoint>,
+    pub months: Vec<ActivityPoint>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OperatorReport {
     pub pages: u64,
@@ -955,37 +983,179 @@ pub struct OperatorReport {
     pub refresh_batch: i64,
     #[serde(default = "default_refresh_gap")]
     pub refresh_gap: i64,
+    #[serde(default)]
+    pub span: String,
+    #[serde(default)]
+    pub activity: ActivityBook,
+}
+
+fn chosen_span(span: &str) -> &'static str {
+    match span {
+        "hour" => "hour",
+        "day" => "day",
+        "week" => "week",
+        "month" => "month",
+        _ => "minute",
+    }
+}
+
+fn activity_rows<'a>(report: &'a OperatorReport, span: &str) -> &'a [ActivityPoint] {
+    match span {
+        "hour" => &report.activity.hours,
+        "day" => &report.activity.days,
+        "week" => &report.activity.weeks,
+        "month" => &report.activity.months,
+        _ => &report.activity.minutes,
+    }
+}
+
+fn short_bucket(span: &str, bucket: &str) -> String {
+    match span {
+        "minute" => bucket.rsplit(' ').next().unwrap_or(bucket).to_string(),
+        "hour" => {
+            let (date, hour) = bucket.split_once(' ').unwrap_or((bucket, ""));
+            let mut parts = date.split('-');
+            let _year = parts.next();
+            match (parts.next(), parts.next()) {
+                (Some(month), Some(date)) if !month.is_empty() && !date.is_empty() => format!("{date}.{month} {hour}"),
+                _ => bucket.to_string(),
+            }
+        }
+        "week" => {
+            let week = bucket.split('-').nth(1).unwrap_or(bucket);
+            format!("нед {week}")
+        }
+        "month" => {
+            let mut parts = bucket.split('-');
+            let year = parts.next().unwrap_or("");
+            let month = parts.next().unwrap_or("");
+            if month.is_empty() { bucket.to_string() } else { format!("{month}.{year}") }
+        }
+        _ => short_label(bucket),
+    }
+}
+
+fn series_chart(name: &str, unit: &str, points: &[ActivityPoint], span: &str, color: &str, pick: fn(&ActivityPoint) -> i64) -> String {
+    let drawn = points
+        .iter()
+        .map(|point| (short_bucket(span, &point.label), pick(point)))
+        .collect::<Vec<_>>();
+    let last = drawn.last().map(|(_, value)| *value).unwrap_or(0);
+    let unit = if unit.is_empty() { String::new() } else { format!(" {unit}") };
+    format!(
+        "<p class=\"series\"><i style=\"background:{color}\"></i><span>{}</span><b>{}{unit}</b></p>{}",
+        escape(name),
+        grouped(last),
+        time_chart(&drawn, color)
+    )
+}
+
+fn grouped(value: i64) -> String {
+    let negative = value < 0;
+    let digits = value.unsigned_abs().to_string();
+    let mut out = String::new();
+    for (index, ch) in digits.chars().rev().enumerate() {
+        if index > 0 && index % 3 == 0 {
+            out.push(' ');
+        }
+        out.push(ch);
+    }
+    let mut text: String = out.chars().rev().collect();
+    if negative {
+        text.insert(0, '−');
+    }
+    text
+}
+
+fn span_nav(base: &str, span: &str) -> String {
+    let mut nav = String::from("<nav class=\"spans\">");
+    for (key, title) in [
+        ("minute", "Минуты"),
+        ("hour", "Часы"),
+        ("day", "Дни"),
+        ("week", "Недели"),
+        ("month", "Месяцы"),
+    ] {
+        let class = if key == span { " class=\"on\"" } else { "" };
+        nav.push_str(&format!(
+            "<a href=\"{}/operator?sheet=node&span={key}\"{class}>{title}</a>",
+            escape(base)
+        ));
+    }
+    nav.push_str("</nav>");
+    nav
 }
 
 pub fn time_chart(points: &[(String, i64)], color: &str) -> String {
     if points.is_empty() || points.iter().all(|(_, value)| *value == 0) {
         return "<p>За этот срок чисел ещё нет.</p>".into();
     }
-    let max = points.iter().map(|(_, value)| *value).max().unwrap_or(1).max(1) as f64;
-    let step = if points.len() < 2 { 640.0 } else { 640.0 / (points.len() - 1) as f64 };
+    let max = points.iter().map(|(_, value)| *value).max().unwrap_or(1).max(1);
+    let left = 54.0;
+    let right = 688.0;
+    let top = 18.0;
+    let bottom = 150.0;
+    let width = right - left;
+    let height = bottom - top;
+    let step = if points.len() < 2 { 0.0 } else { width / (points.len() - 1) as f64 };
+    let x_of = |index: usize| if points.len() < 2 { left + width / 2.0 } else { left + index as f64 * step };
+    let y_of = |value: i64| bottom - (value as f64 / max as f64) * height;
+    let mut grid = String::new();
+    let mut axis = String::new();
+    let mut seen = Vec::new();
+    for mark in [max, max / 2, 0] {
+        if seen.contains(&mark) {
+            continue;
+        }
+        seen.push(mark);
+        let y = y_of(mark);
+        grid.push_str(&format!(
+            "<line x1=\"{left:.1}\" y1=\"{y:.1}\" x2=\"{right:.1}\" y2=\"{y:.1}\" stroke=\"#e7e1d6\" stroke-width=\"1\"/>"
+        ));
+        axis.push_str(&format!(
+            "<text x=\"46\" y=\"{:.1}\" text-anchor=\"end\" fill=\"#70757a\" font-size=\"11\">{}</text>",
+            y + 4.0,
+            grouped(mark)
+        ));
+    }
     let mut line = String::new();
+    let mut area = format!("{:.1},{bottom:.1}", x_of(0));
     let mut marks = String::new();
     let mut labels = String::new();
+    let value_every = if points.len() <= 8 { 1 } else { (points.len() / 6).max(1) };
+    let axis_every = if points.len() <= 6 { 1 } else { (points.len() / 5).max(1) };
+    let peak = points.iter().enumerate().max_by_key(|(_, (_, value))| *value).map(|(index, _)| index);
     for (index, (label, value)) in points.iter().enumerate() {
-        let x = index as f64 * step;
-        let y = 132.0 - (*value as f64 / max) * 112.0;
+        let x = x_of(index);
+        let y = y_of(*value);
         if index > 0 {
             line.push(' ');
         }
         line.push_str(&format!("{x:.1},{y:.1}"));
+        area.push_str(&format!(" {x:.1},{y:.1}"));
         marks.push_str(&format!(
-            "<circle cx=\"{x:.1}\" cy=\"{y:.1}\" r=\"3.5\" fill=\"{color}\"><title>{}: {value}</title></circle>",
-            escape(label)
+            "<circle cx=\"{x:.1}\" cy=\"{y:.1}\" r=\"3.5\" fill=\"{color}\"><title>{}: {}</title></circle>",
+            escape(label),
+            grouped(*value)
         ));
-        if index == 0 || index + 1 == points.len() || (points.len() > 4 && index == points.len() / 2) {
+        let show_value = index % value_every == 0 || index + 1 == points.len() || peak == Some(index);
+        if show_value {
+            let text_y = if y < 28.0 { y + 14.0 } else { y - 8.0 };
             labels.push_str(&format!(
-                "<text x=\"{x:.1}\" y=\"156\" text-anchor=\"middle\" fill=\"#70757a\" font-size=\"11\">{}</text>",
+                "<text x=\"{x:.1}\" y=\"{text_y:.1}\" text-anchor=\"middle\" fill=\"#202124\" font-size=\"11\" font-weight=\"600\">{}</text>",
+                grouped(*value)
+            ));
+        }
+        if index % axis_every == 0 || index + 1 == points.len() {
+            labels.push_str(&format!(
+                "<text x=\"{x:.1}\" y=\"170\" text-anchor=\"middle\" fill=\"#70757a\" font-size=\"11\">{}</text>",
                 escape(label)
             ));
         }
     }
+    area.push_str(&format!(" {:.1},{bottom:.1}", x_of(points.len() - 1)));
     format!(
-        "<svg class=\"chart\" viewBox=\"0 0 640 168\" role=\"img\"><polyline fill=\"none\" stroke=\"{color}\" stroke-width=\"2\" points=\"{line}\"/>{marks}{labels}</svg>"
+        "<svg class=\"chart\" viewBox=\"0 0 700 184\" role=\"img\">{grid}{axis}<polygon points=\"{area}\" fill=\"{color}\" fill-opacity=\"0.14\"/><polyline fill=\"none\" stroke=\"{color}\" stroke-width=\"2.5\" points=\"{line}\"/>{marks}{labels}</svg>"
     )
 }
 
@@ -1168,7 +1338,7 @@ pub fn cabinet_sheets(view: &CabinetSheets, sheet: &str) -> (String, String) {
         rest.push_str("<p>Подписанной карты нет, поэтому кнопка другого края не показывается.</p>");
     }
     rest.push_str(&format!(
-        "<h3>MCP</h3><p>Сейчас адрес <code>{base}/mcp</code> на этом же сайте. Когда появится домен, ключ пойдёт на https://admin.&lt;домен&gt;/mcp, порт 443. Ключ отдельно от пароля кабинета.</p>
+        "<h3>MCP</h3><p>Адрес MCP: <code>{base}/mcp</code>. Снаружи это https://admin.beesearch.ru/mcp. Ключ отдельно от пароля кабинета.</p>
 <form method=\"post\" action=\"{base}/operator\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\"><button name=\"action\" value=\"issue_mcp\">Выдать ключ</button><button name=\"action\" value=\"revoke_mcp\">Отозвать</button></form></section>"
     ));
     let door_at = rest.find("<section id=\"door\">").unwrap_or(rest.len());
@@ -1180,10 +1350,6 @@ pub fn cabinet_sheets(view: &CabinetSheets, sheet: &str) -> (String, String) {
         _ => String::new(),
     };
     (stats, rest)
-}
-
-fn short_hour(hour: &str) -> String {
-    hour.rsplit(' ').next().unwrap_or(hour).to_string()
 }
 
 fn short_label(day: &str) -> String {
@@ -1230,14 +1396,24 @@ pub fn page_operator(report: &OperatorReport, stats: &str, rest: &str, sheet: &s
             report.searches_per_minute, report.avg_ms
         )
     };
+    let span = chosen_span(&report.span);
     let base_nav = escape(&report.base);
+    let spans = span_nav(&report.base, span);
+    let pages_chart = series_chart("Новые страницы", "", activity_rows(report, span), span, "#1a73e8", |point| point.new_pages);
+    let hosts_chart = series_chart("Новые сайты", "", activity_rows(report, span), span, "#e37400", |point| point.new_hosts);
+    let walk_chart = series_chart("Обход", "", activity_rows(report, span), span, "#188038", |point| point.walked);
+    let phone_chart = series_chart("Телефоны", "", activity_rows(report, span), span, "#c9a227", |point| point.shell_pages);
+    let cpu_chart = series_chart("Процессор", "%", activity_rows(report, span), span, "#188038", |point| point.cpu);
+    let ram_chart = series_chart("Память", "%", activity_rows(report, span), span, "#a142f4", |point| point.ram);
     let mut body = format!(
-        "<div class=\"cabinet\"><nav class=\"side\"><a href=\"{base_nav}/operator?sheet=node\">Нода</a><a href=\"{base_nav}/operator?sheet=visits\">Заходы</a><a href=\"{base_nav}/operator?sheet=queries\">Запросы</a><a href=\"{base_nav}/operator?sheet=journal\">Журнал</a><a href=\"{base_nav}/operator?sheet=bees\">Пчёлы</a><a href=\"{base_nav}/operator?sheet=index\">Индекс</a><a href=\"{base_nav}/operator?sheet=door\">Дверь</a></nav><div class=\"sheets\">"
+        "<div class=\"cabinet\"><nav class=\"side\"><a href=\"{base_nav}/operator?sheet=node&span={span}\">Нода</a><a href=\"{base_nav}/operator?sheet=visits\">Заходы</a><a href=\"{base_nav}/operator?sheet=queries\">Запросы</a><a href=\"{base_nav}/operator?sheet=journal\">Журнал</a><a href=\"{base_nav}/operator?sheet=bees\">Пчёлы</a><a href=\"{base_nav}/operator?sheet=index\">Индекс</a><a href=\"{base_nav}/operator?sheet=door\">Дверь</a></nav><div class=\"sheets\">"
     );
     if sheet == "node" {
     body.push_str(&format!(
-        "<section id=\"node\"><h2>Нода</h2>
+        "<section id=\"node\"><h2>Нода <a class=\"refresh\" href=\"{base}/operator?sheet=node&span={span}\">Обновить</a></h2>
 <p>Адреса людей сюда не пишутся. Новая страница — адрес, которого в индексе ещё не было. Повтор без изменений в это число не входит.</p>
+<p>График читается один раз, когда страница открылась. Кнопка «Обновить» спрашивает улей ещё раз. Пока страница открыта, улей сам ничего не шлёт, поэтому от графика машина не грузится. Минуты копятся три часа, часы — две недели. Дни, недели и месяцы складываются из уже записанных суток.</p>
+{spans}
 <ul class=\"load\">
 <li>Сайтов в поиске: {sites}</li>
 <li>Страниц в индексе: {pages}</li>
@@ -1251,15 +1427,21 @@ pub fn page_operator(report: &OperatorReport, stats: &str, rest: &str, sheet: &s
 <li>База: {db} МБ</li>
 <li>{pace}</li>
 </ul>
-<h3>Новые страницы по дням</h3>
-{intake}
-<p class=\"legend\">Точки — страницы, которых в индексе ещё не было. Дни до включения счётчика пустые.</p>
-<h3>Нагрузка улья</h3>
-<p>Доля процессора и памяти машины, на которой стоит улей. Точка — средний час. Если линия упирается в верх, скорость лучше снизить.</p>
-{cpu}
-<p class=\"legend\">Процессор, проценты.</p>
-{ram}
-<p class=\"legend\">Память, проценты.</p>
+<h3>Новые страницы</h3>
+{pages_chart}
+<p class=\"legend\">Адреса, которых в индексе ещё не было.</p>
+<h3>Новые сайты</h3>
+{hosts_chart}
+<p class=\"legend\">Хосты, которые появились впервые.</p>
+<h3>Обход</h3>
+{walk_chart}
+<p class=\"legend\">Новые, изменённые и страницы без изменений. Линия идёт, даже когда новых адресов мало.</p>
+<h3>Процессор</h3>
+{cpu_chart}
+<p class=\"legend\">Доля процессора машины, проценты. Если линия упирается в верх, скорость лучше снизить.</p>
+<h3>Память</h3>
+{ram_chart}
+<p class=\"legend\">Доля памяти машины, проценты.</p>
 <form class=\"inline\" method=\"post\" action=\"{base}/operator?sheet=node\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">
 <label>Страниц за заход улья <input name=\"batch\" type=\"number\" min=\"1\" max=\"24\" value=\"{crawl_batch}\"></label>
 <label>Пауза улья, секунд <input name=\"gap\" type=\"number\" min=\"2\" max=\"300\" value=\"{crawl_gap}\"></label>
@@ -1272,6 +1454,8 @@ pub fn page_operator(report: &OperatorReport, stats: &str, rest: &str, sheet: &s
 <p>Переобход не встаёт в очередь новых адресов. Сначала улей спрашивает метку страницы. Если она не менялась, тело не качается. Обычный сайт без своей пчелы проверяется этим темпом. Сайт, на котором стоит пчела, сюда не входит.</p>
 <h3>Телефоны</h3>
 <p>Разные приложения и страницы, которые улей записал как новые или изменённые. Повтор той же страницы не считается. Идентификатор приложения к запросу не привязывается. Каждый телефон получает свой темп, а не одну общую очередь на всех.</p>
+{phone_chart}
+<p class=\"legend\">Страницы, которые телефоны принесли за выбранный срок.</p>
 <ul class=\"load\">
 <li>Сегодня: {day_apps} приложений, {day_pages} страниц</li>
 <li>За неделю: {week_apps} приложений, {week_pages} страниц</li>
@@ -1298,9 +1482,14 @@ pub fn page_operator(report: &OperatorReport, stats: &str, rest: &str, sheet: &s
         same_today = report.same_today,
         queue = report.queue,
         db = report.db_bytes / 1_048_576,
-        intake = time_chart(&report.intake_days.iter().map(|(day, value)| (short_label(day), *value)).collect::<Vec<_>>(), "#1a73e8"),
-        cpu = time_chart(&report.cpu_hours.iter().map(|(hour, value)| (short_hour(hour), *value)).collect::<Vec<_>>(), "#188038"),
-        ram = time_chart(&report.ram_hours.iter().map(|(hour, value)| (short_hour(hour), *value)).collect::<Vec<_>>(), "#a142f4"),
+        span = span,
+        spans = spans,
+        pages_chart = pages_chart,
+        hosts_chart = hosts_chart,
+        walk_chart = walk_chart,
+        phone_chart = phone_chart,
+        cpu_chart = cpu_chart,
+        ram_chart = ram_chart,
         crawl_batch = report.crawl_batch,
         crawl_gap = report.crawl_gap,
         leased = report.leased,
@@ -1333,19 +1522,23 @@ pub fn page_operator(report: &OperatorReport, stats: &str, rest: &str, sheet: &s
         body.push_str("<table class=\"log\"><tr><th>Пчела</th><th>Ответ, мс</th><th>Жива</th><th>Бакеты</th><th>Страницы</th></tr>");
         for peer in &report.peers {
             let alive = if peer.alive { "да" } else { "нет" };
+            let silent = peer.latency_ms == 0 && peer.buckets == 0 && peer.pages == 0;
+            let latency = if silent { "—".to_string() } else { peer.latency_ms.to_string() };
             let buckets = if peer.buckets >= 65_536 {
                 "весь индекс".to_string()
+            } else if silent {
+                "—".to_string()
             } else {
                 peer.buckets.to_string()
             };
+            let pages = if silent { "—".to_string() } else { peer.pages.to_string() };
             body.push_str(&format!(
-                "<tr><td>{}</td><td>{}</td><td>{alive}</td><td>{buckets}</td><td>{}</td></tr>",
-                escape(&peer.name),
-                peer.latency_ms,
-                peer.pages
+                "<tr><td>{}</td><td>{latency}</td><td>{alive}</td><td>{buckets}</td><td>{pages}</td></tr>",
+                escape(&peer.name)
             ));
         }
         body.push_str("</table>");
+        body.push_str("<p class=\"legend\">«Жива» значит, что сосед ответил в этом запуске. Прочерк в ответе, бакетах и страницах значит, что отчёта об индексе ещё не было. Это не пустой поиск и не остановка обхода.</p>");
     }
     body.push_str("</section>");
     }
@@ -1368,7 +1561,7 @@ pub fn page_operator(report: &OperatorReport, stats: &str, rest: &str, sheet: &s
     }
     if sheet == "bees" {
     body.push_str("<section id=\"bees\"><h2>Пчёлы</h2>");
-    body.push_str("<p>Числа справа — страницы, которые улей записал как новые или изменённые. Та же страница без изменений больше не считается. Свой сайт идёт первым: новые и изменённые страницы забираются сразу. Когда своих изменений нет, пчела берёт чужие адреса из очереди улья.</p>");
+    body.push_str("<p>Столбцы — страницы, которые улей записал как новые или изменённые. Та же страница без изменений больше не считается. Свой сайт идёт первым: новые и изменённые страницы забираются сразу. Когда своих изменений нет, пчела берёт чужие адреса из очереди улья.</p>");
     body.push_str("<p>Компьютер без своего сайта запускается так: <code>mds node --lite --hive https://адрес-улья</code>. Модель и база ему не нужны. Он разбирает чужую очередь темпом ниже. На сайте пчела по-прежнему доказывает себя файлом <code>/.well-known/pchela.txt</code>.</p>");
     body.push_str(&format!(
         "<form class=\"inline\" method=\"post\" action=\"{}/operator?sheet=bees\"><input type=\"hidden\" name=\"csrf\" value=\"{}\"><label>Чужих адресов за заход <input name=\"batch\" type=\"number\" min=\"1\" max=\"24\" value=\"{}\"></label><label>Пауза, секунд <input name=\"gap\" type=\"number\" min=\"60\" max=\"3600\" value=\"{}\"></label><button name=\"action\" value=\"bee_pace\">Скорость пчёл</button></form>",
@@ -1380,15 +1573,15 @@ pub fn page_operator(report: &OperatorReport, stats: &str, rest: &str, sheet: &s
     if report.bees.is_empty() {
         body.push_str("<p>Подтверждённых сайтов нет.</p>");
     } else {
-        body.push_str("<ul class=\"check\">");
+        body.push_str("<table class=\"log bees\"><tr><th>Сайт</th><th>День</th><th>Неделя</th><th>Месяц</th><th>Всего</th></tr>");
         for bee in &report.bees {
             let mark = if bee.quiet { " <span class=\"quiet\">молчит</span>" } else { "" };
             body.push_str(&format!(
-                "<li class=\"bee-row\"><span class=\"ok\">{}</span><span class=\"nums\">день {} · неделя {} · месяц {} · всего {}{mark}</span></li>",
+                "<tr><td>{}{mark}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
                 escape(&bee.host), bee.day, bee.week, bee.month, bee.all
             ));
         }
-        body.push_str("</ul>");
+        body.push_str("</table>");
     }
     if !report.refused.is_empty() {
         body.push_str("<p>Остановлены:</p><ul class=\"check\">");
@@ -1426,11 +1619,11 @@ pub fn page_how() -> String {
 <p>Один и тот же запрос ищется двумя способами. Точные слова ищутся по заголовку и тексту. Близкий смысл ищется по вектору страницы. Списки склеиваются, и в выдаче остаётся ссылка, короткий отрывок и отметка «слова», «смысл» или обе сразу.</p>
 <p>Буквы «е» и «ё» считаются разными: «мёд» и «мед» — разные запросы. Если во фразе есть намерение купить, известный хост маркетплейса получает штраф, прямой сайт остаётся выше.</p>
 <h3>Пчела, рой, улей, пасека</h3>
-<p>Одна нода — это пчела. Несколько нод, соединённых в одну сеть, — рой. Улей — региональный вход, домен, с которого люди ищут. Пасека — страна, сеть таких ульев. Робот при обходе по-прежнему называется MDS-Bot.</p>
+<p>Одна нода — это пчела. Несколько нод, соединённых в одну сеть, — рой. Улей — региональный вход, домен, с которого люди ищут. Этот улей открыт на <a href="https://beesearch.ru/">https://beesearch.ru/</a>, кабинет оператора — на <a href="https://admin.beesearch.ru/login">https://admin.beesearch.ru/login</a>. Пасека — страна, сеть таких ульев. Робот при обходе по-прежнему называется MDS-Bot.</p>
 <h3>Несколько нод</h3>
 <p>Сервер, компьютер и телефон говорят одним протоколом. Главной ноды, которой подчиняются остальные, нет. Сервер и компьютер держат крупный кусок индекса и отдают сайт со строкой поиска. Телефон открывает поиск улья и раз в десять минут читает несколько страниц из очереди, в том числе когда приложение свёрнуто. Чужой трафик через него не идёт.</p>
 <p>Запрос идёт к тем пчёлам, которые держат нужный шард, и не больше чем к трём копиям. Если одна копия отвечает заметно медленнее остальных, улей в этот раз её не ждёт. Пока сосед ещё не сообщил свои бакеты, улей спрашивает его как запасной.</p>
-<p>Пчела за домашним роутером не открывает порт наружу. Лёгкая пчела сама звонит улью: <code>mds node --lite --site https://ваш-сайт --hive https://45.158.46.52</code>. На сайте лежит файл <code>/.well-known/pchela.txt</code>, в нём одна строка — имя, которое пчела печатает при запуске. Улей принимает новые и изменённые страницы этого сайта. Когда своих изменений нет, пчела берёт чужие адреса из очереди. Компьютер без своего сайта запускается без <code>--site</code>, команда на странице <a href="/computer">Компьютер</a>. Общий пароль для входа не нужен. Белый статический IP нужен улью, на который смотрит домен. Домашней пчеле хватает обычного интернета.</p>
+<p>Пчела за домашним роутером не открывает порт наружу. Лёгкая пчела сама звонит улью: <code>mds node --lite --site https://ваш-сайт --hive https://beesearch.ru</code>. На сайте лежит файл <code>/.well-known/pchela.txt</code>, в нём одна строка — имя, которое пчела печатает при запуске. Улей принимает новые и изменённые страницы этого сайта. Когда своих изменений нет, пчела берёт чужие адреса из очереди. Компьютер без своего сайта запускается без <code>--site</code>, команда на странице <a href="/computer">Компьютер</a>. Общий пароль для входа не нужен. Улей открыт на https://beesearch.ru. Домашней пчеле хватает обычного интернета.</p>
 <p>Страницы с нарушением закона в выдачу не попадают. Материалы 18+ стоят отдельным блоком и замкнуты, пока человек не подтвердит возраст. Журнал запросов хранит только текст и числа на этой ноде, без адреса человека, и открывается только с компьютера, где нода запущена.</p>
 <h3>Сколько страниц берётся с одного сайта</h3>
 <p>Обычный сайт обходится до 100 страниц: этого хватает, чтобы его найти, и один каталог не заполняет поиск. Если страниц больше, владелец перечисляет до ста своих ссылок в <a href="/llms">/llms.txt</a>. Индексируются они. Сайт, на сервере которого стоит лёгкая пчела, отдаёт все свои страницы. Подробности и ответы, зачем ставить ноду, — на странице <a href="/indexing">Индексация</a>.</p>
@@ -1502,7 +1695,7 @@ pub fn page_for_sites() -> String {
 <h3>Своя пчела на сервере сайта</h3>
 <p>Полный индекс рядом с сайтом не ставится: модель занимает около 1 ГБ, а общий индекс — десятки гигабайт. Серверу на 2 ядра, 3–4 ГБ памяти и 20 ГБ диска хватает лёгкой пчелы. Она не открывает поиск для чужих людей и не считает векторы. Человек остаётся на улье.</p>
 <p>Сначала пчела отдаёт свои новые и изменённые страницы, сразу и по обычным правилам обхода. Страница, в которой ничего не изменилось, по кругу не гоняется. Когда своих изменений нет, пчела берёт чужие адреса из очереди улья и помогает сети. Сколько чужих адресов за заход и какая пауза — решает оператор улья в кабинете. Пауза между загрузками страниц своего сайта не меньше двух секунд.</p>
-<pre>mds node --lite --site https://ваш-сайт --hive https://45.158.46.52</pre>
+<pre>mds node --lite --site https://ваш-сайт --hive https://beesearch.ru</pre>
 <p>Имя из журнала пчелы кладётся одной строкой в <code>https://ваш-сайт/.well-known/pchela.txt</code>.</p>
 <h3>Что это даёт сайту</h3>
 <ul>
@@ -1556,7 +1749,7 @@ pub fn page_indexing() -> String {
 <h3>Зачем нода рядом с сайтом</h3>
 <p>Лёгкая пчела стоит на том же сервере, что и сайт. Она не открывает чужой поиск и не держит модель: модели нужен примерно 1 ГБ, а общий индекс — десятки гигабайт. Сначала она отдаёт свои новые и изменённые страницы. Страница без изменений по кругу не гоняется. Когда своих изменений нет, она помогает обойти чужую очередь улья. Темп этой очереди задаёт кабинет улья. Человек ищет на улье.</p>
 <p>Польза для сайта: потолок в сто страниц снимается, улей принимает страницы, которые отдаёт пчела. В выдаче появляется значок «держит пчелу» и небольшой подъём среди близких ссылок. Более точное совпадение слов остаётся выше. Как поставить:</p>
-<pre>mds node --lite --site https://ваш-сайт --hive https://45.158.46.52</pre>
+<pre>mds node --lite --site https://ваш-сайт --hive https://beesearch.ru</pre>
 <p>Имя из журнала пчелы кладётся одной строкой в <code>/.well-known/pchela.txt</code> на этом сайте. Новую сборку лёгкой пчелы на сервер кладут вручную и перезапускают службу: сама она файл не меняет.</p>
 <h3>Зачем полная нода</h3>
 <p>Полная нода — свой улей. Она держит кусок индекса, считает смысл запроса и открывает страницу поиска для людей своего края или своей компании. Журнал запросов остаётся на этой ноде и не уезжает в общий центр. Нужны память под модель и диск под страницы. Без соседней ноды она отвечает только своим индексом. С соседями запрос идёт к тем, кто держит нужный шард, и не больше чем к трём копиям.</p>
@@ -1614,18 +1807,18 @@ pub fn page_download(release_version: Option<&str>) -> String {
 <li><a href="{RELEASE_LINUX}">Linux x86_64, копия на GitHub</a></li>
 <li><a href="/android">Приложение для Android</a></li>
 </ul>
-<p>В программу вписана доверенная нода <a href="https://45.158.46.52/">https://45.158.46.52/</a>. Если адрес соседа не указан, нода подключается к ней сама. Улей запускают с <code>--alone</code>, чтобы он не звонил сам себе. Новый адрес появится в следующей версии.</p>
+<p>Сайт этого улья — <a href="https://beesearch.ru/">https://beesearch.ru/</a>. Кабинет оператора — <a href="https://admin.beesearch.ru/login">https://admin.beesearch.ru/login</a>. В выложенную программу вписан адрес <a href="https://45.158.46.52/">https://45.158.46.52/</a>: он открывает ту же машину. Если адрес соседа не указан, нода подключается к ней сама. Улей запускают с <code>--alone</code>, чтобы он не звонил сам себе.</p>
 <p>Полная нода подхватывает новую версию сама, если в сети лежит подписанный файл новее того, что у неё запущен. На странице поиска появляется строка «Нужно обновиться». Архив со страницы загрузки сам программу не подменяет. Лёгкая пчела свой файл не меняет: новую сборку кладут на сервер сайта вручную и перезапускают службу. Телефон публичным входом не является. Приложение и то, как оно помогает индексу, — на странице <a href="/android">Приложение для Android</a>.</p>
 <p>Исходный код: <a href="{SOURCE_REPO}">{SOURCE_REPO}</a>.</p>
 <h3>Как подключить её к поиску</h3>
 <p>После запуска нода открывает свой сайт со строкой поиска. Чтобы она вошла в общую сеть, при старте укажите хотя бы один адрес соседней ноды. Без соседа нода отвечает только своим индексом.</p>
-<pre>mds node --listen 0.0.0.0:8080 --seeds urls.txt --follow-external --peers https://45.158.46.52</pre>
+<pre>mds node --listen 0.0.0.0:8080 --seeds urls.txt --follow-external --peers https://beesearch.ru</pre>
 <ul>
 <li>В urls.txt — стартовые адреса сайтов, по одному в строке.</li>
-<li>Публичный улей должен быть доступен из интернета по статическому IP или домену.</li>
+<li>Этот улей для людей открыт на https://beesearch.ru.</li>
 <li>Пчела дома или на старом компьютере сидит за динамическим IP. Ей белый адрес не нужен: она сама соединяется с ульем.</li>
 </ul>
-<pre>mds node --lite --site https://ваш-сайт --hive https://45.158.46.52</pre>
+<pre>mds node --lite --site https://ваш-сайт --hive https://beesearch.ru</pre>
 <p>Лёгкая пчела не открывает свою страницу поиска. Она подтверждает сайт файлом <code>/.well-known/pchela.txt</code>: в файле одна строка, имя пчелы из её журнала. Сначала улей берёт новые и изменённые страницы этого сайта. Когда своих изменений нет, пчела разбирает чужую очередь. Подробно — на страницах <a href="/for-sites">Сайту</a>, <a href="/hive">Улей</a> и <a href="/computer">Компьютер</a>.</p>
 <ul>
 <li>Своя страница поиска будет на том адресе, который указан в --listen. Для людей снаружи на этот адрес ставят домен.</li>
@@ -1645,12 +1838,12 @@ pub fn page_hive() -> String {
         r#"<p>Улей — вход, с которого люди ищут. На нём лежат индекс, модель смысла и кабинет оператора. Лёгкая пчела, компьютер без сайта и телефон приносят ему текст. Пишет индекс улей.</p>
 <h3>Что ставить</h3>
 <p>Та же программа, что на странице <a href="/download">Скачать ноду</a>. В Windows это <code>mds.exe</code>, в Linux — <code>mds</code>. При первом запуске полная нода забирает модель с улья, около 1 ГБ. Ссылки на файл весов на странице загрузки нет.</p>
-<pre>mds node --listen 0.0.0.0:8080 --seeds urls.txt --follow-external --peers https://45.158.46.52</pre>
+<pre>mds node --listen 0.0.0.0:8080 --seeds urls.txt --follow-external --peers https://beesearch.ru</pre>
 <ul>
 <li>В urls.txt — стартовые адреса сайтов, по одному в строке. С них обход находит ссылки и ставит новые адреса в очередь.</li>
 <li>Публичный улей, на который смотрит домен, запускают с <code>--alone</code>, чтобы он не звонил сам себе.</li>
 <li>Второй улей, который входит в ту же сеть, указывает соседа в <code>--peers</code>.</li>
-<li>Для людей снаружи на адрес из <code>--listen</code> ставят домен.</li>
+<li>Для людей этот улей открыт на https://beesearch.ru.</li>
 </ul>
 <h3>Сколько нужно машине</h3>
 <p>Один публичный улей — 4 ядра, 8 ГБ памяти и SSD около 100 ГБ. Модель занимает около 1 ГБ из этой памяти. База растёт вместе со страницами, её пишет один процесс. Узкий канал не подходит: с этой машины идут и ответы людям, и обход.</p>
@@ -1669,14 +1862,14 @@ pub fn page_computer() -> String {
         r#"<p>Это старый или свободный компьютер с интернетом. Белый адрес и открытый порт ему не нужны: он сам соединяется с ульем. Свою страницу поиска он не открывает. Люди по-прежнему ищут на улье.</p>
 <h3>Что ставить</h3>
 <p>Та же программа, что на странице <a href="/download">Скачать ноду</a>. Модель и свою базу он не качает. Памяти хватает обычной: гигабайт под модель ему не нужен.</p>
-<pre>mds node --lite --hive https://45.158.46.52</pre>
+<pre>mds node --lite --hive https://beesearch.ru</pre>
 <p>В Windows та же команда у <code>mds.exe</code>. Компьютер можно оставить включённым на сутки: он разбирает чужую очередь, пока работает.</p>
 <h3>Как он работает</h3>
 <p>Улей выдаёт адреса из очереди. Компьютер открывает страницы, забирает текст и отдаёт его улью. Улей записывает текст в индекс и сам считает смысл. Страница без изменений в индекс повторно не встраивается. Своего сайта у этой пчелы нет, поэтому файл <code>/.well-known/pchela.txt</code> не нужен.</p>
 <p>Темп берётся из кабинета улья, из потолка на странице «Нода»: сколько страниц за заход и какая минимальная пауза. Это тот же потолок, что у телефона в режиме «как сервер». Пчела рядом с сайтом ходит другим темпом, его задают на странице «Пчёлы»: сначала свои новые и изменённые страницы, потом чужая очередь.</p>
 <h3>Обновление</h3>
 <p>Файл на этом компьютере сам не меняется. Новую сборку скачивают со страницы загрузки, кладут на место старой и перезапускают программу. Кабинет улья обновление на чужой компьютер не отправляет: это было бы управление чужой машиной.</p>
-<p>Если у компьютера есть свой сайт, команда другая: <code>mds node --lite --site https://ваш-сайт --hive https://45.158.46.52</code>. Как её подтвердить — на странице <a href="/for-sites">Сайту</a>.</p>
+<p>Если у компьютера есть свой сайт, команда другая: <code>mds node --lite --site https://ваш-сайт --hive https://beesearch.ru</code>. Как её подтвердить — на странице <a href="/for-sites">Сайту</a>.</p>
 <p><a href="/hive">Сервер-улей</a></p>"#,
     )
 }
@@ -1712,6 +1905,70 @@ pub fn page_help() -> String {
     )
 }
 
+pub fn page_lost() -> String {
+    page_fault(404)
+}
+
+pub fn page_fault(code: u16) -> String {
+    let (title, why) = match code {
+        500 => ("На улье сбой", "Страница не собралась. Откройте поиск ещё раз."),
+        502 => ("Улей не отвечает", "Пчела долетела, но улей сейчас молчит. Откройте поиск через минуту."),
+        503 => ("Улей занят", "Слишком много работы сразу. Зайдите через минуту."),
+        _ => ("Страница не найдена", "Пчела облетела улей и не нашла этот адрес."),
+    };
+    let shown = if matches!(code, 404 | 500 | 502 | 503) { code } else { 404 };
+    format!(
+        r##"<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>{shown} — Пчелопоиск</title>
+<style>
+body {{ margin: 0; min-height: 100vh; display: grid; place-items: center; font-family: Arial, Helvetica, sans-serif; color: #1c1612; background: #fffaf2; }}
+main {{ width: min(100% - 32px, 520px); padding: 28px 8px 40px; text-align: center; }}
+.code {{ margin: 0; font-family: Georgia, "Times New Roman", serif; font-size: 84px; line-height: 1; letter-spacing: -0.04em; color: #5c3a12; }}
+.sky {{ position: relative; height: 168px; margin: 8px 0 4px; }}
+.sky .bee {{ position: absolute; left: 50%; width: 148px; height: 148px; margin-left: -74px; animation: float 2.6s ease-in-out infinite; }}
+.sky .wing {{ transform-box: fill-box; transform-origin: 50% 100%; animation: flap .08s ease-in-out infinite alternate; }}
+.sky .wing.right {{ animation-duration: .06s; }}
+.shade {{ position: absolute; left: 50%; bottom: 8px; width: 78px; height: 14px; margin-left: -39px; border-radius: 50%; background: rgba(28,22,18,.14); animation: shade 2.6s ease-in-out infinite; }}
+h1 {{ margin: 0 0 10px; font-family: Georgia, "Times New Roman", serif; font-size: 28px; font-weight: 500; }}
+p.why {{ margin: 0 0 22px; color: #4d453c; line-height: 1.5; }}
+a.back {{ display: inline-block; padding: 12px 22px; border-radius: 22px; background: #1c1612; color: #fff; text-decoration: none; }}
+a.back:hover {{ background: #5c3a12; }}
+@keyframes float {{
+  0%, 100% {{ transform: translateY(8px) rotate(-2deg); }}
+  50% {{ transform: translateY(-14px) rotate(2deg); }}
+}}
+@keyframes flap {{
+  from {{ transform: rotate(-20deg); }}
+  to {{ transform: rotate(18deg); }}
+}}
+@keyframes shade {{
+  0%, 100% {{ transform: scaleX(1.05); opacity: .45; }}
+  50% {{ transform: scaleX(.78); opacity: .22; }}
+}}
+@media (prefers-reduced-motion: reduce) {{
+  .sky .bee, .sky .wing, .shade {{ animation: none; }}
+}}
+</style>
+</head>
+<body>
+<main>
+<p class="code">{shown}</p>
+<div class="sky" aria-hidden="true">{bee}<i class="shade"></i></div>
+<h1>{title}</h1>
+<p class="why">{why}</p>
+<a class="back" href="/">К поиску</a>
+</main>
+</body>
+</html>"##,
+        bee = bee_svg("bee"),
+    )
+}
+
 fn article(title: &str, body: &str) -> String {
     document("", &format!("<article><h2>{}</h2>{body}</article>", escape(title)), false, false, None, "")
 }
@@ -1733,7 +1990,8 @@ fn footer() -> String {
 <a href="/add">Добавить сайт</a>
 </nav>
 <p class="census">В поиске %%SITES%% и %%PAGES%%.</p>
-<p class="credit"><span>Разработка креативной лаборатории <a href="https://dartalab.ru/">DARTA</a>.</span><a class="help" href="/help">Помочь проекту</a><svg class="comb" viewBox="0 0 128 128" aria-hidden="true"><g fill="#f9cb0b"><path d="m59.86475 67.82129a1.48481 1.48481 0 0 1 -.74463-.19922l-14.39258-8.25293-5.50635 3.08447a1.49985 1.49985 0 0 1 -1.46582-2.61718l6.248-3.5a1.49964 1.49964 0 0 1 1.479.00732l15.12993 8.67676a1.49973 1.49973 0 0 1 -.74755 2.80078z"/><path d="m54.354 107.72754a1.50024 1.50024 0 0 1 -.75244-2.79883l13.09668-7.57422-.0166-25.32812-.94922-.54688a1.50018 1.50018 0 1 1 1.498-2.59961l1.69922.9795a1.49827 1.49827 0 0 1 .751 1.29882l.01856 27.06055a1.50127 1.50127 0 0 1 -.749 1.2998l-13.84668 8.00782a1.49211 1.49211 0 0 1 -.74952.20117z"/><path d="m44.77344 113.2666a1.49676 1.49676 0 0 1 -.749-.20019l-23.44436-13.51465a1.50034 1.50034 0 0 1 -.751-1.29883l-.00342-4.55371a1.5004 1.5004 0 0 1 1.499-1.501h.001a1.49986 1.49986 0 0 1 1.5 1.499l.00293 3.6875 21.94385 12.64941 2.63428-1.52344a1.50031 1.50031 0 0 1 1.502 2.59766l-3.38428 1.957a1.5049 1.5049 0 0 1 -.751.20125z"/><path d="m76.32324 23.25293a1.49178 1.49178 0 0 1 -.748-.20117l-6.37797-3.67676a1.49975 1.49975 0 1 1 1.498-2.59863l6.37793 3.67676a1.50014 1.50014 0 0 1 -.75 2.7998z"/><path d="m68.18555 72.66016a1.50009 1.50009 0 0 1 -.752-2.79883l22.67583-13.11328-.001-2.24366a1.49976 1.49976 0 0 1 1.499-1.501h.001a1.50018 1.50018 0 0 1 1.5 1.499l.00195 3.10986a1.49988 1.49988 0 0 1 -.749 1.29932l-23.42578 13.54743a1.49387 1.49387 0 0 1 -.75.20116z"/><path d="m44.73975 59.146a1.49986 1.49986 0 0 1 -1.5-1.499l-.01856-27.061a1.49947 1.49947 0 0 1 .749-1.29932l23.42629-13.54645a1.49707 1.49707 0 0 1 1.5-.001l1.79883 1.03711a1.49975 1.49975 0 1 1 -1.498 2.59863l-1.04883-.60449-21.9268 12.67972.01807 26.1948a1.49977 1.49977 0 0 1 -1.499 1.501z"/><path d="m107.92871 103.81836a1.50008 1.50008 0 0 1 -.75195-2.79883l6.39355-3.69726-.0166-25.32813-21.94433-12.64941-21.92579 12.67968.01661 25.32813 6.32617 3.64648a1.50018 1.50018 0 0 1 -1.49805 2.59961l-7.07617-4.0791a1.49827 1.49827 0 0 1 -.751-1.29883l-.01855-27.06054a1.50127 1.50127 0 0 1 .749-1.29981l23.42578-13.5459a1.49825 1.49825 0 0 1 1.5-.001l23.44434 13.51367a1.49828 1.49828 0 0 1 .751 1.29883l.01856 27.06054a1.50129 1.50129 0 0 1 -.749 1.29981l-7.14356 4.13086a1.49386 1.49386 0 0 1 -.75001.2012z"/></g><path d="m39.56354 76.5401c.32348-.35632.64062-.72253.94281-1.10846a16.814 16.814 0 0 0 3.54785-7.876c.38721-2.8916-.37354-5.24658-2.14209-6.63134-1.76856-1.38575-4.23779-1.55762-6.95117-.48828a16.13117 16.13117 0 0 0 -5.81757 4.18774c-4.15484-4.55859-9.57715-6.1994-12.77325-3.69946-3.46 2.70947-2.84229 9.08154 1.40576 14.50732.247.31531.50018.6308.75622.94226a9.20241 9.20241 0 0 0 2.10315 18.16223h16.18409a9.20737 9.20737 0 0 0 2.7442-17.996zm-12.95026 14.996a35 35 0 0 0 .54541-6.207 35.46647 35.46647 0 0 0 -.36389-5.03 5.72943 5.72943 0 0 0 3.569 1.15985 8.512 8.512 0 0 0 2.317-.3493 32.74556 32.74556 0 0 1 .26941 4.21942 31.76 31.76 0 0 1 -.60749 6.207zm9.44824-28.30908a6.16994 6.16994 0 0 1 2.229-.47559 2.82389 2.82389 0 0 1 1.772.53516c.88379.6919 1.25488 2.103 1.01807 3.87061a13.78553 13.78553 0 0 1 -2.93659 6.4248 13.791 13.791 0 0 1 -5.5332 4.39258c-1.65967.65332-3.11719.63281-4.00146-.05957-1.80127-1.41016-1.45606-5.98535 1.91845-10.2959a13.78338 13.78338 0 0 1 5.53373-4.39206zm-17.84179.05957c1.70953-1.33856 5.74981-.09717 9.04364 3.74207a14.06909 14.06909 0 0 0 -2.6695 9.09338h-2.20849a20.31311 20.31311 0 0 1 -2.2472-2.54c-3.375-4.30958-3.71972-8.88526-1.91845-10.29542zm-3.791 22.04248a6.21359 6.21359 0 0 1 6.20654-6.207h2.91651a31.78523 31.78523 0 0 1 .60693 6.207 31.70458 31.70458 0 0 1 -.60821 6.207h-2.91525a6.21359 6.21359 0 0 1 -6.20654-6.20697zm22.39063 6.207h-1.42178a35.00225 35.00225 0 0 0 .55262-6.207 35.3936 35.3936 0 0 0 -.42414-5.45233c.38855-.22748.7713-.48444 1.15058-.7547h.1427a6.207 6.207 0 0 1 0 12.41406z" fill="#153d45"/><circle cx="18.544" cy="84.209" fill="#153d45" r="1.821"/><path d="m104.79517 34.35016q.71245-.75742 1.38256-1.60993a19.48713 19.48713 0 0 0 4.11622-9.12988c.44238-3.30127-.417-5.98291-2.41895-7.55029-3.70154-2.89795-10.03082-.89856-14.848 4.52472-4.8121-5.41321-11.148-7.41535-14.84341-4.52472-2.00195 1.56738-2.86132 4.249-2.41894 7.55029a19.48711 19.48711 0 0 0 4.11621 9.12988c.37726.48188.767.962 1.16095 1.43024a10.554 10.554 0 0 0 1.99139 20.91889h19.01953a10.5502 10.5502 0 0 0 2.74244-20.7392zm-18.12256 17.7392h-3.63941a7.55665 7.55665 0 0 1 0-15.11329h3.645a37.89224 37.89224 0 0 1 -.00555 15.11329zm1.19751-19.22071a9.76145 9.76145 0 0 0 .11029 1.10742h-2.99414a23.47223 23.47223 0 0 1 -2.74408-3.08544 16.471 16.471 0 0 1 -3.50391-7.67823c-.1709-1.27685-.23047-3.59619 1.29492-4.79 2.42542-1.90149 7.41877.198 11.11347 4.58185a21.07219 21.07219 0 0 0 -2.09491 3.89175 1.49991 1.49991 0 1 0 2.77929 1.1289 18.68337 18.68337 0 0 1 2.62012-4.46631c3.73731-4.77148 9.03906-7.12255 11.57422-5.13623 1.52539 1.19385 1.46582 3.51319 1.29492 4.79a16.47084 16.47084 0 0 1 -3.5039 7.67823c-3.73633 4.77148-9.03418 7.12255-11.57422 5.13671a4.28061 4.28061 0 0 1 -1.374-3.27 1.50005 1.50005 0 1 0 -2.998.11133zm9.13714 19.22071h-7.27185a40.6984 40.6984 0 0 0 .70111-7.55665 41.20461 41.20461 0 0 0 -.51751-6.56347 6.04962 6.04962 0 0 0 .47357.41992 6.49577 6.49577 0 0 0 4.084 1.32813 9.97228 9.97228 0 0 0 2.92749-.47107 38.50108 38.50108 0 0 1 .3645 5.28649 37.46367 37.46367 0 0 1 -.76131 7.55665zm5.04547 0h-1.9898a40.729 40.729 0 0 0 .70562-7.55665 41.27586 41.27586 0 0 0 -.52215-6.54229 17.61976 17.61976 0 0 0 1.57342-1.01435h.23291a7.55665 7.55665 0 0 1 0 15.11329z" fill="#153d45"/><path d="m80.57617 41.33887a1.87744 1.87744 0 1 0 1.87793 1.87744 1.87924 1.87924 0 0 0 -1.87793-1.87744z" fill="#153d45"/><path d="m102.56335 94.54c.32343-.35633.64045-.72241.94251-1.10834a16.80326 16.80326 0 0 0 3.54785-7.877c.3877-2.89063-.373-5.2461-2.1416-6.62989-3.204-2.50964-8.61322-.8645-12.76959 3.69751-4.15515-4.55694-9.5774-6.19781-12.7724-3.69848-1.76856 1.38476-2.5293 3.74023-2.1416 6.63086a16.80335 16.80335 0 0 0 3.54687 7.876c.24689.31586.50012.63166.75629.94342a9.20236 9.20236 0 0 0 2.10406 18.162h16.1836a9.20732 9.20732 0 0 0 2.744-17.99615zm-12.94989 14.99613a35.00845 35.00845 0 0 0 .54572-6.207 35.41766 35.41766 0 0 0 -.36414-5.02978 5.72948 5.72948 0 0 0 3.56824 1.15965 8.51228 8.51228 0 0 0 2.31677-.34912 32.68884 32.68884 0 0 1 .27015 4.21924 31.71952 31.71952 0 0 1 -.60834 6.207zm11.69416-28.77343a2.79691 2.79691 0 0 1 1.75488.52441c.88379.69141 1.25488 2.10156 1.01855 3.86914a13.794 13.794 0 0 1 -2.93652 6.42578h-.001a13.78539 13.78539 0 0 1 -5.53222 4.39258c-1.6582.6543-3.11817.63379-4.00195-.06055-.88379-.6914-1.25489-2.10156-1.01856-3.86914a13.80279 13.80279 0 0 1 2.93652-6.42578c2.54006-3.24314 5.63577-4.85644 7.7803-4.85644zm-21.10645 4.39355c-.23633-1.76758.13477-3.17773 1.01856-3.87012 1.70648-1.33453 5.74768-.09784 9.04431 3.74451a16.10514 16.10514 0 0 0 -2.64588 6.61584 9.82692 9.82692 0 0 0 -.02545 2.47559h-2.20782a20.29205 20.29205 0 0 1 -2.24719-2.54 13.79411 13.79411 0 0 1 -2.93653-6.42582zm-2.77246 18.17285a6.2137 6.2137 0 0 1 6.207-6.207h2.91663a32.00952 32.00952 0 0 1 -.00153 12.41406h-2.9151a6.2137 6.2137 0 0 1 -6.207-6.20706zm22.39063 6.207h-1.42182a35.00923 35.00923 0 0 0 .55268-6.207 35.38662 35.38662 0 0 0 -.42414-5.45233c.38855-.22748.7713-.48444 1.15058-.7547h.1427a6.207 6.207 0 0 1 0 12.41406z" fill="#153d45"/><path d="m81.54492 100.3877a1.82129 1.82129 0 1 0 1.82031 1.82128 1.82381 1.82381 0 0 0 -1.82031-1.82128z" fill="#153d45"/></svg></p>
+<p class="credit"><span>Разработка креативной лаборатории <a href="https://dartalab.ru/">DARTA</a>.</span><a class="help" href="/help">Помочь проекту</a></p>
+<svg class="comb" viewBox="0 0 128 128" aria-hidden="true"><g fill="#f9cb0b"><path d="m59.86475 67.82129a1.48481 1.48481 0 0 1 -.74463-.19922l-14.39258-8.25293-5.50635 3.08447a1.49985 1.49985 0 0 1 -1.46582-2.61718l6.248-3.5a1.49964 1.49964 0 0 1 1.479.00732l15.12993 8.67676a1.49973 1.49973 0 0 1 -.74755 2.80078z"/><path d="m54.354 107.72754a1.50024 1.50024 0 0 1 -.75244-2.79883l13.09668-7.57422-.0166-25.32812-.94922-.54688a1.50018 1.50018 0 1 1 1.498-2.59961l1.69922.9795a1.49827 1.49827 0 0 1 .751 1.29882l.01856 27.06055a1.50127 1.50127 0 0 1 -.749 1.2998l-13.84668 8.00782a1.49211 1.49211 0 0 1 -.74952.20117z"/><path d="m44.77344 113.2666a1.49676 1.49676 0 0 1 -.749-.20019l-23.44436-13.51465a1.50034 1.50034 0 0 1 -.751-1.29883l-.00342-4.55371a1.5004 1.5004 0 0 1 1.499-1.501h.001a1.49986 1.49986 0 0 1 1.5 1.499l.00293 3.6875 21.94385 12.64941 2.63428-1.52344a1.50031 1.50031 0 0 1 1.502 2.59766l-3.38428 1.957a1.5049 1.5049 0 0 1 -.751.20125z"/><path d="m76.32324 23.25293a1.49178 1.49178 0 0 1 -.748-.20117l-6.37797-3.67676a1.49975 1.49975 0 1 1 1.498-2.59863l6.37793 3.67676a1.50014 1.50014 0 0 1 -.75 2.7998z"/><path d="m68.18555 72.66016a1.50009 1.50009 0 0 1 -.752-2.79883l22.67583-13.11328-.001-2.24366a1.49976 1.49976 0 0 1 1.499-1.501h.001a1.50018 1.50018 0 0 1 1.5 1.499l.00195 3.10986a1.49988 1.49988 0 0 1 -.749 1.29932l-23.42578 13.54743a1.49387 1.49387 0 0 1 -.75.20116z"/><path d="m44.73975 59.146a1.49986 1.49986 0 0 1 -1.5-1.499l-.01856-27.061a1.49947 1.49947 0 0 1 .749-1.29932l23.42629-13.54645a1.49707 1.49707 0 0 1 1.5-.001l1.79883 1.03711a1.49975 1.49975 0 1 1 -1.498 2.59863l-1.04883-.60449-21.9268 12.67972.01807 26.1948a1.49977 1.49977 0 0 1 -1.499 1.501z"/><path d="m107.92871 103.81836a1.50008 1.50008 0 0 1 -.75195-2.79883l6.39355-3.69726-.0166-25.32813-21.94433-12.64941-21.92579 12.67968.01661 25.32813 6.32617 3.64648a1.50018 1.50018 0 0 1 -1.49805 2.59961l-7.07617-4.0791a1.49827 1.49827 0 0 1 -.751-1.29883l-.01855-27.06054a1.50127 1.50127 0 0 1 .749-1.29981l23.42578-13.5459a1.49825 1.49825 0 0 1 1.5-.001l23.44434 13.51367a1.49828 1.49828 0 0 1 .751 1.29883l.01856 27.06054a1.50129 1.50129 0 0 1 -.749 1.29981l-7.14356 4.13086a1.49386 1.49386 0 0 1 -.75001.2012z"/></g><path d="m39.56354 76.5401c.32348-.35632.64062-.72253.94281-1.10846a16.814 16.814 0 0 0 3.54785-7.876c.38721-2.8916-.37354-5.24658-2.14209-6.63134-1.76856-1.38575-4.23779-1.55762-6.95117-.48828a16.13117 16.13117 0 0 0 -5.81757 4.18774c-4.15484-4.55859-9.57715-6.1994-12.77325-3.69946-3.46 2.70947-2.84229 9.08154 1.40576 14.50732.247.31531.50018.6308.75622.94226a9.20241 9.20241 0 0 0 2.10315 18.16223h16.18409a9.20737 9.20737 0 0 0 2.7442-17.996zm-12.95026 14.996a35 35 0 0 0 .54541-6.207 35.46647 35.46647 0 0 0 -.36389-5.03 5.72943 5.72943 0 0 0 3.569 1.15985 8.512 8.512 0 0 0 2.317-.3493 32.74556 32.74556 0 0 1 .26941 4.21942 31.76 31.76 0 0 1 -.60749 6.207zm9.44824-28.30908a6.16994 6.16994 0 0 1 2.229-.47559 2.82389 2.82389 0 0 1 1.772.53516c.88379.6919 1.25488 2.103 1.01807 3.87061a13.78553 13.78553 0 0 1 -2.93659 6.4248 13.791 13.791 0 0 1 -5.5332 4.39258c-1.65967.65332-3.11719.63281-4.00146-.05957-1.80127-1.41016-1.45606-5.98535 1.91845-10.2959a13.78338 13.78338 0 0 1 5.53373-4.39206zm-17.84179.05957c1.70953-1.33856 5.74981-.09717 9.04364 3.74207a14.06909 14.06909 0 0 0 -2.6695 9.09338h-2.20849a20.31311 20.31311 0 0 1 -2.2472-2.54c-3.375-4.30958-3.71972-8.88526-1.91845-10.29542zm-3.791 22.04248a6.21359 6.21359 0 0 1 6.20654-6.207h2.91651a31.78523 31.78523 0 0 1 .60693 6.207 31.70458 31.70458 0 0 1 -.60821 6.207h-2.91525a6.21359 6.21359 0 0 1 -6.20654-6.20697zm22.39063 6.207h-1.42178a35.00225 35.00225 0 0 0 .55262-6.207 35.3936 35.3936 0 0 0 -.42414-5.45233c.38855-.22748.7713-.48444 1.15058-.7547h.1427a6.207 6.207 0 0 1 0 12.41406z" fill="#153d45"/><circle cx="18.544" cy="84.209" fill="#153d45" r="1.821"/><path d="m104.79517 34.35016q.71245-.75742 1.38256-1.60993a19.48713 19.48713 0 0 0 4.11622-9.12988c.44238-3.30127-.417-5.98291-2.41895-7.55029-3.70154-2.89795-10.03082-.89856-14.848 4.52472-4.8121-5.41321-11.148-7.41535-14.84341-4.52472-2.00195 1.56738-2.86132 4.249-2.41894 7.55029a19.48711 19.48711 0 0 0 4.11621 9.12988c.37726.48188.767.962 1.16095 1.43024a10.554 10.554 0 0 0 1.99139 20.91889h19.01953a10.5502 10.5502 0 0 0 2.74244-20.7392zm-18.12256 17.7392h-3.63941a7.55665 7.55665 0 0 1 0-15.11329h3.645a37.89224 37.89224 0 0 1 -.00555 15.11329zm1.19751-19.22071a9.76145 9.76145 0 0 0 .11029 1.10742h-2.99414a23.47223 23.47223 0 0 1 -2.74408-3.08544 16.471 16.471 0 0 1 -3.50391-7.67823c-.1709-1.27685-.23047-3.59619 1.29492-4.79 2.42542-1.90149 7.41877.198 11.11347 4.58185a21.07219 21.07219 0 0 0 -2.09491 3.89175 1.49991 1.49991 0 1 0 2.77929 1.1289 18.68337 18.68337 0 0 1 2.62012-4.46631c3.73731-4.77148 9.03906-7.12255 11.57422-5.13623 1.52539 1.19385 1.46582 3.51319 1.29492 4.79a16.47084 16.47084 0 0 1 -3.5039 7.67823c-3.73633 4.77148-9.03418 7.12255-11.57422 5.13671a4.28061 4.28061 0 0 1 -1.374-3.27 1.50005 1.50005 0 1 0 -2.998.11133zm9.13714 19.22071h-7.27185a40.6984 40.6984 0 0 0 .70111-7.55665 41.20461 41.20461 0 0 0 -.51751-6.56347 6.04962 6.04962 0 0 0 .47357.41992 6.49577 6.49577 0 0 0 4.084 1.32813 9.97228 9.97228 0 0 0 2.92749-.47107 38.50108 38.50108 0 0 1 .3645 5.28649 37.46367 37.46367 0 0 1 -.76131 7.55665zm5.04547 0h-1.9898a40.729 40.729 0 0 0 .70562-7.55665 41.27586 41.27586 0 0 0 -.52215-6.54229 17.61976 17.61976 0 0 0 1.57342-1.01435h.23291a7.55665 7.55665 0 0 1 0 15.11329z" fill="#153d45"/><path d="m80.57617 41.33887a1.87744 1.87744 0 1 0 1.87793 1.87744 1.87924 1.87924 0 0 0 -1.87793-1.87744z" fill="#153d45"/><path d="m102.56335 94.54c.32343-.35633.64045-.72241.94251-1.10834a16.80326 16.80326 0 0 0 3.54785-7.877c.3877-2.89063-.373-5.2461-2.1416-6.62989-3.204-2.50964-8.61322-.8645-12.76959 3.69751-4.15515-4.55694-9.5774-6.19781-12.7724-3.69848-1.76856 1.38476-2.5293 3.74023-2.1416 6.63086a16.80335 16.80335 0 0 0 3.54687 7.876c.24689.31586.50012.63166.75629.94342a9.20236 9.20236 0 0 0 2.10406 18.162h16.1836a9.20732 9.20732 0 0 0 2.744-17.99615zm-12.94989 14.99613a35.00845 35.00845 0 0 0 .54572-6.207 35.41766 35.41766 0 0 0 -.36414-5.02978 5.72948 5.72948 0 0 0 3.56824 1.15965 8.51228 8.51228 0 0 0 2.31677-.34912 32.68884 32.68884 0 0 1 .27015 4.21924 31.71952 31.71952 0 0 1 -.60834 6.207zm11.69416-28.77343a2.79691 2.79691 0 0 1 1.75488.52441c.88379.69141 1.25488 2.10156 1.01855 3.86914a13.794 13.794 0 0 1 -2.93652 6.42578h-.001a13.78539 13.78539 0 0 1 -5.53222 4.39258c-1.6582.6543-3.11817.63379-4.00195-.06055-.88379-.6914-1.25489-2.10156-1.01856-3.86914a13.80279 13.80279 0 0 1 2.93652-6.42578c2.54006-3.24314 5.63577-4.85644 7.7803-4.85644zm-21.10645 4.39355c-.23633-1.76758.13477-3.17773 1.01856-3.87012 1.70648-1.33453 5.74768-.09784 9.04431 3.74451a16.10514 16.10514 0 0 0 -2.64588 6.61584 9.82692 9.82692 0 0 0 -.02545 2.47559h-2.20782a20.29205 20.29205 0 0 1 -2.24719-2.54 13.79411 13.79411 0 0 1 -2.93653-6.42582zm-2.77246 18.17285a6.2137 6.2137 0 0 1 6.207-6.207h2.91663a32.00952 32.00952 0 0 1 -.00153 12.41406h-2.9151a6.2137 6.2137 0 0 1 -6.207-6.20706zm22.39063 6.207h-1.42182a35.00923 35.00923 0 0 0 .55268-6.207 35.38662 35.38662 0 0 0 -.42414-5.45233c.38855-.22748.7713-.48444 1.15058-.7547h.1427a6.207 6.207 0 0 1 0 12.41406z" fill="#153d45"/><path d="m81.54492 100.3877a1.82129 1.82129 0 1 0 1.82031 1.82128 1.82381 1.82381 0 0 0 -1.82031-1.82128z" fill="#153d45"/></svg>
 </div>
 </footer>"##
         .to_string()
@@ -1877,6 +2135,23 @@ mod tests {
     }
 
     #[test]
+    fn lost_page_points_back_to_search() {
+        let page = page_lost();
+        assert!(page.contains("Страница не найдена"));
+        assert!(page.contains("href=\"/\""));
+        assert!(page.contains("class=\"wing left\""));
+        assert!(page.contains("class=\"wing right\""));
+        assert!(page.contains("#FBDD56"));
+        assert!(page.contains("noindex"));
+        assert!(page_fault(502).contains("Улей не отвечает"));
+        if let Ok(dir) = std::env::var("MDS_FAULT_DIR") {
+            for code in [404, 500, 502, 503] {
+                std::fs::write(format!("{dir}/{code}.html"), page_fault(code)).unwrap();
+            }
+        }
+    }
+
+    #[test]
     fn query_is_escaped() {
         let html = render("<script>", &[], 1, None);
         assert!(html.contains("&lt;script&gt;"));
@@ -1990,7 +2265,8 @@ mod tests {
         assert!(missing.contains("/download/pchela-windows-x64.zip"));
         assert!(missing.contains("забирает модель с улья"));
         assert!(!missing.contains("/peer/model"));
-        assert!(missing.contains("https://45.158.46.52/"));
+        assert!(missing.contains("https://admin.beesearch.ru/login"));
+        assert!(page_how().contains("https://admin.beesearch.ru/login"));
         assert!(missing.contains("Нужно обновиться"));
         let noted = stamp_notice("<body class=\"home\">страница</body>".into(), Some("0.2.0"));
         assert!(noted.contains("Вышла версия 0.2.0"));

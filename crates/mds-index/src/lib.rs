@@ -92,6 +92,17 @@ pub struct LoadHour {
     pub ram_pct: i64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ActivitySlot {
+    pub bucket: String,
+    pub new_pages: i64,
+    pub new_hosts: i64,
+    pub walked: i64,
+    pub shell_pages: i64,
+    pub cpu: i64,
+    pub ram: i64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BeeTotals {
     pub day: i64,
@@ -107,6 +118,96 @@ pub struct KnownNode {
     pub alive: bool,
     pub latency_ms: u64,
     pub last_ok: Option<i64>,
+}
+
+fn activity_sql(grain: &str) -> &'static str {
+    match grain {
+        "hour" => {
+            "WITH keys AS (
+                SELECT bucket AS k FROM intake_tick WHERE grain = 'hour'
+                UNION
+                SELECT hour FROM load_hour
+            )
+            SELECT k,
+                COALESCE((SELECT new_pages FROM intake_tick WHERE grain = 'hour' AND bucket = k), 0),
+                COALESCE((SELECT new_hosts FROM intake_tick WHERE grain = 'hour' AND bucket = k), 0),
+                COALESCE((SELECT new_pages + changed_pages + same_pages FROM intake_tick WHERE grain = 'hour' AND bucket = k), 0),
+                COALESCE((SELECT shell_pages FROM intake_tick WHERE grain = 'hour' AND bucket = k), 0),
+                COALESCE((SELECT cpu_pct FROM load_hour WHERE hour = k), 0),
+                COALESCE((SELECT ram_pct FROM load_hour WHERE hour = k), 0)
+            FROM keys
+            ORDER BY k DESC
+            LIMIT ?1"
+        }
+        "day" => {
+            "WITH keys AS (
+                SELECT day AS k FROM intake_day
+                UNION SELECT day FROM shell_pages
+                UNION SELECT substr(hour, 1, 10) FROM load_hour
+            )
+            SELECT k,
+                COALESCE((SELECT new_pages FROM intake_day WHERE day = k), 0),
+                COALESCE((SELECT new_hosts FROM intake_day WHERE day = k), 0),
+                COALESCE((SELECT new_pages + changed_pages + same_pages FROM intake_day WHERE day = k), 0),
+                COALESCE((SELECT pages FROM shell_pages WHERE day = k), 0),
+                CAST(COALESCE((SELECT AVG(cpu_pct) FROM load_hour WHERE substr(hour, 1, 10) = k), 0) AS INTEGER),
+                CAST(COALESCE((SELECT AVG(ram_pct) FROM load_hour WHERE substr(hour, 1, 10) = k), 0) AS INTEGER)
+            FROM keys
+            ORDER BY k DESC
+            LIMIT ?1"
+        }
+        "week" => {
+            "WITH keys AS (
+                SELECT strftime('%Y-%W', day) AS k FROM intake_day
+                UNION SELECT strftime('%Y-%W', day) FROM shell_pages
+                UNION SELECT strftime('%Y-%W', substr(hour, 1, 10)) FROM load_hour
+            )
+            SELECT k,
+                COALESCE((SELECT SUM(new_pages) FROM intake_day WHERE strftime('%Y-%W', day) = k), 0),
+                COALESCE((SELECT SUM(new_hosts) FROM intake_day WHERE strftime('%Y-%W', day) = k), 0),
+                COALESCE((SELECT SUM(new_pages + changed_pages + same_pages) FROM intake_day WHERE strftime('%Y-%W', day) = k), 0),
+                COALESCE((SELECT SUM(pages) FROM shell_pages WHERE strftime('%Y-%W', day) = k), 0),
+                CAST(COALESCE((SELECT AVG(cpu_pct) FROM load_hour WHERE strftime('%Y-%W', substr(hour, 1, 10)) = k), 0) AS INTEGER),
+                CAST(COALESCE((SELECT AVG(ram_pct) FROM load_hour WHERE strftime('%Y-%W', substr(hour, 1, 10)) = k), 0) AS INTEGER)
+            FROM keys
+            ORDER BY k DESC
+            LIMIT ?1"
+        }
+        "month" => {
+            "WITH keys AS (
+                SELECT strftime('%Y-%m', day) AS k FROM intake_day
+                UNION SELECT strftime('%Y-%m', day) FROM shell_pages
+                UNION SELECT strftime('%Y-%m', substr(hour, 1, 10)) FROM load_hour
+            )
+            SELECT k,
+                COALESCE((SELECT SUM(new_pages) FROM intake_day WHERE strftime('%Y-%m', day) = k), 0),
+                COALESCE((SELECT SUM(new_hosts) FROM intake_day WHERE strftime('%Y-%m', day) = k), 0),
+                COALESCE((SELECT SUM(new_pages + changed_pages + same_pages) FROM intake_day WHERE strftime('%Y-%m', day) = k), 0),
+                COALESCE((SELECT SUM(pages) FROM shell_pages WHERE strftime('%Y-%m', day) = k), 0),
+                CAST(COALESCE((SELECT AVG(cpu_pct) FROM load_hour WHERE strftime('%Y-%m', substr(hour, 1, 10)) = k), 0) AS INTEGER),
+                CAST(COALESCE((SELECT AVG(ram_pct) FROM load_hour WHERE strftime('%Y-%m', substr(hour, 1, 10)) = k), 0) AS INTEGER)
+            FROM keys
+            ORDER BY k DESC
+            LIMIT ?1"
+        }
+        _ => {
+            "WITH keys AS (
+                SELECT bucket AS k FROM intake_tick WHERE grain = 'minute'
+                UNION
+                SELECT minute FROM load_minute
+            )
+            SELECT k,
+                COALESCE((SELECT new_pages FROM intake_tick WHERE grain = 'minute' AND bucket = k), 0),
+                COALESCE((SELECT new_hosts FROM intake_tick WHERE grain = 'minute' AND bucket = k), 0),
+                COALESCE((SELECT new_pages + changed_pages + same_pages FROM intake_tick WHERE grain = 'minute' AND bucket = k), 0),
+                COALESCE((SELECT shell_pages FROM intake_tick WHERE grain = 'minute' AND bucket = k), 0),
+                COALESCE((SELECT cpu_pct FROM load_minute WHERE minute = k), 0),
+                COALESCE((SELECT ram_pct FROM load_minute WHERE minute = k), 0)
+            FROM keys
+            ORDER BY k DESC
+            LIMIT ?1"
+        }
+    }
 }
 
 fn span_filter(span: &str) -> String {
@@ -180,6 +281,10 @@ impl Index {
             context: "open",
             source,
         })?;
+        conn.busy_timeout(std::time::Duration::from_secs(3)).map_err(|source| IndexError::Sqlite {
+            context: "open",
+            source,
+        })?;
         init_schema(&conn)?;
         ensure_region_column(&conn)?;
         ensure_kind_columns(&conn)?;
@@ -191,12 +296,32 @@ impl Index {
         let index = Self { conn };
         index.seed_revisions()?;
         index.seed_refresh()?;
-        let _ = index.fill_kinds()?;
-        let (labeled, total) = index.fill_regions()?;
-        if total > 0 {
-            eprintln!("MDS: регион подписан у {labeled} страниц из {total}");
+        if index.meta_get("boot_scan")?.as_deref() != Some("1") {
+            let _ = index.fill_kinds()?;
+            let (labeled, total) = index.fill_regions()?;
+            if total > 0 {
+                eprintln!("MDS: регион подписан у {labeled} страниц из {total}");
+            }
+            let _ = index.meta_set("boot_scan", "1");
         }
         Ok(index)
+    }
+
+    /// Второе соединение только для чтения. Обход пишет в первое, кабинет читает здесь и не ждёт замок записи.
+    pub fn open_read(path: &Path) -> Result<Self, IndexError> {
+        let conn = Connection::open(path).map_err(|source| IndexError::Sqlite {
+            context: "open-read",
+            source,
+        })?;
+        conn.busy_timeout(std::time::Duration::from_secs(3)).map_err(|source| IndexError::Sqlite {
+            context: "open-read",
+            source,
+        })?;
+        conn.execute_batch("PRAGMA query_only=ON;").map_err(|source| IndexError::Sqlite {
+            context: "open-read",
+            source,
+        })?;
+        Ok(Self { conn })
     }
 
     fn seed_revisions(&self) -> Result<(), IndexError> {
@@ -585,6 +710,21 @@ impl Index {
                 "INSERT INTO crawl_queue (url, visited, added_at, worth) VALUES (?1, 0, strftime('%s','now'), ?2)
                  ON CONFLICT(url) DO NOTHING",
                 params![trimmed, worth],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// Ссылки, только что найденные на странице, идут раньше холодной очереди.
+    pub fn pull_ahead(&self, urls: &[String]) -> Result<(), IndexError> {
+        for url in urls {
+            let trimmed = url.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            self.conn.execute(
+                "UPDATE crawl_queue SET worth = 1 WHERE url = ?1 AND visited = 0 AND worth > 1",
+                [trimmed],
             )?;
         }
         Ok(())
@@ -1785,6 +1925,18 @@ impl Index {
              ON CONFLICT(day) DO UPDATE SET pages = pages + excluded.pages",
             [pages],
         )?;
+        self.bump_shell_tick(
+            "minute",
+            "strftime('%Y-%m-%d %H:%M','now','localtime')",
+            "strftime('%Y-%m-%d %H:%M','now','localtime','-3 hours')",
+            pages,
+        )?;
+        self.bump_shell_tick(
+            "hour",
+            "strftime('%Y-%m-%d %H','now','localtime')",
+            "strftime('%Y-%m-%d %H','now','localtime','-14 days')",
+            pages,
+        )?;
         Ok(())
     }
 
@@ -1897,6 +2049,70 @@ impl Index {
             "DELETE FROM intake_day WHERE day < date('now','localtime','-400 days')",
             [],
         )?;
+        self.bump_intake_tick(
+            "minute",
+            "strftime('%Y-%m-%d %H:%M','now','localtime')",
+            "strftime('%Y-%m-%d %H:%M','now','localtime','-3 hours')",
+            new_pages,
+            changed_pages,
+            same_pages,
+            new_hosts,
+        )?;
+        self.bump_intake_tick(
+            "hour",
+            "strftime('%Y-%m-%d %H','now','localtime')",
+            "strftime('%Y-%m-%d %H','now','localtime','-14 days')",
+            new_pages,
+            changed_pages,
+            same_pages,
+            new_hosts,
+        )?;
+        Ok(())
+    }
+
+    fn bump_intake_tick(
+        &self,
+        grain: &str,
+        bucket_expr: &str,
+        keep_expr: &str,
+        new_pages: i64,
+        changed_pages: i64,
+        same_pages: i64,
+        new_hosts: i64,
+    ) -> Result<(), IndexError> {
+        self.conn.execute(
+            &format!(
+                "INSERT INTO intake_tick (grain, bucket, new_pages, changed_pages, same_pages, new_hosts, shell_pages)
+                 VALUES (?1, {bucket_expr}, ?2, ?3, ?4, ?5, 0)
+                 ON CONFLICT(grain, bucket) DO UPDATE SET
+                    new_pages = new_pages + excluded.new_pages,
+                    changed_pages = changed_pages + excluded.changed_pages,
+                    same_pages = same_pages + excluded.same_pages,
+                    new_hosts = new_hosts + excluded.new_hosts"
+            ),
+            params![grain, new_pages, changed_pages, same_pages, new_hosts],
+        )?;
+        self.conn.execute(
+            &format!("DELETE FROM intake_tick WHERE grain = ?1 AND bucket < {keep_expr}"),
+            params![grain],
+        )?;
+        Ok(())
+    }
+
+    fn bump_shell_tick(&self, grain: &str, bucket_expr: &str, keep_expr: &str, pages: i64) -> Result<(), IndexError> {
+        self.conn.execute(
+            &format!(
+                "INSERT INTO intake_tick (grain, bucket, new_pages, changed_pages, same_pages, new_hosts, shell_pages)
+                 VALUES (?1, {bucket_expr}, 0, 0, 0, 0, ?2)
+                 ON CONFLICT(grain, bucket) DO UPDATE SET
+                    shell_pages = shell_pages + excluded.shell_pages"
+            ),
+            params![grain, pages],
+        )?;
+        self.conn.execute(
+            &format!("DELETE FROM intake_tick WHERE grain = ?1 AND bucket < {keep_expr}"),
+            params![grain],
+        )?;
         Ok(())
     }
 
@@ -1955,6 +2171,18 @@ impl Index {
             "DELETE FROM load_hour WHERE hour < strftime('%Y-%m-%d %H','now','localtime','-14 days')",
             [],
         )?;
+        self.conn.execute(
+            "INSERT INTO load_minute (minute, cpu_pct, ram_pct)
+             VALUES (strftime('%Y-%m-%d %H:%M','now','localtime'), ?1, ?2)
+             ON CONFLICT(minute) DO UPDATE SET
+                cpu_pct = excluded.cpu_pct,
+                ram_pct = excluded.ram_pct",
+            params![cpu_pct, ram_pct],
+        )?;
+        self.conn.execute(
+            "DELETE FROM load_minute WHERE minute < strftime('%Y-%m-%d %H:%M','now','localtime','-3 hours')",
+            [],
+        )?;
         Ok(())
     }
 
@@ -1967,6 +2195,27 @@ impl Index {
                 hour: row.get(0)?,
                 cpu_pct: row.get(1)?,
                 ram_pct: row.get(2)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        out.reverse();
+        Ok(out)
+    }
+
+    pub fn activity_span(&self, grain: &str, limit: usize) -> Result<Vec<ActivitySlot>, IndexError> {
+        let mut stmt = self.conn.prepare(activity_sql(grain))?;
+        let rows = stmt.query_map([limit as i64], |row| {
+            Ok(ActivitySlot {
+                bucket: row.get(0)?,
+                new_pages: row.get(1)?,
+                new_hosts: row.get(2)?,
+                walked: row.get(3)?,
+                shell_pages: row.get(4)?,
+                cpu: row.get(5)?,
+                ram: row.get(6)?,
             })
         })?;
         let mut out = Vec::new();
@@ -2903,6 +3152,21 @@ fn init_schema(conn: &Connection) -> Result<(), IndexError> {
             cpu_pct INTEGER NOT NULL,
             ram_pct INTEGER NOT NULL,
             samples INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS intake_tick (
+            grain TEXT NOT NULL,
+            bucket TEXT NOT NULL,
+            new_pages INTEGER NOT NULL,
+            changed_pages INTEGER NOT NULL,
+            same_pages INTEGER NOT NULL,
+            new_hosts INTEGER NOT NULL,
+            shell_pages INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (grain, bucket)
+        );
+        CREATE TABLE IF NOT EXISTS load_minute (
+            minute TEXT PRIMARY KEY,
+            cpu_pct INTEGER NOT NULL,
+            ram_pct INTEGER NOT NULL
         );",
     )
     .map_err(|source| IndexError::Sqlite {
@@ -3159,10 +3423,23 @@ mod tests {
         assert_eq!(load.len(), 1);
         assert_eq!(load[0].cpu_pct, 20);
         assert_eq!(load[0].ram_pct, 50);
+        let minute = index.activity_span("minute", 60).unwrap();
+        assert_eq!(minute.len(), 1);
+        assert_eq!(minute[0].new_pages, 5);
+        assert_eq!(minute[0].new_hosts, 1);
+        assert_eq!(minute[0].walked, 10);
+        assert_eq!(minute[0].shell_pages, 3);
+        assert_eq!(minute[0].cpu, 30);
+        assert_eq!(minute[0].ram, 60);
+        let days = index.activity_span("day", 30).unwrap();
+        assert!(!days.is_empty());
+        assert_eq!(days.last().unwrap().new_pages, 5);
         index.mute_host("www.Example.test").unwrap();
         assert_eq!(index.muted_hosts().unwrap(), vec!["example.test".to_string()]);
         index.unmute_host("example.test").unwrap();
         assert!(index.muted_hosts().unwrap().is_empty());
+        let reader = Index::open_read(&dir.join("intake.db")).unwrap();
+        assert_eq!(reader.intake_sum("new_pages", "day").unwrap(), 5);
         assert_eq!(index.shell_grants().unwrap(), 60);
         index.set_shell_grants(9_000).unwrap();
         assert_eq!(index.shell_grants().unwrap(), 600);
@@ -3312,5 +3589,17 @@ mod tests {
         assert_eq!(rows[0].contacts.emails, vec!["hello@cafe-khimki.ru"]);
         assert_eq!(rows[0].contacts.messengers, vec!["https://t.me/cafe_khimki"]);
         assert_eq!(rows[0].contacts.socials, vec!["https://vk.com/cafe_khimki"]);
+    }
+
+    #[test]
+    fn a_fresh_link_moves_ahead_of_the_cold_queue() {
+        let dir = std::env::temp_dir().join(format!("mds-index-ahead-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let index = Index::open(&dir.join("ahead.db")).unwrap();
+        index.enqueue_urls(&["https://old.example/a".into()]).unwrap();
+        index.enqueue_urls(&["https://new.example/b".into()]).unwrap();
+        index.pull_ahead(&["https://new.example/b".into()]).unwrap();
+        let pending = index.pending_urls(2).unwrap();
+        assert_eq!(pending[0], "https://new.example/b");
     }
 }

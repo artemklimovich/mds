@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::body::Body;
 use axum::extract::{ConnectInfo, Form, OriginalUri, Path, Query, Request, State};
@@ -11,12 +11,14 @@ use axum::http::{header, HeaderMap, HeaderValue, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use mds_dht::Swarm;
-use mds_types::{bare_host, canonical_region, geo_in, host_of_url, in_general, site_ask, tab_mask, valid_coords, Hit, QuantVector};
+use mds_dht::{Lsh, Swarm};
+use mds_types::{
+    bare_host, canonical_region, geo_in, host_of_url, in_general, quantize, site_ask, tab_mask, valid_coords, Hit, QuantVector,
+};
 use mds_update::{read_model_manifest, ReleaseManifest};
 use mds_rank::{page_lane, prefer_geo_radius, query_lane, Lane};
 use mds_web::{
-    hive_card, offer_region, page_add, page_android, page_computer, page_download, page_for_sites, page_help, page_hive, page_how, page_indexing, page_llms, page_manifesto, page_operator,
+    hive_card, offer_region, page_add, page_android, page_computer, page_download, page_for_sites, page_help, page_hive, page_how, page_indexing, page_llms, page_lost, page_manifesto, page_operator,
     AddLine,
     cabinet_sheets, render, render_results, robots_txt, sitemap_xml, stamp_census, BeeLine, CabinetSheets, MapLine, NodeChip,
     OperatorReport, PeerLine, ShellLine, VisitNumbers,
@@ -27,11 +29,20 @@ use tokio::net::TcpListener;
 use tokio_util::io::ReaderStream;
 
 use crate::updates::{announce, watch};
+use crate::engine::{hits_for, site_hits, ReadPool};
 use crate::{Engine, NodeError};
 
 #[derive(Clone)]
 struct AppState {
     engine: Arc<Mutex<Engine>>,
+    /// Чтение поиска и счётчика. Не тот замок, которым обход пишет страницы.
+    readers: Arc<ReadPool>,
+    lsh: Lsh,
+    /// Два числа главной. Не выдача.
+    census: Arc<Mutex<Option<(Instant, usize, usize)>>>,
+    /// Чтение кабинета. Не тот замок, которым обход пишет страницы.
+    ledger: Arc<Mutex<mds_index::Index>>,
+    db_path: PathBuf,
     releases: PathBuf,
     models: PathBuf,
     downloads: PathBuf,
@@ -82,15 +93,37 @@ struct SearchParams {
     adult: Option<String>,
     region: Option<String>,
     tab: Option<String>,
+    #[serde(default, deserialize_with = "blank_f64")]
     lat: Option<f64>,
+    #[serde(default, deserialize_with = "blank_f64")]
     lon: Option<f64>,
+    #[serde(default, deserialize_with = "blank_f64")]
     radius: Option<f64>,
+}
+
+fn parse_blank_f64(raw: Option<&str>) -> Option<f64> {
+    let text = raw?.trim();
+    if text.is_empty() {
+        None
+    } else {
+        text.parse().ok()
+    }
+}
+
+fn blank_f64<'de, D>(deserializer: D) -> Result<Option<f64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(parse_blank_f64(Option::<String>::deserialize(deserializer)?.as_deref()))
 }
 
 pub async fn serve(engine: Engine, config: ServeConfig) -> Result<(), NodeError> {
     let releases = config.releases.clone();
     let peers = config.peers.clone();
     tokio::spawn(watch(peers, releases));
+    let db_path = engine.database_path().to_path_buf();
+    let readers = Arc::new(ReadPool::open(&db_path)?);
+    let ledger = Arc::new(Mutex::new(mds_index::Index::open_read(&db_path)?));
     let engine = Arc::new(Mutex::new(engine));
     if let Some(base) = config.self_base.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
         engine
@@ -172,6 +205,11 @@ pub async fn serve(engine: Engine, config: ServeConfig) -> Result<(), NodeError>
     let model = model_generation(&config.models);
     let state = AppState {
         engine,
+        readers,
+        lsh: Lsh::new(),
+        census: Arc::new(Mutex::new(None)),
+        ledger,
+        db_path,
         releases: config.releases,
         models: config.models,
         downloads: config.downloads,
@@ -278,6 +316,7 @@ pub async fn serve(engine: Engine, config: ServeConfig) -> Result<(), NodeError>
         .route("/shell/work", get(shell_work))
         .route("/shell/pages", post(shell_pages))
         .route("/download/pchela-android.apk", get(download_android))
+        .fallback(lost_page)
         .layer(axum::middleware::from_fn_with_state(state.clone(), count_visit))
         .with_state(state);
     let listener = TcpListener::bind(&config.listen).await?;
@@ -289,6 +328,14 @@ pub async fn serve(engine: Engine, config: ServeConfig) -> Result<(), NodeError>
 fn stamp_search(mut response: Response, mark: crate::visits::SearchMark) -> Response {
     response.extensions_mut().insert(mark);
     response
+}
+
+async fn lost_page() -> Response {
+    Response::builder()
+        .status(StatusCode::NOT_FOUND)
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .body(Body::from(page_lost()))
+        .unwrap_or_else(|_| StatusCode::NOT_FOUND.into_response())
 }
 
 fn person_page(path: &str) -> bool {
@@ -385,12 +432,7 @@ async fn face_meta(
     let path = ask.path.unwrap_or_else(|| "/".into());
     let cookie = headers.get(header::COOKIE).and_then(|value| value.to_str().ok());
     let visit_cookie = remember_visit(&state, &path, cookie, None).await;
-    let (sites, pages) = state
-        .engine
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .census()
-        .unwrap_or((0, 0));
+    let (sites, pages) = census_cached(&state);
     let notice = mds_update::load_notice(&state.releases);
     let release_version = mds_update::load_newest(&state.releases)
         .ok()
@@ -417,12 +459,7 @@ async fn face_search(
     let paint = gather_search(&state, &headers, &params).await;
     let cookie = headers.get(header::COOKIE).and_then(|value| value.to_str().ok());
     let visit_cookie = remember_visit(&state, "/search", cookie, paint.mark).await;
-    let (sites, pages) = state
-        .engine
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .census()
-        .unwrap_or((0, 0));
+    let (sites, pages) = census_cached(&state);
     let notice = mds_update::load_notice(&state.releases);
     let (offer_label, offer_href) = match paint.offer {
         Some((label, href)) => (Some(label), Some(href)),
@@ -719,10 +756,11 @@ async fn peer_search(
     if query_lane(&req.text) == Lane::Hidden {
         return Ok(Json(SearchResponse { hits: Vec::new() }));
     }
-    let engine = state.engine.clone();
+    let readers = state.readers.clone();
+    let lsh = state.lsh.clone();
     let hits = tokio::task::spawn_blocking(move || {
-        let guard = engine.lock().unwrap_or_else(|poison| poison.into_inner());
-        guard.search_wire(&req)
+        let vector = req.vector.dequantize();
+        readers.call(|index| hits_for(index, &lsh, &req.text, &vector, 0))
     })
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -1087,7 +1125,7 @@ async fn operator_act(
         };
         return match door.issue_mcp() {
             Ok(secret) => Html(format!(
-                "<!doctype html><meta charset=\"utf-8\"><title>Ключ MCP</title><body><main><p>Ключ показан один раз. Адрес MCP: {base}/mcp на этом же сайте. Когда появится домен, тот же ключ пойдёт на https://admin.&lt;домен&gt;/mcp, порт 443.</p><pre>{}</pre><p><a href=\"{base}/operator\">Назад</a></p></main></body>",
+                "<!doctype html><meta charset=\"utf-8\"><title>Ключ MCP</title><body><main><p>Ключ показан один раз. Адрес MCP: {base}/mcp. Снаружи это https://admin.beesearch.ru/mcp.</p><pre>{}</pre><p><a href=\"{base}/operator\">Назад</a></p></main></body>",
                 secret
             ))
             .into_response(),
@@ -1366,13 +1404,26 @@ fn operator_on_this_machine(peer: SocketAddr, headers: &HeaderMap) -> bool {
     !proxied
 }
 
+fn census_cached(state: &AppState) -> (usize, usize) {
+    {
+        let slot = state.census.lock().unwrap_or_else(|poison| poison.into_inner());
+        if let Some((at, sites, pages)) = *slot {
+            if at.elapsed() < Duration::from_secs(8) {
+                return (sites, pages);
+            }
+        }
+    }
+    let counted = state.readers.call(|index| index.census().map_err(NodeError::from));
+    let Ok((sites, pages)) = counted else {
+        let slot = state.census.lock().unwrap_or_else(|poison| poison.into_inner());
+        return slot.map(|(_, sites, pages)| (sites, pages)).unwrap_or((0, 0));
+    };
+    *state.census.lock().unwrap_or_else(|poison| poison.into_inner()) = Some((Instant::now(), sites, pages));
+    (sites, pages)
+}
+
 fn painted(state: &AppState, html: String) -> Html<String> {
-    let (sites, pages) = state
-        .engine
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .census()
-        .unwrap_or((0, 0));
+    let (sites, pages) = census_cached(state);
     let notice = mds_update::load_notice(&state.releases);
     Html(mds_web::stamp_notice(stamp_census(html, sites, pages), notice.as_deref()))
 }
@@ -1541,7 +1592,7 @@ async fn download_zip(State(state): State<AppState>) -> Response {
     let dll = onnx_dll();
     let urls = b"# \xd0\xbf\xd0\xbe \xd0\xbe\xd0\xb4\xd0\xbd\xd0\xbe\xd0\xbc\xd1\x83 \xd0\xb0\xd0\xb4\xd1\x80\xd0\xb5\xd1\x81\xd1\x83 \xd0\xb2 \xd1\x81\xd1\x82\xd1\x80\xd0\xbe\xd0\xba\xd0\xb5\nhttps://tehnoveles.ru/\n";
     let readme = if dll.is_some() {
-        "Пчела для Windows.\r\nРядом лежат mds.exe, onnxruntime.dll и urls.txt.\r\nПолная нода:\r\nmds.exe node --listen 0.0.0.0:8080 --seeds urls.txt --follow-external --peers https://45.158.46.52\r\nЛёгкая пчела рядом с сайтом:\r\nmds.exe node --lite --site https://ваш-сайт --hive https://45.158.46.52\r\nИмя из журнала положите одной строкой в https://ваш-сайт/.well-known/pchela.txt\r\n"
+        "Пчела для Windows.\r\nРядом лежат mds.exe, onnxruntime.dll и urls.txt.\r\nПолная нода:\r\nmds.exe node --listen 0.0.0.0:8080 --seeds urls.txt --follow-external --peers https://beesearch.ru\r\nЛёгкая пчела рядом с сайтом:\r\nmds.exe node --lite --site https://ваш-сайт --hive https://beesearch.ru\r\nИмя из журнала положите одной строкой в https://ваш-сайт/.well-known/pchela.txt\r\n"
     } else {
         "Пчела для Windows.\r\nВ этом архиве нет onnxruntime.dll. Положите сборку ONNX Runtime 1.20 рядом с mds.exe, в файл onnxruntime.dll.\r\n"
     };
@@ -1598,20 +1649,23 @@ enum LocalReady {
 }
 
 async fn local_search(
-    engine: &Arc<Mutex<Engine>>,
+    state: &AppState,
     query: &str,
     kind_mask: u32,
 ) -> Result<(Vec<Hit>, Option<(QuantVector, u16)>), NodeError> {
-    let started = std::time::Instant::now();
-    let eng = engine.clone();
+    let started = Instant::now();
+    let readers = state.readers.clone();
+    let eng = state.engine.clone();
     let query_for_cache = query.to_string();
     let phase = tokio::task::spawn_blocking(move || {
-        let mut guard = eng.lock().unwrap_or_else(|poison| poison.into_inner());
         if let Some(ask) = site_ask(&query_for_cache) {
-            let hits = guard.pages_of_site(&ask.host, &ask.words, kind_mask)?;
-            guard.note_search(started.elapsed().as_millis());
+            let hits = readers.call(|index| site_hits(index, &ask.host, &ask.words, kind_mask))?;
+            eng.lock()
+                .unwrap_or_else(|poison| poison.into_inner())
+                .note_search(started.elapsed().as_millis());
             return Ok::<_, NodeError>(LocalReady::Ready(hits, None));
         }
+        let mut guard = eng.lock().unwrap_or_else(|poison| poison.into_inner());
         if let Some((hits, vector)) = guard.cached_search(&query_for_cache, kind_mask) {
             let bucket = guard.semantic_bucket(&vector);
             guard.note_search(started.elapsed().as_millis());
@@ -1624,18 +1678,18 @@ async fn local_search(
     .map_err(|_| NodeError::Message("поиск прерван".into()))??;
     match phase {
         LocalReady::Ready(hits, ranked) => Ok((hits, ranked)),
-        LocalReady::NeedModel => finish_fresh_search(engine, query, kind_mask, started).await,
+        LocalReady::NeedModel => finish_fresh_search(state, query, kind_mask, started).await,
     }
 }
 
 async fn finish_fresh_search(
-    engine: &Arc<Mutex<Engine>>,
+    state: &AppState,
     query: &str,
     kind_mask: u32,
-    started: std::time::Instant,
+    started: Instant,
 ) -> Result<(Vec<Hit>, Option<(QuantVector, u16)>), NodeError> {
     let mut embedder = loop {
-        let eng = engine.clone();
+        let eng = state.engine.clone();
         let taken = tokio::task::spawn_blocking(move || eng.lock().unwrap_or_else(|poison| poison.into_inner()).take_model())
             .await
             .map_err(|_| NodeError::Message("поиск прерван".into()))?;
@@ -1655,7 +1709,7 @@ async fn finish_fresh_search(
     let vector = match vector {
         Ok(vector) => vector,
         Err(err) => {
-            let eng = engine.clone();
+            let eng = state.engine.clone();
             let _ = tokio::task::spawn_blocking(move || {
                 let mut guard = eng.lock().unwrap_or_else(|poison| poison.into_inner());
                 guard.give_model(embedder);
@@ -1665,19 +1719,32 @@ async fn finish_fresh_search(
             return Err(NodeError::Message(err.to_string()));
         }
     };
-    let eng = engine.clone();
-    let query_owned = query.to_string();
-    tokio::task::spawn_blocking(move || {
+    let eng = state.engine.clone();
+    let _ = tokio::task::spawn_blocking(move || {
         let mut guard = eng.lock().unwrap_or_else(|poison| poison.into_inner());
         guard.give_model(embedder);
         guard.set_search_first(false);
-        let (hits, quant) = guard.finish_search(&query_owned, kind_mask, vector)?;
-        let bucket = guard.semantic_bucket(&quant);
-        guard.note_search(started.elapsed().as_millis());
-        Ok((hits, Some((quant, bucket))))
     })
-    .await
-    .map_err(|_| NodeError::Message("поиск прерван".into()))?
+    .await;
+    let quant = quantize(&vector).map_err(|err| NodeError::Message(err.to_string()))?;
+    let readers = state.readers.clone();
+    let lsh = state.lsh.clone();
+    let query_owned = query.to_string();
+    let ranked = tokio::task::spawn_blocking(move || readers.call(|index| hits_for(index, &lsh, &query_owned, &vector, kind_mask)))
+        .await
+        .map_err(|_| NodeError::Message("поиск прерван".into()))??;
+    let bucket = state.lsh.bucket(&quant.dequantize());
+    let eng = state.engine.clone();
+    let query_kept = query.to_string();
+    let quant_kept = quant.clone();
+    let hits_kept = ranked.clone();
+    let _ = tokio::task::spawn_blocking(move || {
+        let mut guard = eng.lock().unwrap_or_else(|poison| poison.into_inner());
+        guard.keep_search(&query_kept, kind_mask, &hits_kept, quant_kept);
+        guard.note_search(started.elapsed().as_millis());
+    })
+    .await;
+    Ok((ranked, Some((quant, bucket))))
 }
 
 async fn spool_loop(engine: Arc<Mutex<Engine>>) {
@@ -1813,7 +1880,7 @@ async fn gather_search(state: &AppState, headers: &HeaderMap, params: &SearchPar
     let adult_open = params.adult.as_deref() == Some("1") || cookie_is(headers, "mds_adult", "1");
     let tab = params.tab.clone().unwrap_or_default();
     let kind_mask = tab_mask(tab.trim());
-    let local = local_search(&state.engine, &query, kind_mask).await;
+    let local = local_search(state, &query, kind_mask).await;
     match local {
         Ok((mut hits, ranked)) => {
             if let Some((vector, bucket)) = ranked {
@@ -1918,11 +1985,16 @@ async fn compose_cabinet(state: &AppState, csrf: &str, base: &str) -> Option<(Op
         .cloned()
         .collect();
     let engine = state.engine.clone();
+    let ledger = state.ledger.clone();
+    let db_path = state.db_path.clone();
     let hosts_for_db = hosts.clone();
     let rows = tokio::task::spawn_blocking(move || {
-        let mut guard = engine.lock().unwrap_or_else(|poison| poison.into_inner());
-        let searches = guard.searches_last_minute().unwrap_or(0);
-        let (_, avg_ms) = guard.load_snapshot();
+        let avg_ms = {
+            let mut writing = engine.lock().unwrap_or_else(|poison| poison.into_inner());
+            writing.load_snapshot().1
+        };
+        let guard = ledger.lock().unwrap_or_else(|poison| poison.into_inner());
+        let searches = guard.queries_last_minute().unwrap_or(0) as u64;
         let pace = guard.shell_pace().unwrap_or(mds_index::ShellPace { batch: 2, gap_min: 10, window_max: 4 });
         let span = |name: &str| guard.shell_span(name).unwrap_or((0, 0));
         let shells = (span("day"), span("week"), span("month"), span("all"), pace);
@@ -1947,6 +2019,13 @@ async fn compose_cabinet(state: &AppState, csrf: &str, base: &str) -> Option<(Op
             .map(|day| (day.day, day.new_pages))
             .collect::<Vec<_>>();
         let load = guard.load_hours(24).unwrap_or_default();
+        let activity = mds_web::ActivityBook {
+            minutes: map_activity(guard.activity_span("minute", 60).unwrap_or_default()),
+            hours: map_activity(guard.activity_span("hour", 48).unwrap_or_default()),
+            days: map_activity(guard.activity_span("day", 30).unwrap_or_default()),
+            weeks: map_activity(guard.activity_span("week", 16).unwrap_or_default()),
+            months: map_activity(guard.activity_span("month", 12).unwrap_or_default()),
+        };
         let picture = (
             sites,
             guard.intake_sum("new_pages", "day").unwrap_or(0),
@@ -1974,11 +2053,11 @@ async fn compose_cabinet(state: &AppState, csrf: &str, base: &str) -> Option<(Op
         let report_head = (
             guard.len().unwrap_or(0) as u64,
             guard.queue_len().unwrap_or(0) as u64,
-            guard.db_bytes(),
+            std::fs::metadata(&db_path).map(|meta| meta.len()).unwrap_or(0),
             searches,
             avg_ms,
         );
-        guard.recent_queries(50).map(|rows| (report_head, shells, bees, rows, picture))
+        guard.recent_queries(50).map(|rows| (report_head, shells, bees, rows, picture, activity))
     })
     .await;
     let peers = {
@@ -2004,7 +2083,7 @@ async fn compose_cabinet(state: &AppState, csrf: &str, base: &str) -> Option<(Op
             .collect::<Vec<_>>()
     };
     let packed = match rows {
-        Ok(Ok(((pages, queue, db_bytes, searches_per_minute, avg_ms), shells, bees, rows, picture))) => {
+        Ok(Ok(((pages, queue, db_bytes, searches_per_minute, avg_ms), shells, bees, rows, picture, activity))) => {
             let view: Vec<(String, i64, i64, i64, i64)> = rows
                 .into_iter()
                 .map(|row| (row.text, row.results, row.words, row.meaning, row.adult))
@@ -2070,6 +2149,8 @@ async fn compose_cabinet(state: &AppState, csrf: &str, base: &str) -> Option<(Op
                     refresh_due: picture.18,
                     refresh_batch: picture.19,
                     refresh_gap: picture.20,
+                    span: String::new(),
+                    activity,
                 };
             Some((report, sheets))
         }
@@ -2088,7 +2169,8 @@ async fn operator(
         return see_other(&format!("{base}/login"));
     };
     match compose_cabinet(&state, &csrf, base).await {
-        Some((report, sheets)) => {
+        Some((mut report, sheets)) => {
+            report.span = query_value(&uri, "span");
             let sheet = query_sheet(&uri);
             let (stats, rest) = cabinet_sheets(&sheets, &sheet);
             painted(&state, page_operator(&report, &stats, &rest, &sheet)).into_response()
@@ -2150,7 +2232,15 @@ async fn query_peers(
     }
     let mut out = Vec::new();
     let mut samples = Vec::new();
-    while let Some(joined) = set.join_next().await {
+    let deadline = tokio::time::Instant::now() + Duration::from_millis(300);
+    loop {
+        let next = tokio::time::timeout_at(deadline, set.join_next()).await;
+        let Ok(joined) = next else {
+            break;
+        };
+        let Some(joined) = joined else {
+            break;
+        };
         if let Ok((peer, latency_ms, alive, hits)) = joined {
             samples.push((peer, latency_ms, alive));
             out.extend(hits);
@@ -2624,6 +2714,7 @@ fn admin_router(state: AppState) -> Router {
     Router::new()
         .merge(door)
         .nest("/admin", prefixed)
+        .fallback(lost_page)
         .with_state(state)
 }
 
@@ -2733,18 +2824,34 @@ async fn mcp_act(State(state): State<AppState>, headers: HeaderMap, request: axu
 }
 
 fn query_sheet(uri: &axum::http::Uri) -> String {
+    let sheet = query_value(uri, "sheet");
+    if sheet.is_empty() { "node".into() } else { sheet }
+}
+
+fn query_value(uri: &axum::http::Uri, name: &str) -> String {
     uri.query()
         .and_then(|query| {
             query.split('&').find_map(|part| {
                 let (key, value) = part.split_once('=')?;
-                if key == "sheet" {
-                    Some(value.to_string())
-                } else {
-                    None
-                }
+                if key == name { Some(value.to_string()) } else { None }
             })
         })
-        .unwrap_or_else(|| "node".into())
+        .unwrap_or_default()
+}
+
+fn map_activity(slots: Vec<mds_index::ActivitySlot>) -> Vec<mds_web::ActivityPoint> {
+    slots
+        .into_iter()
+        .map(|slot| mds_web::ActivityPoint {
+            label: slot.bucket,
+            new_pages: slot.new_pages,
+            new_hosts: slot.new_hosts,
+            walked: slot.walked,
+            shell_pages: slot.shell_pages,
+            cpu: slot.cpu,
+            ram: slot.ram,
+        })
+        .collect()
 }
 
 fn cabinet_csrf(state: &AppState, headers: &HeaderMap) -> Option<String> {
@@ -2754,15 +2861,15 @@ fn cabinet_csrf(state: &AppState, headers: &HeaderMap) -> Option<String> {
 }
 
 fn cabinet_view(state: &AppState, csrf: &str, base: &str, bees: &[String]) -> CabinetSheets {
-    let guard = state.engine.lock().unwrap_or_else(|poison| poison.into_inner());
-    let day = guard.query_counts("day").unwrap_or_default();
-    let week = guard.query_counts("week").unwrap_or_default();
-    let month = guard.query_counts("month").unwrap_or_default();
+    let guard = state.ledger.lock().unwrap_or_else(|poison| poison.into_inner());
+    let day = guard.query_counts("day", 20).unwrap_or_default();
+    let week = guard.query_counts("week", 20).unwrap_or_default();
+    let month = guard.query_counts("month", 20).unwrap_or_default();
     let visits_day = guard.visit_span("day").unwrap_or_default();
     let visits_week = guard.visit_span("week").unwrap_or_default();
     let visits_month = guard.visit_span("month").unwrap_or_default();
     let days = guard.visit_days(30).unwrap_or_default();
-    let pages = guard.list_index(None, None, 0).unwrap_or_default();
+    let pages = guard.list_index(None, None, 0, 20).unwrap_or_default();
     let kind_counts = guard.kind_counts().unwrap_or_default();
     let nodes = guard.known_nodes().unwrap_or_default();
     let guard_muted = guard.muted_hosts().unwrap_or_default();
@@ -2974,7 +3081,8 @@ async fn peer_search_v1(State(state): State<AppState>, Json(packet): Json<Signed
     {
         return Ok(Json(mds_wire::SearchAnswerV1 { hits: Vec::new(), compatible: false }));
     }
-    let engine = state.engine.clone();
+    let readers = state.readers.clone();
+    let lsh = state.lsh.clone();
     let req = SearchRequest {
         text: query.text.clone(),
         vector: mds_types::QuantVector {
@@ -2983,8 +3091,8 @@ async fn peer_search_v1(State(state): State<AppState>, Json(packet): Json<Signed
         },
     };
     let hits = tokio::task::spawn_blocking(move || {
-        let guard = engine.lock().unwrap_or_else(|poison| poison.into_inner());
-        guard.search_wire(&req)
+        let vector = req.vector.dequantize();
+        readers.call(|index| hits_for(index, &lsh, &req.text, &vector, 0))
     })
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -3171,6 +3279,15 @@ mod tests {
         assert!(!operator_on_this_machine(local, &real));
         let remote: SocketAddr = "203.0.113.8:443".parse().unwrap();
         assert!(!operator_on_this_machine(remote, &HeaderMap::new()));
+    }
+
+    #[test]
+    fn empty_coordinates_are_not_a_broken_search() {
+        assert_eq!(parse_blank_f64(Some("")), None);
+        assert_eq!(parse_blank_f64(Some("  ")), None);
+        assert_eq!(parse_blank_f64(None), None);
+        assert_eq!(parse_blank_f64(Some("55.75")), Some(55.75));
+        assert_eq!(parse_blank_f64(Some("тут")), None);
     }
 }
 
