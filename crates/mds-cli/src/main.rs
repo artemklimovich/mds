@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+mod author;
+
 use clap::{Parser, Subcommand};
 use mds_crawl::CrawlPolicy;
 use mds_node::{
@@ -13,7 +15,11 @@ use mds_update::{
 };
 
 #[derive(Parser)]
-#[command(name = "mds", about = "Децентрализованный поиск MDS")]
+#[command(
+    name = "mds",
+    version,
+    about = "Децентрализованный поиск MDS. Автор: Артём Климович, +79060331235, artem.klimovich@gmail.com."
+)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -132,6 +138,7 @@ enum Command {
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    std::hint::black_box(author::NOTICE);
     let cli = Cli::parse();
     match cli.command {
         Command::Node {

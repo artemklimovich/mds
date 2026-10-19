@@ -17,7 +17,8 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "MIT"
+authors = ["Артём Климович <artem.klimovich@gmail.com>"]
+license = "LicenseRef-MDS"
 publish = false
 
 [workspace.dependencies]
