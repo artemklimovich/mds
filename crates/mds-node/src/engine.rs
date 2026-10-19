@@ -14,6 +14,10 @@ use mds_wire::SearchRequest;
 use crate::NodeError;
 
 const CACHE_TTL: Duration = Duration::from_secs(300);
+
+fn cache_key(query: &str, kind_mask: u32, theme_mask: u32) -> String {
+    format!("{kind_mask}:{theme_mask}:{}", query.trim().to_lowercase())
+}
 const CACHE_MAX: usize = 64;
 
 struct CachedQuery {
@@ -87,10 +91,11 @@ pub fn hits_for(
     query: &str,
     vector: &[f32],
     kind_mask: u32,
+    theme_mask: u32,
 ) -> Result<Vec<Hit>, NodeError> {
     let bucket = lsh.bucket(vector);
-    let words = index.search_words(query, 100, kind_mask)?;
-    let meanings = index.search_vectors(vector, Some(bucket), 100, kind_mask)?;
+    let words = index.search_words(query, 100, kind_mask, theme_mask)?;
+    let meanings = index.search_vectors(vector, Some(bucket), 100, kind_mask, theme_mask)?;
     let mut ids: Vec<i64> = words
         .iter()
         .map(|hit| hit.id)
@@ -113,8 +118,8 @@ pub fn hits_for(
     Ok(hits)
 }
 
-pub fn site_hits(index: &Index, host: &str, words: &str, kind_mask: u32) -> Result<Vec<Hit>, NodeError> {
-    let pages = index.pages_of_host(host, kind_mask, 100)?;
+pub fn site_hits(index: &Index, host: &str, words: &str, kind_mask: u32, theme_mask: u32) -> Result<Vec<Hit>, NodeError> {
+    let pages = index.pages_of_host(host, kind_mask, theme_mask, 100)?;
     let needles: Vec<String> = words
         .split_whitespace()
         .map(|word| word.to_lowercase())
@@ -446,7 +451,7 @@ impl Engine {
     }
 
     pub fn search(&mut self, query: &str) -> Result<Vec<Hit>, NodeError> {
-        let (hits, _) = self.search_with_vector(query, 0)?;
+        let (hits, _) = self.search_with_vector(query, 0, 0)?;
         Ok(hits)
     }
 
@@ -463,8 +468,8 @@ impl Engine {
     }
 
     /// Повтор за последние пять минут. Модель не нужна.
-    pub fn cached_search(&mut self, query: &str, kind_mask: u32) -> Option<(Vec<Hit>, QuantVector)> {
-        let key = format!("{kind_mask}:{}", query.trim().to_lowercase());
+    pub fn cached_search(&mut self, query: &str, kind_mask: u32, theme_mask: u32) -> Option<(Vec<Hit>, QuantVector)> {
+        let key = cache_key(query, kind_mask, theme_mask);
         let entry = self.cache.get(&key)?;
         if entry.saved_at.elapsed() >= CACHE_TTL {
             return None;
@@ -476,16 +481,17 @@ impl Engine {
         &mut self,
         query: &str,
         kind_mask: u32,
+        theme_mask: u32,
         vector: Vec<f32>,
     ) -> Result<(Vec<Hit>, QuantVector), NodeError> {
         let quant = quantize(&vector).map_err(|err| NodeError::Message(err.to_string()))?;
-        let hits = self.search_local(query, &vector, kind_mask)?;
-        self.remember_cached(query, kind_mask, &hits, quant.clone());
+        let hits = self.search_local(query, &vector, kind_mask, theme_mask)?;
+        self.remember_cached(query, kind_mask, theme_mask, &hits, quant.clone());
         Ok((hits, quant))
     }
 
-    pub fn search_with_vector(&mut self, query: &str, kind_mask: u32) -> Result<(Vec<Hit>, QuantVector), NodeError> {
-        if let Some(found) = self.cached_search(query, kind_mask) {
+    pub fn search_with_vector(&mut self, query: &str, kind_mask: u32, theme_mask: u32) -> Result<(Vec<Hit>, QuantVector), NodeError> {
+        if let Some(found) = self.cached_search(query, kind_mask, theme_mask) {
             return Ok(found);
         }
         let embedder = self
@@ -493,15 +499,15 @@ impl Engine {
             .as_mut()
             .ok_or_else(|| NodeError::Message("модель занята складом".into()))?;
         let vector = embedder.embed_query(query)?;
-        self.finish_search(query, kind_mask, vector)
+        self.finish_search(query, kind_mask, theme_mask, vector)
     }
 
-    pub fn keep_search(&mut self, query: &str, kind_mask: u32, hits: &[Hit], vector: QuantVector) {
-        self.remember_cached(query, kind_mask, hits, vector);
+    pub fn keep_search(&mut self, query: &str, kind_mask: u32, theme_mask: u32, hits: &[Hit], vector: QuantVector) {
+        self.remember_cached(query, kind_mask, theme_mask, hits, vector);
     }
 
-    fn remember_cached(&mut self, query: &str, kind_mask: u32, hits: &[Hit], vector: QuantVector) {
-        let key = format!("{kind_mask}:{}", query.trim().to_lowercase());
+    fn remember_cached(&mut self, query: &str, kind_mask: u32, theme_mask: u32, hits: &[Hit], vector: QuantVector) {
+        let key = cache_key(query, kind_mask, theme_mask);
         if self.cache.len() >= CACHE_MAX {
             self.cache.clear();
         }
@@ -517,11 +523,11 @@ impl Engine {
 
     pub fn search_wire(&self, req: &SearchRequest) -> Result<Vec<Hit>, NodeError> {
         let vector = req.vector.dequantize();
-        self.search_local(&req.text, &vector, 0)
+        self.search_local(&req.text, &vector, 0, 0)
     }
 
-    fn search_local(&self, query: &str, vector: &[f32], kind_mask: u32) -> Result<Vec<Hit>, NodeError> {
-        hits_for(&self.index, &self.lsh, query, vector, kind_mask)
+    fn search_local(&self, query: &str, vector: &[f32], kind_mask: u32, theme_mask: u32) -> Result<Vec<Hit>, NodeError> {
+        hits_for(&self.index, &self.lsh, query, vector, kind_mask, theme_mask)
     }
 
     fn ingest(&mut self, pages: Vec<FetchedPage>) -> Result<usize, NodeError> {
@@ -680,8 +686,8 @@ impl Engine {
         Ok(self.index.has_shop_feed(url)?)
     }
 
-    pub fn pages_of_site(&self, host: &str, words: &str, kind_mask: u32) -> Result<Vec<Hit>, NodeError> {
-        site_hits(&self.index, host, words, kind_mask)
+    pub fn pages_of_site(&self, host: &str, words: &str, kind_mask: u32, theme_mask: u32) -> Result<Vec<Hit>, NodeError> {
+        site_hits(&self.index, host, words, kind_mask, theme_mask)
     }
 
     pub fn searches_last_minute(&self) -> Result<u64, NodeError> {
@@ -852,6 +858,14 @@ impl Engine {
 
     pub fn set_bee_pace(&self, batch: i64, gap_secs: i64) -> Result<(), NodeError> {
         Ok(self.index.set_bee_pace(batch, gap_secs)?)
+    }
+
+    pub fn bees_page(&self) -> bool {
+        self.index.bees_page().unwrap_or(true)
+    }
+
+    pub fn set_bees_page(&self, on: bool) -> Result<(), NodeError> {
+        Ok(self.index.set_bees_page(on)?)
     }
 
     pub fn intake_sum(&self, column: &str, span: &str) -> Result<i64, NodeError> {

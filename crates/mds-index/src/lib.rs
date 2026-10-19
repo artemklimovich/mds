@@ -4,8 +4,16 @@ use std::path::Path;
 use mds_crawl::{is_broken_url, is_near_duplicate, is_not_found, strip_boilerplate, tidy_url, FetchedPage};
 use mds_types::{
     all_kinds, bare_host, host_of_url, is_channel_host, is_marketplace_host, is_press_front, is_press_host, is_product_card, kind_from_stored, cosine,
-    QuantVector, EMBED_DIMS, HOST_PAGE_CAP, KIND_CHANNEL, KIND_NEWS, KIND_VIDEO,
+    QuantVector, EMBED_DIMS, HOST_PAGE_CAP, KIND_CHANNEL, KIND_NEWS, KIND_VIDEO, THEME_BITS,
 };
+
+fn news_shelf(kind_mask: u32) -> u32 {
+    if kind_mask == KIND_NEWS {
+        1
+    } else {
+        0
+    }
+}
 use rusqlite::{params, Connection};
 use thiserror::Error;
 
@@ -565,7 +573,7 @@ impl Index {
         Ok(())
     }
 
-    pub fn search_words(&self, query: &str, limit: usize, kind_mask: u32) -> Result<Vec<WordMatch>, IndexError> {
+    pub fn search_words(&self, query: &str, limit: usize, kind_mask: u32, theme_mask: u32) -> Result<Vec<WordMatch>, IndexError> {
         let Some(match_query) = fts_query(query) else {
             return Ok(Vec::new());
         };
@@ -575,11 +583,20 @@ impl Index {
              JOIN pages ON pages.id = pages_fts.rowid
              WHERE pages_fts MATCH ?1
                AND ((?3 != 0 AND (pages.kind & ?3) != 0) OR (?3 = 0 AND (pages.kind & ?4) = 0))
+               AND (?5 = 0 OR (pages.kind & ?5) != 0 OR (?6 != 0 AND (pages.kind & ?7) = 0))
              ORDER BY bm25(pages_fts)
              LIMIT ?2",
         )?;
         let rows = stmt.query_map(
-            params![match_query, limit as i64, kind_mask, KIND_NEWS | KIND_CHANNEL],
+            params![
+                match_query,
+                limit as i64,
+                kind_mask,
+                KIND_NEWS | KIND_CHANNEL,
+                theme_mask,
+                news_shelf(kind_mask),
+                THEME_BITS
+            ],
             |row| row.get::<_, i64>(0),
         )?;
         let mut out = Vec::new();
@@ -598,14 +615,12 @@ impl Index {
         bucket: Option<u16>,
         limit: usize,
         kind_mask: u32,
+        theme_mask: u32,
     ) -> Result<Vec<VectorMatch>, IndexError> {
         let mut scored = match bucket {
-            Some(bucket) => self.score_bucket_neighbors(query, bucket, kind_mask)?,
-            None => Vec::new(),
+            Some(bucket) => self.score_bucket_neighbors(query, bucket, kind_mask, theme_mask)?,
+            None => self.score_all_vectors(query, kind_mask, theme_mask)?,
         };
-        if scored.len() < limit {
-            scored = self.score_all_vectors(query, kind_mask)?;
-        }
         scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         Ok(scored
             .into_iter()
@@ -624,6 +639,7 @@ impl Index {
         query: &[f32],
         bucket: u16,
         kind_mask: u32,
+        theme_mask: u32,
     ) -> Result<Vec<(i64, f32)>, IndexError> {
         let mut b = [0_i64; 17];
         b[0] = bucket as i64;
@@ -633,12 +649,14 @@ impl Index {
         let mut stmt = self.conn.prepare(
             "SELECT id, scale, vector, kind FROM pages
              WHERE semantic_bucket IN (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)
-               AND ((?18 != 0 AND (kind & ?18) != 0) OR (?18 = 0 AND (kind & ?19) = 0))",
+               AND ((?18 != 0 AND (kind & ?18) != 0) OR (?18 = 0 AND (kind & ?19) = 0))
+               AND (?20 = 0 OR (kind & ?20) != 0 OR (?21 != 0 AND (kind & ?22) = 0))",
         )?;
         let rows = stmt.query_map(
             params![
                 b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8],
-                b[9], b[10], b[11], b[12], b[13], b[14], b[15], b[16], kind_mask, KIND_NEWS | KIND_CHANNEL
+                b[9], b[10], b[11], b[12], b[13], b[14], b[15], b[16], kind_mask, KIND_NEWS | KIND_CHANNEL,
+                theme_mask, news_shelf(kind_mask), THEME_BITS
             ],
             |row| {
                 Ok((
@@ -651,13 +669,17 @@ impl Index {
         score_rows(query, rows)
     }
 
-    fn score_all_vectors(&self, query: &[f32], kind_mask: u32) -> Result<Vec<(i64, f32)>, IndexError> {
+    fn score_all_vectors(&self, query: &[f32], kind_mask: u32, theme_mask: u32) -> Result<Vec<(i64, f32)>, IndexError> {
         let mut stmt = self
             .conn
             .prepare(
-                "SELECT id, scale, vector FROM pages WHERE ((?1 != 0 AND (kind & ?1) != 0) OR (?1 = 0 AND (kind & ?2) = 0))",
+                "SELECT id, scale, vector FROM pages
+                 WHERE ((?1 != 0 AND (kind & ?1) != 0) OR (?1 = 0 AND (kind & ?2) = 0))
+                   AND (?3 = 0 OR (kind & ?3) != 0 OR (?4 != 0 AND (kind & ?5) = 0))",
             )?;
-        let rows = stmt.query_map(params![kind_mask, KIND_NEWS | KIND_CHANNEL], |row| {
+        let rows = stmt.query_map(
+            params![kind_mask, KIND_NEWS | KIND_CHANNEL, theme_mask, news_shelf(kind_mask), THEME_BITS],
+            |row| {
             Ok((
                 row.get::<_, i64>(0)?,
                 row.get::<_, f32>(1)?,
@@ -1292,7 +1314,7 @@ impl Index {
         Ok(out)
     }
 
-    pub fn pages_of_host(&self, host: &str, kind_mask: u32, limit: usize) -> Result<Vec<PageRow>, IndexError> {
+    pub fn pages_of_host(&self, host: &str, kind_mask: u32, theme_mask: u32, limit: usize) -> Result<Vec<PageRow>, IndexError> {
         let bare = mds_types::bare_host(host);
         let www = format!("www.{bare}");
         let limit = limit.min(100) as i64;
@@ -1301,11 +1323,21 @@ impl Index {
              FROM pages
              WHERE (host = ?1 OR host = ?2)
                AND ((?3 != 0 AND (kind & ?3) != 0) OR (?3 = 0 AND (kind & ?4) = 0))
+               AND (?5 = 0 OR (kind & ?5) != 0 OR (?6 != 0 AND (kind & ?7) = 0))
              ORDER BY id DESC
-             LIMIT ?5",
+             LIMIT ?8",
         )?;
         let rows = stmt.query_map(
-            params![bare, www, kind_mask, mds_types::KIND_NEWS | mds_types::KIND_CHANNEL, limit],
+            params![
+                bare,
+                www,
+                kind_mask,
+                mds_types::KIND_NEWS | mds_types::KIND_CHANNEL,
+                theme_mask,
+                news_shelf(kind_mask),
+                THEME_BITS,
+                limit
+            ],
             |row| {
                 Ok(PageRow {
                     id: row.get(0)?,
@@ -1631,7 +1663,7 @@ impl Index {
         let limit = limit.clamp(1, 200);
         let q_trim = q.trim();
         let word_ids: Option< std::collections::HashSet<i64> > = if !q_trim.is_empty() {
-            let matches = self.search_words(q_trim, 2000, kind_mask)?;
+            let matches = self.search_words(q_trim, 2000, kind_mask, 0)?;
             if !matches.is_empty() {
                 Some(matches.into_iter().map(|m| m.id).collect())
             } else {
@@ -2250,6 +2282,15 @@ impl Index {
         self.meta_set("bee_batch", &clamp_meta(Some(batch.to_string()), 1, 24, 4).to_string())?;
         self.meta_set("bee_gap", &clamp_meta(Some(gap_secs.to_string()), 60, 3600, 600).to_string())?;
         Ok(())
+    }
+
+    /// Раздел «Всё о пчёлах». Пустая метка значит «включён»: чужая нода выключает его сама.
+    pub fn bees_page(&self) -> Result<bool, IndexError> {
+        Ok(self.meta_get("bees_page")?.as_deref() != Some("0"))
+    }
+
+    pub fn set_bees_page(&self, on: bool) -> Result<(), IndexError> {
+        self.meta_set("bees_page", if on { "1" } else { "0" })
     }
 
     pub fn shell_ceiling(&self) -> Result<ShellCeiling, IndexError> {
@@ -3276,12 +3317,14 @@ mod tests {
                 1,
             )
             .unwrap();
-        let hits = index.search_words("MDSBOLT42", 10, 0).unwrap();
+        let hits = index.search_words("MDSBOLT42", 10, 0, 0).unwrap();
         assert_eq!(hits.len(), 1);
-        let missed = index.search_words("как лечить собаку", 10, 0).unwrap();
+        let missed = index.search_words("как лечить собаку", 10, 0, 0).unwrap();
         assert!(missed.is_empty());
-        let vec_hits = index.search_vectors(&vector, Some(1), 10, 0).unwrap();
+        let vec_hits = index.search_vectors(&vector, Some(1), 10, 0, 0).unwrap();
         assert_eq!(vec_hits.len(), 1);
+        let far = index.search_vectors(&vector, Some(6), 10, 0, 0).unwrap();
+        assert!(far.is_empty());
         index
             .enqueue_urls(&["https://shop.example/a".into(), "https://shop.example/b".into()])
             .unwrap();
@@ -3539,7 +3582,7 @@ mod tests {
         let stored = page("https://shop.example/jar", "Банка", "Стеклянная тара с пасеки");
         index.remember_anchor("https://shop.example/jar", "мёд").unwrap();
         index.insert(&stored, &quant, &[4; 16], 1).unwrap();
-        let hits = index.search_words("мёд", 10, 0).unwrap();
+        let hits = index.search_words("мёд", 10, 0, 0).unwrap();
         assert_eq!(hits.len(), 1);
         let later = index.pages_after(0, 10).unwrap();
         assert_eq!(later.len(), 1);

@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use mds_types::{host_of_url, open_feed, press_feed, region_names, tab_mask, Hit};
+use mds_types::{host_of_url, open_feed, press_feed, region_names, tab_mask, theme_mask, Hit};
 use serde::{Deserialize, Serialize};
 
 pub const PAGE_SIZE: usize = 25;
@@ -21,6 +21,7 @@ const PUBLIC_PATHS: &[&str] = &[
     "/add",
     "/llms",
     "/help",
+    "/bees",
     "/android",
     "/hive",
     "/computer",
@@ -76,7 +77,7 @@ pub fn offer_region(page: String, label: &str, href: &str) -> String {
 }
 
 pub fn render(query: &str, hits: &[Hit], page: usize, error: Option<&str>) -> String {
-    render_results(query, hits, &[], false, page, error, None, "")
+    render_results(query, hits, &[], false, page, error, None, "", "", None, None, None, true)
 }
 
 pub fn render_results(
@@ -88,6 +89,11 @@ pub fn render_results(
     error: Option<&str>,
     region: Option<&str>,
     tab: &str,
+    theme: &str,
+    lat: Option<f64>,
+    lon: Option<f64>,
+    radius: Option<f64>,
+    show_bees: bool,
 ) -> String {
     let page = visible_page(page, hits.len());
     let mut body = if let Some(error) = error {
@@ -95,7 +101,7 @@ pub fn render_results(
     } else if query.is_empty() {
         "<p class=\"hint\">Поиск по страницам, которые обошла эта пчела. Слова и смысл, на русском и на английском, без фильтра по языку.</p>".into()
     } else if hits.is_empty() && adult.is_empty() {
-        if tab_mask(tab) == 0 {
+        if tab_mask(tab) == 0 && theme_mask(theme) == 0 {
             "<p class=\"hint\">Ничего не нашлось.</p>".into()
         } else {
             "<p class=\"hint\">В этой вкладке пока нет страниц.</p>".into()
@@ -176,14 +182,14 @@ pub fn render_results(
         if open_list {
             list.push_str("</ol>");
         }
-        list.push_str(&pager(query, region, tab, page, hits.len()));
+        list.push_str(&pager(query, region, tab, theme, lat, lon, radius, page, hits.len()));
         list.push_str(&adult_section(query, adult, adult_open));
         list
     };
     if body.contains("class=\"wire") {
         body.push_str(WIRE_SCRIPT);
     }
-    document(query, &body, true, query.is_empty() && error.is_none(), region, tab)
+    document(query, &body, true, query.is_empty() && error.is_none(), region, tab, theme, lat, lon, radius, show_bees)
 }
 
 fn news_rail(hit: &Hit, seen: &mut HashSet<String>) -> String {
@@ -234,9 +240,22 @@ fn wordmark() -> String {
     )
 }
 
-fn document(query: &str, body: &str, autofocus: bool, home: bool, region: Option<&str>, tab: &str) -> String {
+fn document(
+    query: &str,
+    body: &str,
+    autofocus: bool,
+    home: bool,
+    region: Option<&str>,
+    tab: &str,
+    theme: &str,
+    lat: Option<f64>,
+    lon: Option<f64>,
+    radius: Option<f64>,
+    show_bees: bool,
+) -> String {
     let q = escape(query);
     let focus = if autofocus { " autofocus" } else { "" };
+    let clear_hidden = if query.trim().is_empty() { " hidden" } else { "" };
     let root = if home { " class=\"home\"" } else { "" };
     let mark = wordmark();
     let english = if home { "<p class=\"en\">Bee search</p>" } else { "" };
@@ -266,6 +285,9 @@ form:has(details[open]) {{ margin-bottom: 58px; }}
 h2.band {{ font-size: 16px; font-weight: 600; margin: 8px 0 12px; }}
 textarea[name=q] {{ flex: 1; min-width: 0; box-sizing: border-box; min-height: 40px; max-height: 112px; border: 0; margin: 0; padding: 8px 2px; resize: none; overflow: hidden; font: inherit; font-size: 16px; line-height: 24px; background: transparent; }}
 textarea[name=q]:focus {{ outline: none; }}
+.ask button.clear {{ width: 32px; height: 32px; flex: 0 0 auto; border: 0; border-radius: 50%; background: transparent; color: #5f6368; font-size: 22px; line-height: 1; cursor: pointer; }}
+.ask button.clear[hidden] {{ display: none; }}
+.ask button.clear:hover {{ background: #f6f1e7; color: #1c1612; }}
 .ask button.go {{ display: grid; place-items: center; width: 54px; height: 54px; flex: 0 0 auto; padding: 0; border: 0; background: transparent; cursor: pointer; }}
 .ask button.go svg {{ width: 54px; height: 54px; display: block; }}
 .ask button.go:hover svg, .ask button.go:focus-visible svg {{ transform: scale(1.06); }}
@@ -295,6 +317,13 @@ p.region-now + p.subject-now, p.subject-now + p.region-now {{ margin-top: 2px; }
 nav.kinds {{ display: flex; flex-wrap: wrap; gap: 8px 14px; margin: 4px 0 16px; }}
 nav.kinds a {{ color: #5f6368; text-decoration: none; font-size: 14px; padding-bottom: 6px; }}
 nav.kinds a.on {{ color: #202124; font-weight: 600; border-bottom: 2px solid #202124; }}
+.bee-story .portrait {{ display: block; width: 220px; height: 220px; margin: 4px auto 8px; }}
+.bee-story h3 {{ margin: 22px 0 8px; font-size: 20px; }}
+form.bee-find {{ display: flex; gap: 8px; align-items: center; margin: 12px 0; }}
+form.bee-find input[name=q] {{ flex: 1; min-width: 0; height: 44px; border: 1px solid #e7e1d6; border-radius: 22px; padding: 0 16px; font: inherit; font-size: 16px; }}
+form.bee-find button {{ height: 44px; padding: 0 16px; border: 0; border-radius: 22px; background: #1c1612; color: #fff; font: inherit; cursor: pointer; }}
+.bee-picks {{ display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 16px; }}
+.bee-picks a {{ padding: 6px 12px; border-radius: 16px; background: #fff8e1; border: 1px solid #f0e2a8; color: #1c1612; text-decoration: none; }}
 a.shot img {{ display: block; max-width: 120px; max-height: 72px; margin: 0 0 6px; object-fit: cover; border-radius: 8px; }}
 span.price {{ margin-left: 8px; color: #137333; font-size: 16px; }}
 ul.offers {{ list-style: none; padding: 0; margin: 6px 0 0; }}
@@ -396,6 +425,7 @@ form.inline input {{ height: 36px; border: 1px solid #dadce0; border-radius: 8px
 <form action="/search" method="get">
 <div class="ask">
 <textarea name="q" rows="1"{focus} placeholder="Запрос">{q}</textarea>
+<button class="clear" type="button" aria-label="Очистить запрос"{clear_hidden}>×</button>
 <button class="go" type="submit" aria-label="Найти">{bee}</button>
 {region_select}
 </div>
@@ -410,16 +440,36 @@ form.inline input {{ height: 36px; border: 1px solid #dadce0; border-radius: 8px
 </body>
 </html>"#,
         footer = footer(),
-        region_select = search_settings(region, tab),
+        region_select = search_settings(region, tab, theme, lat, lon, radius),
         region_line = region_line(region),
-        subject_line = subject_line(tab),
-        tabs = tab_row(query, region, tab),
+        subject_line = subject_line(theme),
+        tabs = tab_row(query, region, tab, theme, lat, lon, radius, home, show_bees),
         bee = search_bee_svg(),
         ask_script = ASK_SCRIPT,
     )
 }
 
-fn tab_row(query: &str, region: Option<&str>, current: &str) -> String {
+fn tab_row(
+    query: &str,
+    region: Option<&str>,
+    current: &str,
+    theme: &str,
+    lat: Option<f64>,
+    lon: Option<f64>,
+    radius: Option<f64>,
+    home: bool,
+    show_bees: bool,
+) -> String {
+    if !show_bees {
+        if query.trim().is_empty() {
+            return String::new();
+        }
+    } else if query.trim().is_empty() {
+        if !home {
+            return String::new();
+        }
+        return String::from("<nav class=\"kinds\" aria-label=\"Тип страницы\"><a href=\"/bees\">Всё о пчёлах</a></nav>");
+    }
     if query.trim().is_empty() {
         return String::new();
     }
@@ -435,8 +485,11 @@ fn tab_row(query: &str, region: Option<&str>, current: &str) -> String {
         let class = if *id == current { " class=\"on\"" } else { "" };
         out.push_str(&format!(
             "<a{class} href=\"{}\">{label}</a>",
-            escape(&search_href(query, region, 1, id))
+            escape(&search_href(query, region, 1, id, theme, lat, lon, radius))
         ));
+    }
+    if show_bees {
+        out.push_str("<a href=\"/bees\">Всё о пчёлах</a>");
     }
     out.push_str("</nav>");
     out
@@ -444,6 +497,18 @@ fn tab_row(query: &str, region: Option<&str>, current: &str) -> String {
 
 const ASK_SCRIPT: &str = r#"<script>
 (function () {
+  var box = document.querySelector("textarea[name=q]");
+  var clear = document.querySelector("button.clear");
+  if (box && clear) {
+    function syncClear() { clear.hidden = !box.value.trim(); }
+    syncClear();
+    box.addEventListener("input", syncClear);
+    clear.addEventListener("click", function () {
+      box.value = "";
+      syncClear();
+      box.focus();
+    });
+  }
   var menu = document.querySelector(".region-menu");
   var hidden = document.querySelector("input[name=region]");
   var form = document.querySelector("form[action='/search']");
@@ -502,13 +567,13 @@ const ASK_SCRIPT: &str = r#"<script>
     });
   }
   var themes = document.querySelector(".themes");
-  var tabInput = document.querySelector("input[name=tab]");
-  if (themes && tabInput) {
+  var themeInput = document.querySelector("input[name=theme]");
+  if (themes && themeInput) {
     themes.addEventListener("click", function (event) {
-      var button = event.target.closest("button.theme[data-tab]");
+      var button = event.target.closest("button.theme[data-theme]");
       if (!button) return;
-      tabInput.value = button.getAttribute("data-tab") || "";
-      var items = themes.querySelectorAll("button.theme[data-tab]");
+      themeInput.value = button.getAttribute("data-theme") || "";
+      var items = themes.querySelectorAll("button.theme[data-theme]");
       for (var i = 0; i < items.length; i++) {
         if (items[i] === button) items[i].classList.add("on");
         else items[i].classList.remove("on");
@@ -651,8 +716,8 @@ document.querySelectorAll("section.wire").forEach(function (box) {
 });
 </script>"#;
 
-fn subject_line(tab: &str) -> String {
-    let Some(label) = subject_label(tab) else {
+fn subject_line(theme: &str) -> String {
+    let Some(label) = subject_label(theme) else {
         return String::new();
     };
     format!("<p class=\"subject-now\">{label}</p>")
@@ -680,7 +745,14 @@ fn region_line(selected: Option<&str>) -> String {
     }
 }
 
-fn search_settings(selected: Option<&str>, tab: &str) -> String {
+fn search_settings(
+    selected: Option<&str>,
+    tab: &str,
+    theme: &str,
+    lat: Option<f64>,
+    lon: Option<f64>,
+    radius: Option<f64>,
+) -> String {
     let current = selected.unwrap_or("");
     let mut options = String::new();
     let all_on = if current.is_empty() { " on" } else { "" };
@@ -695,9 +767,9 @@ fn search_settings(selected: Option<&str>, tab: &str) -> String {
         ));
     }
     let mut themes = String::new();
-    let clear_on = if subject_label(tab).is_none() { " on" } else { "" };
+    let clear_on = if subject_label(theme).is_none() { " on" } else { "" };
     themes.push_str(&format!(
-        "<button type=\"button\" class=\"theme{clear_on}\" data-tab=\"\">Без тематики</button>"
+        "<button type=\"button\" class=\"theme{clear_on}\" data-theme=\"\">Без тематики</button>"
     ));
     for (id, label) in [
         ("medicine", "Медицина"),
@@ -710,9 +782,9 @@ fn search_settings(selected: Option<&str>, tab: &str) -> String {
         ("ads", "Реклама и маркетинг"),
         ("ai", "Искусственный интеллект"),
     ] {
-        let on = if id == tab { " on" } else { "" };
+        let on = if id == theme { " on" } else { "" };
         themes.push_str(&format!(
-            "<button type=\"button\" class=\"theme{on}\" data-tab=\"{id}\">{label}</button>"
+            "<button type=\"button\" class=\"theme{on}\" data-theme=\"{id}\">{label}</button>"
         ));
     }
     let mut radii = String::new();
@@ -742,13 +814,18 @@ fn search_settings(selected: Option<&str>, tab: &str) -> String {
 <div class="region-menu" role="listbox" aria-label="Регион">{options}</div>
 <input type="hidden" name="region" value="{current}">
 <input type="hidden" name="tab" value="{tab}">
-<input type="hidden" name="lat" value="">
-<input type="hidden" name="lon" value="">
-<input type="hidden" name="radius" value="">
+<input type="hidden" name="theme" value="{theme}">
+<input type="hidden" name="lat" value="{lat}">
+<input type="hidden" name="lon" value="{lon}">
+<input type="hidden" name="radius" value="{radius}">
 </div>
 </details>"#,
         current = escape(current),
         tab = escape(tab),
+        theme = escape(theme),
+        lat = lat.map(coord_text).unwrap_or_default(),
+        lon = lon.map(coord_text).unwrap_or_default(),
+        radius = radius.map(coord_text).unwrap_or_default(),
     )
 }
 
@@ -766,7 +843,17 @@ fn page_count(total: usize) -> usize {
     }
 }
 
-fn pager(query: &str, region: Option<&str>, tab: &str, page: usize, total: usize) -> String {
+fn pager(
+    query: &str,
+    region: Option<&str>,
+    tab: &str,
+    theme: &str,
+    lat: Option<f64>,
+    lon: Option<f64>,
+    radius: Option<f64>,
+    page: usize,
+    total: usize,
+) -> String {
     let pages = page_count(total);
     if pages <= 1 {
         return String::new();
@@ -775,7 +862,7 @@ fn pager(query: &str, region: Option<&str>, tab: &str, page: usize, total: usize
     if page > 1 {
         out.push_str(&format!(
             "<a href=\"{}\">Назад</a>",
-            escape(&search_href(query, region, page - 1, tab))
+            escape(&search_href(query, region, page - 1, tab, theme, lat, lon, radius))
         ));
     }
     for number in 1..=pages {
@@ -784,21 +871,30 @@ fn pager(query: &str, region: Option<&str>, tab: &str, page: usize, total: usize
         } else {
             out.push_str(&format!(
                 "<a href=\"{}\">{number}</a>",
-                escape(&search_href(query, region, number, tab))
+                escape(&search_href(query, region, number, tab, theme, lat, lon, radius))
             ));
         }
     }
     if page < pages {
         out.push_str(&format!(
             "<a href=\"{}\">Дальше</a>",
-            escape(&search_href(query, region, page + 1, tab))
+            escape(&search_href(query, region, page + 1, tab, theme, lat, lon, radius))
         ));
     }
     out.push_str("</nav>");
     out
 }
 
-fn search_href(query: &str, region: Option<&str>, page: usize, tab: &str) -> String {
+fn search_href(
+    query: &str,
+    region: Option<&str>,
+    page: usize,
+    tab: &str,
+    theme: &str,
+    lat: Option<f64>,
+    lon: Option<f64>,
+    radius: Option<f64>,
+) -> String {
     let mut href = format!("/search?q={}&page={page}", encode_query(query));
     if let Some(region) = region {
         if !region.is_empty() {
@@ -810,7 +906,29 @@ fn search_href(query: &str, region: Option<&str>, page: usize, tab: &str) -> Str
         href.push_str("&tab=");
         href.push_str(&encode_query(tab));
     }
+    if !theme.is_empty() {
+        href.push_str("&theme=");
+        href.push_str(&encode_query(theme));
+    }
+    if let (Some(lat), Some(lon), Some(radius)) = (lat, lon, radius) {
+        href.push_str("&lat=");
+        href.push_str(&coord_text(lat));
+        href.push_str("&lon=");
+        href.push_str(&coord_text(lon));
+        href.push_str("&radius=");
+        href.push_str(&coord_text(radius));
+    }
     href
+}
+
+fn coord_text(value: f64) -> String {
+    let rounded = (value * 1000.0).round() / 1000.0;
+    if (rounded - rounded.round()).abs() < 1e-9 {
+        format!("{}", rounded.round() as i64)
+    } else {
+        let text = format!("{rounded:.3}");
+        text.trim_end_matches('0').trim_end_matches('.').to_string()
+    }
 }
 
 fn adult_section(query: &str, adult: &[Hit], adult_open: bool) -> String {
@@ -900,6 +1018,10 @@ fn default_refresh_gap() -> i64 {
     120
 }
 
+fn default_on() -> bool {
+    true
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct BeeLine {
     pub host: String,
@@ -987,6 +1109,9 @@ pub struct OperatorReport {
     pub span: String,
     #[serde(default)]
     pub activity: ActivityBook,
+    /// Раздел «Всё о пчёлах» на этой ноде. Нет поля в старом ответе — раздел включён.
+    #[serde(default = "default_on")]
+    pub bees_page: bool,
 }
 
 fn chosen_span(span: &str) -> &'static str {
@@ -1447,6 +1572,9 @@ pub fn page_operator(report: &OperatorReport, stats: &str, rest: &str, sheet: &s
 <label>Пауза улья, секунд <input name=\"gap\" type=\"number\" min=\"2\" max=\"300\" value=\"{crawl_gap}\"></label>
 <button name=\"action\" value=\"crawl_pace\">Скорость улья</button></form>
 <p>Сейчас улей берёт {crawl_batch} адресов и ждёт {crawl_gap} секунд. Это и есть скорость добавления. Поднять числа — больше страниц в сутки, пока график нагрузки не упрётся вверх. Снизить — если машина занята.</p>
+<h3>Раздел «Всё о пчёлах»</h3>
+<p>{bees_line}</p>
+<form class=\"inline\" method=\"post\" action=\"{base}/operator?sheet=node\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\"><input type=\"hidden\" name=\"on\" value=\"{bees_next}\"><button name=\"action\" value=\"bees_page\">{bees_button}</button></form>
 <form class=\"inline\" method=\"post\" action=\"{base}/operator?sheet=node\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">
 <label>Страниц переобхода за заход <input name=\"batch\" type=\"number\" min=\"1\" max=\"4\" value=\"{refresh_batch}\"></label>
 <label>Пауза переобхода, секунд <input name=\"gap\" type=\"number\" min=\"60\" max=\"3600\" value=\"{refresh_gap}\"></label>
@@ -1510,6 +1638,13 @@ pub fn page_operator(report: &OperatorReport, stats: &str, rest: &str, sheet: &s
         max_batch = report.shells.max_batch,
         min_gap = report.shells.min_gap,
         grants = report.shells.grants,
+        bees_line = if report.bees_page {
+            "Раздел включён: на поиске есть ссылка «Всё о пчёлах», адрес /bees открывает справку. Пока человек не нажал «Найти», эта страница модель не будит. Другая нода может выключить раздел у себя."
+        } else {
+            "Раздел выключен. Ссылки нет, адрес /bees отвечает «не найдено». Включить можно здесь, это только флаг ноды."
+        },
+        bees_next = if report.bees_page { "0" } else { "1" },
+        bees_button = if report.bees_page { "Выключить раздел" } else { "Включить раздел" },
         base = escape(&report.base),
         csrf = escape(&report.csrf),
     ));
@@ -1604,7 +1739,7 @@ pub fn page_operator(report: &OperatorReport, stats: &str, rest: &str, sheet: &s
     }
     body.push_str(rest);
     body.push_str("</div></div>");
-    document("", &body, false, false, None, "").replacen("<body>", "<body class=\"cabinet\">", 1)
+    document("", &body, false, false, None, "", "", None, None, None, false).replacen("<body>", "<body class=\"cabinet\">", 1)
 }
 
 pub fn page_how() -> String {
@@ -1901,7 +2036,44 @@ pub fn page_help() -> String {
         r#"<p>Пчелопоиск — волонтёрский поиск. Выдачу не продают. Деньги нужны на улей: сервер, диск и нормальный канал, чтобы страницы открывались и обход не вставал.</p>
 <p>Один публичный улей — это 4 ядра, 8 ГБ памяти и SSD около 100 ГБ. Такой сервер стоит порядка двух тысяч рублей в месяц. Узкий канал за эти деньги не подходит.</p>
 <p>Перевод держит инфраструктуру роя. Рекламы в выдаче от этого не появится.</p>
-<p>Прямой кнопки оплаты на этой ноде ещё нет. Пока помощь можно передать через лабораторию <a href="https://dartalab.ru/">DARTA</a>. Когда появятся реквизиты, они будут на этой же странице.</p>"#,
+<p>Пожертвования идут на развитие проекта и в фонд на сохранение медоносных пчёл.</p>
+<p>Фонд сохранения медоносных пчёл, Московская область. ОГРН 1265000072116, присвоен 15.10.2026. ИНН 5003176058, КПП 500301001. Президент Климович Артём Геннадьевич.</p>"#,
+    )
+}
+
+pub fn page_bees() -> String {
+    let picks = [
+        ("пчеловодство", "Пчеловодство"),
+        ("пасека", "Пасека"),
+        ("медоносная пчела", "Медоносная пчела"),
+        ("мёд", "Мёд"),
+        ("медоносные растения", "Медоносы"),
+    ]
+    .into_iter()
+    .map(|(query, label)| format!("<a href=\"/search?q={}&amp;region=\">{label}</a>", encode_query(query)))
+    .collect::<String>();
+    article(
+        "Всё о пчёлах",
+        &format!(
+            r#"<div class="bee-story">{bee}
+<p>Короткая справка о медоносной пчеле и пчеловодстве. Это не пересказ чужой статьи и не ответ вместо ссылки. Ниже можно искать живые страницы пасек, хозяйств и книг по всей стране: регион этой ноды к запросу не прикрепляется.</p>
+<h3>Медоносная пчела</h3>
+<p>Медоносная пчела живёт семьёй, а не поодиночке. Семья держит одну матку, летом десятки тысяч рабочих пчёл и трутней. Рабочие приносят нектар и пыльцу, строят соты, кормят расплод и стерегут леток.</p>
+<h3>Мёд и опыление</h3>
+<p>Мёд семья делает из нектара и кормится им зимой. По дороге с цветка на цветок пчёлы переносят пыльцу. Без этого хуже урожаи садов, полей гречихи, подсолнечника и лугового разнотравья.</p>
+<h3>Пчеловодство</h3>
+<p>Пчеловод держит семьи в ульях на пасеке. В сезон смотрит расплод, силу семьи и взяток, откачивает зрелый мёд и готовит зимовку. Сроки медосбора и породы разные: на юге, в средней полосе и в Сибири пасека живёт не в один календарь.</p>
+<h3>Найти по всей стране</h3>
+<p>Запрос уходит в тот же поиск, что и обычная строка. Пока кнопку не нажали, улей страницы не считает и модель не будит. Карточки маркетплейсов и видеоплощадки в эту выдачу не подмешиваются: их отсекает общий поиск.</p>
+<form class="bee-find" action="/search" method="get">
+<input type="hidden" name="region" value="">
+<input name="q" placeholder="Порода, пасека, мёд, растение" aria-label="Запрос про пчёл">
+<button type="submit">Найти</button>
+</form>
+<div class="bee-picks">{picks}</div>
+</div>"#,
+            bee = bee_svg("portrait"),
+        ),
     )
 }
 
@@ -1970,7 +2142,7 @@ a.back:hover {{ background: #5c3a12; }}
 }
 
 fn article(title: &str, body: &str) -> String {
-    document("", &format!("<article><h2>{}</h2>{body}</article>", escape(title)), false, false, None, "")
+    document("", &format!("<article><h2>{}</h2>{body}</article>", escape(title)), false, false, None, "", "", None, None, None, false)
 }
 
 fn footer() -> String {
@@ -2169,6 +2341,9 @@ mod tests {
         assert!(home.contains("class=\"bee\""));
         assert!(home.contains("<textarea name=\"q\""));
         assert!(home.contains("aria-label=\"Найти\""));
+        assert!(home.contains("aria-label=\"Очистить запрос\" hidden"));
+        assert!(home.contains("href=\"/bees\">Всё о пчёлах"));
+        assert!(!home.contains("tab=jobs"));
         assert!(!home.contains("class=\"eye\""));
         assert!(home.contains("<svg"));
         assert!(home.contains("Помочь проекту"));
@@ -2198,6 +2373,48 @@ mod tests {
         assert!(html.contains("nav class=\"kinds\""));
         assert!(html.contains(">Работа</a>"));
         assert!(html.contains("tab=jobs"));
+        assert!(html.contains("href=\"/bees\">Всё о пчёлах"));
+        assert!(html.contains("aria-label=\"Очистить запрос\""));
+        assert!(!html.contains("Очистить запрос\" hidden"));
+        let kept = render_results(
+            "мёд",
+            &[sample(1)],
+            &[],
+            false,
+            1,
+            None,
+            None,
+            "jobs",
+            "auto",
+            Some(55.755),
+            Some(37.617),
+            Some(1.0),
+            true,
+        );
+        assert!(kept.contains("tab=jobs"));
+        assert!(kept.contains("theme=auto"));
+        assert!(kept.contains("lat=55.755"));
+        assert!(kept.contains("lon=37.617"));
+        assert!(kept.contains("radius=1"));
+        assert!(kept.contains("name=\"theme\" value=\"auto\""));
+        assert!(kept.contains("name=\"tab\" value=\"jobs\""));
+        let help = page_help();
+        assert!(help.contains("1265000072116"));
+        assert!(help.contains("Фонд сохранения медоносных пчёл"));
+        assert!(help.contains("на развитие проекта и в фонд"));
+        assert!(help.contains("5003176058"));
+        assert!(!help.contains("Когда появятся реквизиты"));
+        assert!(help.contains("https://dartalab.ru/"));
+        let story = page_bees();
+        assert!(story.contains("Медоносная пчела"));
+        assert!(story.contains("одну матку"));
+        assert!(story.contains("по всей стране"));
+        assert!(story.contains("class=\"portrait\""));
+        assert!(story.contains("name=\"region\" value=\"\""));
+        assert!(story.contains("Пчеловодство"));
+        let hidden = render_results("", &[], &[], false, 1, None, None, "", "", None, None, None, false);
+        assert!(!hidden.contains("href=\"/bees\""));
+        assert!(hidden.contains("class=\"home\""));
         assert_eq!(html.matches("https://dartalab.ru/").count(), 1);
         assert!(!html.contains("id=\"how\""));
     }
@@ -2306,11 +2523,11 @@ mod tests {
             news_feed: None,
             price: None,
         };
-        let closed = render_results("мёд", &[], &[adult.clone()], false, 1, None, None, "");
+        let closed = render_results("мёд", &[], &[adult.clone()], false, 1, None, None, "", "", None, None, None, true);
         assert!(closed.contains("18+"));
         assert!(closed.contains("class=\"results blurred\""));
         assert!(!closed.contains("https://studio.example/v"));
-        let open = render_results("мёд", &[], &[adult], true, 1, None, None, "");
+        let open = render_results("мёд", &[], &[adult], true, 1, None, None, "", "", None, None, None, true);
         assert!(open.contains("https://studio.example/v"));
         assert!(!open.contains("class=\"results blurred\""));
     }
@@ -2346,6 +2563,11 @@ mod tests {
             None,
             Some("Волгоградская область"),
             "",
+            "",
+            None,
+            None,
+            None,
+            true,
         );
         let home = html.find("В вашем регионе").unwrap();
         let other = html.find("В других регионах").unwrap();
@@ -2355,11 +2577,11 @@ mod tests {
         assert!(html.contains("class=\"region-opt on\""));
         assert!(html.contains("name=\"region\" value=\"Волгоградская область\""));
         assert!(html.contains("aria-label=\"Настройки поиска\""));
-        let news = render_results("мёд", &[], &[], false, 1, None, None, "news");
+        let news = render_results("мёд", &[], &[], false, 1, None, None, "news", "", None, None, None, true);
         assert!(!news.contains("Свежие заголовки изданий"));
         let mut paper = sample(1);
         paper.url = "https://www.kommersant.ru/".into();
-        let with_paper = render_results("мёд", &[paper], &[], false, 1, None, None, "news");
+        let with_paper = render_results("мёд", &[paper], &[], false, 1, None, None, "news", "", None, None, None, true);
         assert!(with_paper.contains("data-feed="));
         assert!(with_paper.contains("kommersant.ru/rss"));
         assert!(with_paper.contains("/wire?feed="));
@@ -2367,7 +2589,7 @@ mod tests {
         let mut shop = sample(2);
         shop.url = "https://shop.example/".into();
         shop.feed_url = Some("https://shop.example/feed.yml".into());
-        let goods = render_results("болт", &[shop], &[], false, 1, None, None, "goods");
+        let goods = render_results("болт", &[shop], &[], false, 1, None, None, "goods", "", None, None, None, true);
         assert!(goods.contains("data-offers="));
         assert!(goods.contains("/offers?feed="));
         assert!(goods.contains("Товары"));

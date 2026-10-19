@@ -7,8 +7,8 @@ pub use contacts::{classify_contact_url, clean_email, clean_phone, contacts_in_t
 pub use kind::{
     all_kinds, bare_host, host_of_url, in_general, is_channel_host, is_document_url, is_government_host, is_job_board, kind_codes, site_ask, KindSpec, SiteAsk,
     is_marketplace_host, is_press_front, is_press_host, is_product_card, is_product_url, is_webshop, kind_from_stored, open_feed, press_feed, press_feeds, press_rss,
-    tab_mask, HostFeed, HOST_PAGE_CAP, KIND_ADS, KIND_AI, KIND_AUTO, KIND_BUILD, KIND_CHANNEL, KIND_DOC, KIND_EDU, KIND_GOODS, KIND_GOV, KIND_HAUL, KIND_IMAGE, KIND_JOBS,
-    KIND_MEDICINE, KIND_NEWS, KIND_REALTY, KIND_SERVICE, KIND_SHOP, KIND_VIDEO,
+    on_shelf, tab_mask, theme_mask, HostFeed, HOST_PAGE_CAP, KIND_ADS, KIND_AI, KIND_AUTO, KIND_BUILD, KIND_CHANNEL, KIND_DOC, KIND_EDU, KIND_GOODS, KIND_GOV, KIND_HAUL, KIND_IMAGE, KIND_JOBS,
+    KIND_MEDICINE, KIND_NEWS, KIND_REALTY, KIND_SERVICE, KIND_SHOP, KIND_VIDEO, THEME_BITS,
 };
 pub use rss::rss_headlines;
 pub use region::{

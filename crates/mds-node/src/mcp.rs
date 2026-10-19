@@ -76,7 +76,7 @@ fn call(engine: &mut Engine, map: Option<&mds_wire::NetworkMap>, params: &Value)
                 }
             }
             let hits = engine
-                .search_with_vector(query, mask)
+                .search_with_vector(query, mask, 0)
                 .map_err(|err| err.to_string())?
                 .0;
             let lat = args.get("lat").and_then(|v| v.as_f64());

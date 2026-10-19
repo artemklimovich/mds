@@ -13,12 +13,12 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use mds_dht::{Lsh, Swarm};
 use mds_types::{
-    bare_host, canonical_region, geo_in, host_of_url, in_general, quantize, site_ask, tab_mask, valid_coords, Hit, QuantVector,
+    bare_host, canonical_region, geo_in, host_of_url, on_shelf, quantize, site_ask, tab_mask, theme_mask, valid_coords, Hit, QuantVector,
 };
 use mds_update::{read_model_manifest, ReleaseManifest};
 use mds_rank::{page_lane, prefer_geo_radius, query_lane, Lane};
 use mds_web::{
-    hive_card, offer_region, page_add, page_android, page_computer, page_download, page_for_sites, page_help, page_hive, page_how, page_indexing, page_llms, page_lost, page_manifesto, page_operator,
+    hive_card, offer_region, page_add, page_android, page_computer, page_download, page_for_sites, page_help, page_bees, page_hive, page_how, page_indexing, page_llms, page_lost, page_manifesto, page_operator,
     AddLine,
     cabinet_sheets, render, render_results, robots_txt, sitemap_xml, stamp_census, BeeLine, CabinetSheets, MapLine, NodeChip,
     OperatorReport, PeerLine, ShellLine, VisitNumbers,
@@ -93,6 +93,7 @@ struct SearchParams {
     adult: Option<String>,
     region: Option<String>,
     tab: Option<String>,
+    theme: Option<String>,
     #[serde(default, deserialize_with = "blank_f64")]
     lat: Option<f64>,
     #[serde(default, deserialize_with = "blank_f64")]
@@ -279,6 +280,7 @@ pub async fn serve(engine: Engine, config: ServeConfig) -> Result<(), NodeError>
         .route("/manifesto", get(manifesto_page))
         .route("/how", get(how_page))
         .route("/help", get(help_page))
+        .route("/bees", get(bees_page))
         .route("/for-sites", get(for_sites_page))
         .route("/indexing", get(indexing_page))
         .route("/android", get(android_page))
@@ -341,7 +343,7 @@ async fn lost_page() -> Response {
 fn person_page(path: &str) -> bool {
     matches!(
         path,
-        "/" | "/search" | "/manifesto" | "/how" | "/help" | "/for-sites" | "/indexing" | "/android" | "/hive" | "/computer" | "/add" | "/llms" | "/download"
+        "/" | "/search" | "/manifesto" | "/how" | "/help" | "/bees" | "/for-sites" | "/indexing" | "/android" | "/hive" | "/computer" | "/add" | "/llms" | "/download"
     )
 }
 
@@ -444,6 +446,7 @@ async fn face_meta(
         region: state.region.clone(),
         release_version,
         visit_cookie,
+        bees_page: bees_open(&state),
     }))
 }
 
@@ -474,6 +477,10 @@ async fn face_search(
         error: paint.error,
         region: paint.region,
         tab: paint.tab,
+        theme: paint.theme,
+        lat: paint.lat,
+        lon: paint.lon,
+        radius: paint.radius,
         offer_label,
         offer_href,
         refused: paint.refused,
@@ -482,6 +489,7 @@ async fn face_search(
         pages,
         notice,
         visit_cookie,
+        bees_page: bees_open(&state),
     }))
 }
 
@@ -760,7 +768,7 @@ async fn peer_search(
     let lsh = state.lsh.clone();
     let hits = tokio::task::spawn_blocking(move || {
         let vector = req.vector.dequantize();
-        readers.call(|index| hits_for(index, &lsh, &req.text, &vector, 0))
+        readers.call(|index| hits_for(index, &lsh, &req.text, &vector, 0, 0))
     })
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
@@ -1181,6 +1189,23 @@ async fn operator_act(
         .await;
         return cabinet_note(&state, base, "Скорость улья сохранена. Следующий заход обхода уже с этими числами.");
     }
+    if action == "bees_page" {
+        let on = form_field(&text, "on") != "0";
+        let engine = state.engine.clone();
+        let saved = tokio::task::spawn_blocking(move || {
+            engine.lock().unwrap_or_else(|poison| poison.into_inner()).set_bees_page(on)
+        })
+        .await;
+        if saved.ok().and_then(|result| result.ok()).is_none() {
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+        let line = if on {
+            "Раздел «Всё о пчёлах» включён. Ссылка снова на поиске."
+        } else {
+            "Раздел «Всё о пчёлах» выключен. Ссылки нет, адрес /bees не открывается."
+        };
+        return cabinet_note(&state, base, line);
+    }
     if action == "bee_pace" {
         let batch = form_field(&text, "batch").parse().unwrap_or(4);
         let gap = form_field(&text, "gap").parse().unwrap_or(600);
@@ -1428,8 +1453,12 @@ fn painted(state: &AppState, html: String) -> Html<String> {
     Html(mds_web::stamp_notice(stamp_census(html, sites, pages), notice.as_deref()))
 }
 
+fn bees_open(state: &AppState) -> bool {
+    state.engine.lock().unwrap_or_else(|poison| poison.into_inner()).bees_page()
+}
+
 async fn home(State(state): State<AppState>) -> Html<String> {
-    painted(&state, render_results("", &[], &[], false, 1, None, state.region.as_deref(), ""))
+    painted(&state, render_results("", &[], &[], false, 1, None, state.region.as_deref(), "", "", None, None, None, bees_open(&state)))
 }
 
 async fn manifesto_page(State(state): State<AppState>) -> Html<String> {
@@ -1454,6 +1483,18 @@ async fn hive_page(State(state): State<AppState>) -> Html<String> {
 
 async fn computer_page(State(state): State<AppState>) -> Html<String> {
     painted(&state, page_computer())
+}
+
+async fn bees_page(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if !bees_open(&state) {
+        return Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+            .body(Body::from(page_lost()))
+            .unwrap_or_else(|_| StatusCode::NOT_FOUND.into_response());
+    }
+    let _ = headers;
+    painted(&state, page_bees()).into_response()
 }
 
 async fn help_page(State(state): State<AppState>) -> Html<String> {
@@ -1518,8 +1559,13 @@ async fn robots(headers: HeaderMap) -> Response {
     text_file(robots_txt(&public_origin(&headers)), "text/plain; charset=utf-8")
 }
 
-async fn sitemap(headers: HeaderMap) -> Response {
-    text_file(sitemap_xml(&public_origin(&headers)), "application/xml; charset=utf-8")
+async fn sitemap(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    let mut xml = sitemap_xml(&public_origin(&headers));
+    if !bees_open(&state) {
+        let origin = public_origin(&headers);
+        xml = xml.replace(&format!("<url><loc>{origin}/bees</loc></url>\n"), "");
+    }
+    text_file(xml, "application/xml; charset=utf-8")
 }
 
 fn text_file(body: String, content_type: &'static str) -> Response {
@@ -1637,6 +1683,10 @@ struct SearchPaint {
     error: Option<String>,
     region: Option<String>,
     tab: String,
+    theme: String,
+    lat: Option<f64>,
+    lon: Option<f64>,
+    radius: Option<f64>,
     offer: Option<(String, String)>,
     mark: Option<crate::visits::SearchMark>,
     adult_cookie: bool,
@@ -1652,6 +1702,7 @@ async fn local_search(
     state: &AppState,
     query: &str,
     kind_mask: u32,
+    theme_mask: u32,
 ) -> Result<(Vec<Hit>, Option<(QuantVector, u16)>), NodeError> {
     let started = Instant::now();
     let readers = state.readers.clone();
@@ -1659,14 +1710,14 @@ async fn local_search(
     let query_for_cache = query.to_string();
     let phase = tokio::task::spawn_blocking(move || {
         if let Some(ask) = site_ask(&query_for_cache) {
-            let hits = readers.call(|index| site_hits(index, &ask.host, &ask.words, kind_mask))?;
+            let hits = readers.call(|index| site_hits(index, &ask.host, &ask.words, kind_mask, theme_mask))?;
             eng.lock()
                 .unwrap_or_else(|poison| poison.into_inner())
                 .note_search(started.elapsed().as_millis());
             return Ok::<_, NodeError>(LocalReady::Ready(hits, None));
         }
         let mut guard = eng.lock().unwrap_or_else(|poison| poison.into_inner());
-        if let Some((hits, vector)) = guard.cached_search(&query_for_cache, kind_mask) {
+        if let Some((hits, vector)) = guard.cached_search(&query_for_cache, kind_mask, theme_mask) {
             let bucket = guard.semantic_bucket(&vector);
             guard.note_search(started.elapsed().as_millis());
             return Ok(LocalReady::Ready(hits, Some((vector, bucket))));
@@ -1678,7 +1729,7 @@ async fn local_search(
     .map_err(|_| NodeError::Message("поиск прерван".into()))??;
     match phase {
         LocalReady::Ready(hits, ranked) => Ok((hits, ranked)),
-        LocalReady::NeedModel => finish_fresh_search(state, query, kind_mask, started).await,
+        LocalReady::NeedModel => finish_fresh_search(state, query, kind_mask, theme_mask, started).await,
     }
 }
 
@@ -1686,6 +1737,7 @@ async fn finish_fresh_search(
     state: &AppState,
     query: &str,
     kind_mask: u32,
+    theme_mask: u32,
     started: Instant,
 ) -> Result<(Vec<Hit>, Option<(QuantVector, u16)>), NodeError> {
     let mut embedder = loop {
@@ -1730,7 +1782,7 @@ async fn finish_fresh_search(
     let readers = state.readers.clone();
     let lsh = state.lsh.clone();
     let query_owned = query.to_string();
-    let ranked = tokio::task::spawn_blocking(move || readers.call(|index| hits_for(index, &lsh, &query_owned, &vector, kind_mask)))
+    let ranked = tokio::task::spawn_blocking(move || readers.call(|index| hits_for(index, &lsh, &query_owned, &vector, kind_mask, theme_mask)))
         .await
         .map_err(|_| NodeError::Message("поиск прерван".into()))??;
     let bucket = state.lsh.bucket(&quant.dequantize());
@@ -1740,7 +1792,7 @@ async fn finish_fresh_search(
     let hits_kept = ranked.clone();
     let _ = tokio::task::spawn_blocking(move || {
         let mut guard = eng.lock().unwrap_or_else(|poison| poison.into_inner());
-        guard.keep_search(&query_kept, kind_mask, &hits_kept, quant_kept);
+        guard.keep_search(&query_kept, kind_mask, theme_mask, &hits_kept, quant_kept);
         guard.note_search(started.elapsed().as_millis());
     })
     .await;
@@ -1790,10 +1842,11 @@ async fn search(
     Query(params): Query<SearchParams>,
 ) -> Response {
     let paint = gather_search(&state, &headers, &params).await;
+    let show_bees = bees_open(&state);
     let html = if paint.refused {
         render("", &[], 1, Some("Такой запрос эта нода не ищет."))
     } else if paint.query.is_empty() {
-        render_results("", &[], &[], false, 1, None, paint.region.as_deref(), "")
+        render_results("", &[], &[], false, 1, None, paint.region.as_deref(), &paint.tab, &paint.theme, paint.lat, paint.lon, paint.radius, show_bees)
     } else if let Some(error) = &paint.error {
         render(&paint.query, &[], paint.page, Some(error))
     } else {
@@ -1806,6 +1859,11 @@ async fn search(
             None,
             paint.region.as_deref(),
             &paint.tab,
+            &paint.theme,
+            paint.lat,
+            paint.lon,
+            paint.radius,
+            show_bees,
         );
         if let Some((label, href)) = &paint.offer {
             html = offer_region(html, label, href);
@@ -1825,6 +1883,26 @@ async fn search(
     response
 }
 
+fn public_shelf(tab: &str, theme: &str) -> (String, String, u32, u32) {
+    let mut tab = tab.trim().to_string();
+    let mut theme = theme.trim().to_string();
+    if theme.is_empty() && theme_mask(&tab) != 0 {
+        theme = tab.clone();
+        tab.clear();
+    }
+    let tab = match tab.as_str() {
+        "news" => "news".to_string(),
+        "gov" => "gov".to_string(),
+        "jobs" | "job" => "jobs".to_string(),
+        "services" | "service" => "services".to_string(),
+        _ => String::new(),
+    };
+    if theme_mask(&theme) == 0 {
+        theme.clear();
+    }
+    (tab.clone(), theme.clone(), tab_mask(&tab), theme_mask(&theme))
+}
+
 async fn gather_search(state: &AppState, headers: &HeaderMap, params: &SearchParams) -> SearchPaint {
     let query = params.q.clone().unwrap_or_default();
     let query = query.trim().to_string();
@@ -1841,6 +1919,13 @@ async fn gather_search(state: &AppState, headers: &HeaderMap, params: &SearchPar
             .or_else(|| state.region.clone())
             .or_else(|| query_geo.region.map(str::to_string)),
     };
+    let (tab, theme, kind_mask, theme_bits) = public_shelf(
+        params.tab.as_deref().unwrap_or(""),
+        params.theme.as_deref().unwrap_or(""),
+    );
+    let lat = params.lat.filter(|value| value.is_finite());
+    let lon = params.lon.filter(|value| value.is_finite());
+    let radius = params.radius.filter(|value| value.is_finite() && *value > 0.0);
     if query.is_empty() {
         return SearchPaint {
             query,
@@ -1850,7 +1935,11 @@ async fn gather_search(state: &AppState, headers: &HeaderMap, params: &SearchPar
             page,
             error: None,
             region: chosen,
-            tab: String::new(),
+            tab,
+            theme,
+            lat,
+            lon,
+            radius,
             offer: None,
             mark: None,
             adult_cookie: false,
@@ -1866,7 +1955,11 @@ async fn gather_search(state: &AppState, headers: &HeaderMap, params: &SearchPar
             page,
             error: None,
             region: chosen,
-            tab: String::new(),
+            tab,
+            theme,
+            lat,
+            lon,
+            radius,
             offer: None,
             mark: Some(crate::visits::SearchMark {
                 empty: false,
@@ -1878,9 +1971,7 @@ async fn gather_search(state: &AppState, headers: &HeaderMap, params: &SearchPar
         };
     }
     let adult_open = params.adult.as_deref() == Some("1") || cookie_is(headers, "mds_adult", "1");
-    let tab = params.tab.clone().unwrap_or_default();
-    let kind_mask = tab_mask(tab.trim());
-    let local = local_search(state, &query, kind_mask).await;
+    let local = local_search(state, &query, kind_mask, theme_bits).await;
     match local {
         Ok((mut hits, ranked)) => {
             if let Some((vector, bucket)) = ranked {
@@ -1914,11 +2005,7 @@ async fn gather_search(state: &AppState, headers: &HeaderMap, params: &SearchPar
             mark_volunteers(&mut hits, &hosts);
             let (open, adult) = split_lanes(hits);
             let mut open = open;
-            if kind_mask == 0 {
-                open.retain(|hit| in_general(hit.kind));
-            } else {
-                open.retain(|hit| hit.kind & kind_mask != 0);
-            }
+            open.retain(|hit| on_shelf(hit.kind, kind_mask, theme_bits));
             let around = match (params.lat, params.lon, params.radius) {
                 (Some(lat), Some(lon), Some(r)) if valid_coords(lat, lon) && r.is_finite() && r > 0.0 => {
                     Some((lat, lon, r.clamp(0.1, 500.0)))
@@ -1934,7 +2021,7 @@ async fn gather_search(state: &AppState, headers: &HeaderMap, params: &SearchPar
                 guard.remember_query(&query_for_log, &logged)
             })
             .await;
-            let offer = region_button(state, &query, &tab).await;
+            let offer = region_button(state, &query, &tab, &theme, lat, lon, radius).await;
             let empty = open.is_empty() && adult.is_empty();
             SearchPaint {
                 query,
@@ -1945,6 +2032,10 @@ async fn gather_search(state: &AppState, headers: &HeaderMap, params: &SearchPar
                 error: None,
                 region: chosen,
                 tab,
+                theme: theme.clone(),
+                lat,
+                lon,
+                radius,
                 offer,
                 mark: Some(crate::visits::SearchMark {
                     empty,
@@ -1964,6 +2055,10 @@ async fn gather_search(state: &AppState, headers: &HeaderMap, params: &SearchPar
             error: Some(err.to_string()),
             region: chosen,
             tab,
+            theme,
+            lat,
+            lon,
+            radius,
             offer: None,
             mark: Some(crate::visits::SearchMark {
                 empty: false,
@@ -2151,6 +2246,7 @@ async fn compose_cabinet(state: &AppState, csrf: &str, base: &str) -> Option<(Op
                     refresh_gap: picture.20,
                     span: String::new(),
                     activity,
+                    bees_page: state.engine.lock().unwrap_or_else(|poison| poison.into_inner()).bees_page(),
                 };
             Some((report, sheets))
         }
@@ -3011,7 +3107,15 @@ fn peer_card(base: String, reachable: bool) -> mds_dht::PeerCard {
     }
 }
 
-async fn region_button(state: &AppState, query: &str, tab: &str) -> Option<(String, String)> {
+async fn region_button(
+    state: &AppState,
+    query: &str,
+    tab: &str,
+    theme: &str,
+    lat: Option<f64>,
+    lon: Option<f64>,
+    radius: Option<f64>,
+) -> Option<(String, String)> {
     let named = mds_types::region_in(query)?;
     if state.region.as_deref() == Some(named) {
         return None;
@@ -3030,13 +3134,24 @@ async fn region_button(state: &AppState, query: &str, tab: &str) -> Option<(Stri
     for base in doors {
         let status = format!("{}/peer/status", base.trim_end_matches('/'));
         if probe.get(status).send().await.ok()?.status().is_success() {
-            let href = format!(
-                "{}/search?q={}&tab={}&region={}",
+            let mut href = format!(
+                "{}/search?q={}&page=1",
                 base.trim_end_matches('/'),
                 q_encode(query),
-                q_encode(tab),
-                q_encode(named)
             );
+            if !tab.is_empty() {
+                href.push_str("&tab=");
+                href.push_str(&q_encode(tab));
+            }
+            if !theme.is_empty() {
+                href.push_str("&theme=");
+                href.push_str(&q_encode(theme));
+            }
+            href.push_str("&region=");
+            href.push_str(&q_encode(named));
+            if let (Some(lat), Some(lon), Some(radius)) = (lat, lon, radius) {
+                href.push_str(&format!("&lat={lat}&lon={lon}&radius={radius}"));
+            }
             return Some((named.to_string(), href));
         }
     }
@@ -3092,7 +3207,7 @@ async fn peer_search_v1(State(state): State<AppState>, Json(packet): Json<Signed
     };
     let hits = tokio::task::spawn_blocking(move || {
         let vector = req.vector.dequantize();
-        readers.call(|index| hits_for(index, &lsh, &req.text, &vector, 0))
+        readers.call(|index| hits_for(index, &lsh, &req.text, &vector, 0, 0))
     })
     .await
     .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?

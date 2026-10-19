@@ -28,6 +28,16 @@ pub const KIND_EDU: u32 = 32768;
 pub const KIND_ADS: u32 = 65536;
 /// Сайт про искусственный интеллект, нейросети или машинное обучение.
 pub const KIND_AI: u32 = 131072;
+/// Тематики шестерёнки. У издания из ленты этих битов нет.
+pub const THEME_BITS: u32 = KIND_MEDICINE
+    | KIND_SHOP
+    | KIND_HAUL
+    | KIND_AUTO
+    | KIND_REALTY
+    | KIND_BUILD
+    | KIND_EDU
+    | KIND_ADS
+    | KIND_AI;
 
 #[derive(Clone, Copy, Debug)]
 pub struct KindSpec {
@@ -223,6 +233,32 @@ pub fn site_ask(raw: &str) -> Option<SiteAsk> {
         host,
         words: words.to_string(),
     })
+}
+
+pub fn theme_mask(theme: &str) -> u32 {
+    let mask = tab_mask(theme);
+    if mask != 0 && mask & THEME_BITS == mask {
+        mask
+    } else {
+        0
+    }
+}
+
+/// Страница проходит полосу и тематику. Пустая полоса — обычные сайты, без новостей и площадок.
+/// На «Новостях» издание без тематического бита остаётся, даже если тематика выбрана.
+pub fn on_shelf(kind: u32, tab: u32, theme: u32) -> bool {
+    let type_ok = if tab == 0 {
+        in_general(kind)
+    } else {
+        kind & tab != 0
+    };
+    if !type_ok {
+        return false;
+    }
+    if theme == 0 || kind & theme != 0 {
+        return true;
+    }
+    tab == KIND_NEWS && kind & THEME_BITS == 0
 }
 
 pub fn tab_mask(tab: &str) -> u32 {
@@ -583,6 +619,13 @@ mod tests {
         let news = kind_from_stored("https://example.ru/news/1", "заметка", "текст");
         assert_eq!(news & KIND_NEWS, KIND_NEWS);
         assert!(!in_general(news));
+        assert!(on_shelf(KIND_NEWS, KIND_NEWS, KIND_MEDICINE));
+        assert!(on_shelf(KIND_NEWS | KIND_MEDICINE, KIND_NEWS, KIND_MEDICINE));
+        assert!(!on_shelf(KIND_NEWS | KIND_AUTO, KIND_NEWS, KIND_MEDICINE));
+        assert!(on_shelf(KIND_JOBS | KIND_MEDICINE, KIND_JOBS, KIND_MEDICINE));
+        assert!(!on_shelf(KIND_JOBS, KIND_JOBS, KIND_MEDICINE));
+        assert!(on_shelf(KIND_MEDICINE, 0, KIND_MEDICINE));
+        assert!(!on_shelf(KIND_NEWS | KIND_MEDICINE, 0, KIND_MEDICINE));
         let article = kind_from_stored("https://www.kommersant.ru/doc/1", "заголовок", "текст");
         assert_eq!(article, KIND_NEWS);
         assert!(is_press_front("https://lenta.ru/"));

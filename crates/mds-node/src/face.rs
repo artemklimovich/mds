@@ -10,7 +10,7 @@ use axum::Router;
 use mds_types::Hit;
 use mds_web::{
     cabinet_sheets, offer_region, page_add, page_android, page_computer, page_download, page_for_sites, page_help, page_hive, page_how, page_lost,
-    page_indexing, page_llms, page_manifesto, page_operator, render, render_results, stamp_census, stamp_notice,
+    page_indexing, page_llms, page_manifesto, page_operator, render, render_results, stamp_census, stamp_notice, page_bees,
     CabinetSheets, OperatorReport,
 };
 use serde::de::DeserializeOwned;
@@ -42,6 +42,7 @@ pub struct FaceMeta {
     pub region: Option<String>,
     pub release_version: Option<String>,
     pub visit_cookie: Option<String>,
+    pub bees_page: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -54,6 +55,10 @@ pub struct FaceSearch {
     pub error: Option<String>,
     pub region: Option<String>,
     pub tab: String,
+    pub theme: String,
+    pub lat: Option<f64>,
+    pub lon: Option<f64>,
+    pub radius: Option<f64>,
     pub offer_label: Option<String>,
     pub offer_href: Option<String>,
     pub refused: bool,
@@ -62,6 +67,7 @@ pub struct FaceSearch {
     pub pages: usize,
     pub notice: Option<String>,
     pub visit_cookie: Option<String>,
+    pub bees_page: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -130,6 +136,7 @@ pub async fn serve_face(config: FaceConfig) -> Result<(), NodeError> {
         .route("/manifesto", get(manifesto_page))
         .route("/how", get(how_page))
         .route("/help", get(help_page))
+        .route("/bees", get(bees_page))
         .route("/for-sites", get(for_sites_page))
         .route("/indexing", get(indexing_page))
         .route("/android", get(android_page))
@@ -216,8 +223,16 @@ fn cookie_of(headers: &HeaderMap) -> String {
 
 async fn home_page(State(state): State<FaceState>, headers: HeaderMap) -> Result<Response, StatusCode> {
     let meta = meta_for(&state, &headers, "/").await?;
-    let html = render_results("", &[], &[], false, 1, None, meta.region.as_deref(), "");
+    let html = render_results("", &[], &[], false, 1, None, meta.region.as_deref(), "", "", None, None, None, meta.bees_page);
     Ok(with_visit(stamp(html, &meta).into_response(), &meta.visit_cookie))
+}
+
+async fn bees_page(State(state): State<FaceState>, headers: HeaderMap) -> Result<Response, StatusCode> {
+    let meta = meta_for(&state, &headers, "/bees").await?;
+    if !meta.bees_page {
+        return Ok(lost_page().await);
+    }
+    Ok(with_visit(stamp(page_bees(), &meta).into_response(), &meta.visit_cookie))
 }
 
 async fn search_page(
@@ -225,12 +240,15 @@ async fn search_page(
     OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
 ) -> Result<Response, StatusCode> {
-    let query = uri.query().unwrap_or("");
+    paint_search(&state, &headers, uri.query().unwrap_or("")).await
+}
+
+async fn paint_search(state: &FaceState, headers: &HeaderMap, query: &str) -> Result<Response, StatusCode> {
     let response = state
         .client
         .get(format!("{}/internal/face/search?{query}", state.hive))
         .header("x-mds-face", &state.token)
-        .header(header::COOKIE, cookie_of(&headers))
+        .header(header::COOKIE, cookie_of(headers))
         .send()
         .await
         .map_err(|_| StatusCode::BAD_GATEWAY)?;
@@ -241,7 +259,21 @@ async fn search_page(
     let html = if paint.refused {
         render("", &[], 1, Some("Такой запрос эта нода не ищет."))
     } else if paint.query.is_empty() {
-        render_results("", &[], &[], false, 1, None, paint.region.as_deref(), "")
+        render_results(
+            "",
+            &[],
+            &[],
+            false,
+            1,
+            None,
+            paint.region.as_deref(),
+            &paint.tab,
+            &paint.theme,
+            paint.lat,
+            paint.lon,
+            paint.radius,
+            paint.bees_page,
+        )
     } else if let Some(error) = &paint.error {
         render(&paint.query, &[], paint.page, Some(error))
     } else {
@@ -254,6 +286,11 @@ async fn search_page(
             None,
             paint.region.as_deref(),
             &paint.tab,
+            &paint.theme,
+            paint.lat,
+            paint.lon,
+            paint.radius,
+            paint.bees_page,
         );
         if let (Some(label), Some(href)) = (&paint.offer_label, &paint.offer_href) {
             html = offer_region(html, label, href);
@@ -267,6 +304,7 @@ async fn search_page(
         region: paint.region.clone(),
         release_version: None,
         visit_cookie: paint.visit_cookie.clone(),
+        bees_page: paint.bees_page,
     };
     let mut response = with_visit(stamp(html, &meta).into_response(), &paint.visit_cookie);
     if paint.adult_cookie {
