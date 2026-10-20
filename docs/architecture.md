@@ -176,10 +176,11 @@ cargo run -p mds-cli -- node --seeds urls.txt --max-pages 100 --listen 127.0.0.1
 
 ```text
 cargo build -p mds-cli --release
-mds publish --key data/release.key --bin C:\Users\artem\mds-target\release\mds.exe --version 0.2.0
+mds publish --key data/release.key --bin target/release/mds --version 0.1.1 --out data/releases
+mds publish --key data/release.key --bin mds.exe --version 0.1.1 --out data/releases/windows
 mds publish-model --key data/release.key --dir data/models/swarm
 mds node --peers http://10.0.0.8:8080
 mds node --lite --site https://адрес-сайта --hive https://45.158.46.52
 ```
 
-Нода, у которой в `data/releases` уже лежит подписанный файл новее её самой, перезапускается и отдаёт этот файл по `/peer/update`. Соседи из `--peers` забирают его, проверяют подпись и делают то же самое. Проверка повторяется каждые 6 часов. `onnxruntime.dll` рядом с программой обновление не заменяет. Лёгкая пчела эту проверку не делает: новый файл на её сервер кладут вручную и перезапускают службу. Архив со страницы загрузки подписью выпуска не является, поэтому сам программу не подменяет. Готовые архивы Linux и Windows улей отдаёт сам, из каталога `data/downloads`: `/download/pchela-linux-x64.tar.gz` и `/download/pchela-windows-x64.zip`. Копия на GitHub остаётся запасной ссылкой.
+Нода, у которой в `data/releases` уже лежит подписанный файл Linux новее её самой, перезапускается и отдаёт этот файл по `/peer/update`. Соседи из `--peers` забирают его, проверяют подпись и делают то же самое. Проверка повторяется каждые 6 часов. Файл Windows лежит отдельно, в `data/releases/windows`, и улей его не запускает: иначе машина подменила бы себя чужой программой. Запрос указывает систему: `/peer/update?os=linux` или `/peer/update?os=windows`. Без параметра отдаётся Linux. `onnxruntime.dll` рядом с программой обновление не заменяет. Лёгкая пчела по таймеру файл не меняет. Хозяин машины запускает `mds update --hive https://beesearch.ru`: команда забирает файл своей системы, сверяет подпись и ставит его на место, службу после этого перезапускают. Архив со страницы загрузки сам программу не подменяет. Готовые архивы улей отдаёт из `data/downloads`: `/download/pchela-linux-x64.tar.gz` и `/download/pchela-windows-x64.zip`. Рядом у каждого адреса есть `.sha256`. Копия на GitHub остаётся запасной ссылкой.

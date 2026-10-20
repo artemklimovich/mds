@@ -157,6 +157,18 @@ pub struct StoredPage {
     pub text: String,
 }
 
+/// Строка для показа. Символ «битая кодировка» выкидывается. Если букв не осталось, строка пустая.
+pub fn shown_text(text: &str) -> String {
+    let cleaned: String = text.chars().filter(|ch| *ch != '\u{FFFD}').collect();
+    let cleaned = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    let letters = cleaned.chars().filter(|ch| ch.is_alphanumeric()).count();
+    if letters < 2 {
+        String::new()
+    } else {
+        cleaned
+    }
+}
+
 pub fn snippet(text: &str, query: &str) -> String {
     let lower = text.to_lowercase();
     let needle = query
@@ -236,6 +248,13 @@ mod tests {
     #[test]
     fn quantize_rejects_wrong_size() {
         assert!(quantize(&[0.1, 0.2]).is_err());
+    }
+
+    #[test]
+    fn broken_letters_do_not_stay_in_the_line() {
+        assert_eq!(shown_text("Начало | школы"), "Начало | школы");
+        assert_eq!(shown_text("\u{FFFD}\u{FFFD} | \u{FFFD}/\u{FFFD}"), "");
+        assert_eq!(shown_text("Мёд \u{FFFD} с пасеки"), "Мёд с пасеки");
     }
 
     #[test]

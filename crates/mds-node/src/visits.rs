@@ -4,12 +4,15 @@ use std::time::{Duration, Instant};
 use mds_index::VisitDelta;
 
 const IDLE: Duration = Duration::from_secs(30 * 60);
+const PACE: Duration = Duration::from_secs(60);
+const PACE_MAX: usize = 20;
 
 struct OpenVisit {
     started: Instant,
     last: Instant,
     views: u32,
     bounce: bool,
+    searches_at: Vec<Instant>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -50,6 +53,7 @@ impl VisitBook {
                 last: now,
                 views: 1,
                 bounce: true,
+                searches_at: Vec::new(),
             },
         );
         delta.visits += 1;
@@ -67,6 +71,7 @@ impl VisitBook {
             return delta;
         };
         visit.last = now;
+        note_pace(visit, now);
         if visit.bounce {
             visit.bounce = false;
             delta.bounces -= 1;
@@ -80,6 +85,20 @@ impl VisitBook {
             delta.empty_searches += 1;
         }
         delta
+    }
+
+    /// Сессия без cookie или после перезапуска пропускается: первый поиск человека проходит.
+    /// Пачка с тем же номером останавливается здесь. Номер на диск не пишется.
+    pub fn pace_open(&mut self, token: &str, now: Instant) -> bool {
+        let Some(visit) = self.open.get_mut(token) else {
+            return true;
+        };
+        visit.searches_at.retain(|at| now.saturating_duration_since(*at) < PACE);
+        if visit.searches_at.len() >= PACE_MAX {
+            visit.last = now;
+            return false;
+        }
+        true
     }
 
     fn sweep(&mut self, now: Instant) -> VisitDelta {
@@ -101,6 +120,13 @@ impl VisitBook {
             }
         }
         delta
+    }
+}
+
+fn note_pace(visit: &mut OpenVisit, now: Instant) {
+    visit.searches_at.retain(|at| now.saturating_duration_since(*at) < PACE);
+    if visit.searches_at.len() < PACE_MAX {
+        visit.searches_at.push(now);
     }
 }
 
@@ -144,5 +170,25 @@ mod tests {
         assert_eq!(closed.timed_visits, 1);
         assert_eq!(closed.dwell_seconds, 40);
         assert_eq!(closed.visits, 1);
+    }
+
+    #[test]
+    fn a_burst_from_one_session_waits_and_a_new_session_does_not() {
+        let mut book = VisitBook::default();
+        let now = Instant::now();
+        let mark = SearchMark {
+            empty: false,
+            failed: false,
+            refused: false,
+        };
+        book.page("a", now);
+        for step in 0..20 {
+            let at = now + Duration::from_millis(step);
+            assert!(book.pace_open("a", at));
+            book.search("a", at, mark);
+        }
+        assert!(!book.pace_open("a", now + Duration::from_secs(30)));
+        assert!(book.pace_open("a", now + Duration::from_secs(61)));
+        assert!(book.pace_open("fresh", now));
     }
 }

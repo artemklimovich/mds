@@ -27,19 +27,45 @@ use spa::{parse_js_bundle, spa_script_urls};
 pub const USER_AGENT: &str = "MDS-Bot/0.1 (polite crawler; local index)";
 
 /// Текст страницы в UTF-8. Кодировку берём из заголовка, затем из `<meta>`.
-/// Правильный UTF-8 не перекодируем. Иначе пробуем Windows-1251.
+/// Правильный UTF-8 не перекодируем. Если заявленная кодировка даёт много
+/// пустых знаков вместо букв, пробуем Windows-1251 и KOI8-R.
 pub fn decode_body(bytes: &[u8], content_type: &str) -> String {
-    if let Some(label) = charset_label(content_type).or_else(|| meta_charset(bytes)) {
-        if let Some(encoding) = encoding_rs::Encoding::for_label(label.as_bytes()) {
-            let (text, _, _) = encoding.decode(bytes);
-            return text.into_owned();
+    let labeled = charset_label(content_type)
+        .or_else(|| meta_charset(bytes))
+        .and_then(|label| {
+            encoding_rs::Encoding::for_label(label.as_bytes()).map(|encoding| encoding.decode(bytes).0.into_owned())
+        });
+    if let Some(text) = &labeled {
+        if !heavily_garbled(text) {
+            return text.clone();
         }
-    }
-    if std::str::from_utf8(bytes).is_ok() {
+    } else if std::str::from_utf8(bytes).is_ok() {
         return String::from_utf8_lossy(bytes).into_owned();
     }
-    let (text, _, _) = encoding_rs::WINDOWS_1251.decode(bytes);
-    text.into_owned()
+    let cp = encoding_rs::WINDOWS_1251.decode(bytes).0.into_owned();
+    let koi = encoding_rs::KOI8_R.decode(bytes).0.into_owned();
+    let cp_letters = cyrillic_letters(&cp);
+    let koi_letters = cyrillic_letters(&koi);
+    if koi_letters > cp_letters && koi_letters >= 12 {
+        return koi;
+    }
+    if cp_letters >= 12 || labeled.is_none() {
+        return cp;
+    }
+    labeled.unwrap_or(cp)
+}
+
+fn heavily_garbled(text: &str) -> bool {
+    let chars = text.chars().count();
+    if chars == 0 {
+        return false;
+    }
+    let bad = text.chars().filter(|ch| *ch == '\u{FFFD}').count();
+    bad >= 12 && bad * 5 >= chars
+}
+
+fn cyrillic_letters(text: &str) -> usize {
+    text.chars().filter(|ch| ('\u{0400}'..='\u{04FF}').contains(ch)).count()
 }
 
 fn charset_label(content_type: &str) -> Option<String> {
@@ -1284,5 +1310,13 @@ mod tests {
         let mut koi = b"<meta charset=koi8-r>".to_vec();
         koi.extend_from_slice(&[0xCD, 0xA3, 0xC4]);
         assert!(decode_body(&koi, "text/html").contains("мёд"));
+        let phrase = "Начало каталога одноклассников и однокурсников, сервис персонификации";
+        let (encoded, _, _) = encoding_rs::WINDOWS_1251.encode(phrase);
+        let mut mislabeled = b"<meta charset=\"utf-8\"><title>".to_vec();
+        mislabeled.extend_from_slice(&encoded);
+        mislabeled.extend_from_slice(b"</title>");
+        let read = decode_body(&mislabeled, "text/html; charset=utf-8");
+        assert!(read.contains(phrase), "{read}");
+        assert!(!read.contains('\u{FFFD}'));
     }
 }

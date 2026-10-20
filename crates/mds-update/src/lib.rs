@@ -1,6 +1,6 @@
 use std::fs;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 mod model;
 mod network;
@@ -166,6 +166,66 @@ pub fn running_hash() -> String {
         .ok()
         .and_then(|path| hash_file(&path).ok())
         .unwrap_or_default()
+}
+
+/// `linux` — каталог улья, его подхватывает сама машина. `windows` — соседний каталог, улей его не запускает.
+pub fn package_os(asked: Option<&str>) -> Option<&'static str> {
+    match asked.map(str::trim).filter(|value| !value.is_empty()) {
+        None | Some("linux") => Some("linux"),
+        Some("windows") => Some("windows"),
+        _ => None,
+    }
+}
+
+pub fn release_dir(root: &Path, os: &str) -> Option<PathBuf> {
+    match os {
+        "linux" => Some(root.to_path_buf()),
+        "windows" => Some(root.join("windows")),
+        _ => None,
+    }
+}
+
+pub fn host_os() -> Option<&'static str> {
+    if cfg!(windows) {
+        Some("windows")
+    } else if cfg!(target_os = "linux") {
+        Some("linux")
+    } else {
+        None
+    }
+}
+
+#[derive(Debug)]
+pub enum Placed {
+    Replaced,
+    Staged(String),
+}
+
+pub fn place_verified(bytes: &[u8]) -> Result<Placed, UpdateError> {
+    place_at(&std::env::current_exe()?, bytes)
+}
+
+pub fn place_at(current: &Path, bytes: &[u8]) -> Result<Placed, UpdateError> {
+    if bytes.len() > MAX_BYTES {
+        return Err(UpdateError::TooLarge);
+    }
+    let name = current.file_name().and_then(|name| name.to_str()).unwrap_or("mds");
+    let staged = current.with_file_name(format!("{name}.next"));
+    if let Some(parent) = staged.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&staged, bytes)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = fs::metadata(&staged)?.permissions();
+        perms.set_mode(perms.mode() | 0o755);
+        fs::set_permissions(&staged, perms)?;
+    }
+    match fs::rename(&staged, current) {
+        Ok(()) => Ok(Placed::Replaced),
+        Err(_) => Ok(Placed::Staged(staged.display().to_string())),
+    }
 }
 
 pub fn save_release(dir: &Path, manifest: &ReleaseManifest, bytes: &[u8]) -> Result<(), UpdateError> {
@@ -441,6 +501,29 @@ mod tests {
         let loaded = load_newest(&dir).unwrap();
         let _ = fs::remove_dir_all(&dir);
         assert!(loaded.is_none());
+    }
+
+    #[test]
+    fn linux_and_windows_releases_live_apart() {
+        let root = std::env::temp_dir().join(format!("mds-os-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&root);
+        assert_eq!(package_os(None), Some("linux"));
+        assert_eq!(package_os(Some("windows")), Some("windows"));
+        assert_eq!(package_os(Some("macos")), None);
+        assert_eq!(release_dir(&root, "linux").unwrap(), root);
+        assert_eq!(release_dir(&root, "windows").unwrap(), root.join("windows"));
+        assert!(release_dir(&root, "other").is_none());
+        let file = root.join("mds");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(&file, b"old").unwrap();
+        match place_at(&file, b"new-bytes").unwrap() {
+            Placed::Replaced => assert_eq!(fs::read(&file).unwrap(), b"new-bytes"),
+            Placed::Staged(path) => {
+                assert_eq!(fs::read(&file).unwrap(), b"old");
+                assert_eq!(fs::read(path).unwrap(), b"new-bytes");
+            }
+        }
+        let _ = fs::remove_dir_all(&root);
     }
 
     #[test]

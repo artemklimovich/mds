@@ -19,6 +19,7 @@ pub use engine::Engine;
 pub use face::{serve_face, FaceConfig};
 pub use http::{serve, ServeConfig};
 pub use lite::{run_lite, LiteConfig};
+pub use updates::{pull_release, Pull};
 pub use model_sync::sync_model;
 
 use std::net::SocketAddr;

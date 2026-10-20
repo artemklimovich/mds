@@ -282,6 +282,10 @@ impl Engine {
 
     fn open_ready(db: &Path, embedder: Embedder) -> Result<Self, NodeError> {
         let index = Index::open(db)?;
+        let reread = index.queue_garbled_reread()?;
+        if reread > 0 {
+            eprintln!("MDS: {reread} страниц с битыми буквами будут прочитаны заново");
+        }
         let spool = TextSpool::open(&mds_index::spool_path(db))?;
         let removed = index.scrub_stored_pages()?;
         if removed > 0 {

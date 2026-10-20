@@ -296,7 +296,9 @@ pub async fn serve(engine: Engine, config: ServeConfig) -> Result<(), NodeError>
         .route("/download/mds.exe", get(download_bin))
         .route("/download/pchela.zip", get(download_zip))
         .route("/download/pchela-linux-x64.tar.gz", get(download_linux))
+        .route("/download/pchela-linux-x64.tar.gz.sha256", get(download_linux_sha))
         .route("/download/pchela-windows-x64.zip", get(download_windows))
+        .route("/download/pchela-windows-x64.zip.sha256", get(download_windows_sha))
         .route("/peer/search", post(peer_search))
         .route("/peer/v1/search", post(peer_search_v1))
         .route("/peer/v1/shard", post(peer_shard_v1))
@@ -361,6 +363,14 @@ fn visit_token(cookie: Option<&str>) -> (String, bool) {
     (crate::visits::fresh_token(), true)
 }
 
+fn session_token(cookie: Option<&str>) -> Option<String> {
+    let (token, fresh) = visit_token(cookie);
+    if fresh { None } else { Some(token) }
+}
+
+#[derive(Clone, Copy)]
+struct PaceHold;
+
 async fn count_visit(State(state): State<AppState>, request: Request, next: Next) -> Response {
     let path = request.uri().path().to_string();
     let cookie = request
@@ -369,6 +379,9 @@ async fn count_visit(State(state): State<AppState>, request: Request, next: Next
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
     let mut response = next.run(request).await;
+    if response.extensions().get::<PaceHold>().is_some() {
+        return response;
+    }
     let mark = response.extensions().get::<crate::visits::SearchMark>().copied();
     let fresh = remember_visit(&state, &path, cookie.as_deref(), mark).await;
     if let Some(token) = fresh {
@@ -461,7 +474,11 @@ async fn face_search(
     }
     let paint = gather_search(&state, &headers, &params).await;
     let cookie = headers.get(header::COOKIE).and_then(|value| value.to_str().ok());
-    let visit_cookie = remember_visit(&state, "/search", cookie, paint.mark).await;
+    let visit_cookie = if paint.held {
+        None
+    } else {
+        remember_visit(&state, "/search", cookie, paint.mark).await
+    };
     let (sites, pages) = census_cached(&state);
     let notice = mds_update::load_notice(&state.releases);
     let (offer_label, offer_href) = match paint.offer {
@@ -778,8 +795,22 @@ async fn peer_search(
     }))
 }
 
-async fn peer_update(State(state): State<AppState>) -> Result<Json<ReleaseManifest>, StatusCode> {
-    match mds_update::load_newest(&state.releases) {
+#[derive(Deserialize)]
+struct OsAsk {
+    os: Option<String>,
+}
+
+fn releases_for(root: &std::path::Path, asked: Option<String>) -> Result<PathBuf, StatusCode> {
+    let os = mds_update::package_os(asked.as_deref()).ok_or(StatusCode::NOT_FOUND)?;
+    mds_update::release_dir(root, os).ok_or(StatusCode::NOT_FOUND)
+}
+
+async fn peer_update(
+    State(state): State<AppState>,
+    Query(ask): Query<OsAsk>,
+) -> Result<Json<ReleaseManifest>, StatusCode> {
+    let dir = releases_for(&state.releases, ask.os)?;
+    match mds_update::load_newest(&dir) {
         Ok(Some((manifest, _))) => Ok(Json(manifest)),
         _ => Err(StatusCode::NOT_FOUND),
     }
@@ -804,8 +835,9 @@ async fn peer_notice_from(State(state): State<AppState>, Json(version): Json<Str
     StatusCode::NO_CONTENT
 }
 
-async fn peer_blob(State(state): State<AppState>) -> Result<Vec<u8>, StatusCode> {
-    match mds_update::load_newest(&state.releases) {
+async fn peer_blob(State(state): State<AppState>, Query(ask): Query<OsAsk>) -> Result<Vec<u8>, StatusCode> {
+    let dir = releases_for(&state.releases, ask.os)?;
+    match mds_update::load_newest(&dir) {
         Ok(Some((_, bytes))) => Ok(bytes),
         _ => Err(StatusCode::NOT_FOUND),
     }
@@ -857,8 +889,41 @@ async fn download_linux(State(state): State<AppState>) -> Response {
     send_archive(&state, "pchela-linux-x64.tar.gz").await
 }
 
+async fn download_linux_sha(State(state): State<AppState>) -> Response {
+    archive_sum(&state, "pchela-linux-x64.tar.gz").await
+}
+
 async fn download_windows(State(state): State<AppState>) -> Response {
     send_archive(&state, "pchela-windows-x64.zip").await
+}
+
+async fn download_windows_sha(State(state): State<AppState>) -> Response {
+    archive_sum(&state, "pchela-windows-x64.zip").await
+}
+
+async fn archive_sum(state: &AppState, name: &str) -> Response {
+    let path = state.downloads.join(name);
+    let named = name.to_string();
+    let hashed = tokio::task::spawn_blocking(move || mds_update::hash_path(&path))
+        .await
+        .ok()
+        .and_then(Result::ok);
+    let Some((hash, _)) = hashed else {
+        return Response::builder()
+            .status(StatusCode::NOT_FOUND)
+            .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+            .body(Body::from("Архив на этом улье ещё не лежит"))
+            .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response());
+    };
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
+        .header(
+            header::CONTENT_DISPOSITION,
+            format!("attachment; filename=\"{named}.sha256\""),
+        )
+        .body(Body::from(format!("{hash}  {named}\n")))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
 
 async fn send_archive(state: &AppState, name: &str) -> Response {
@@ -1605,9 +1670,14 @@ async fn download_page(State(state): State<AppState>) -> Html<String> {
     painted(&state, page_download(version.as_deref()))
 }
 
+fn newest_windows(state: &AppState) -> Option<(ReleaseManifest, Vec<u8>)> {
+    let dir = mds_update::release_dir(&state.releases, "windows")?;
+    mds_update::load_newest(&dir).ok().flatten()
+}
+
 async fn download_bin(State(state): State<AppState>) -> Response {
-    match mds_update::load_newest(&state.releases) {
-        Ok(Some((manifest, bytes))) => {
+    match newest_windows(&state) {
+        Some((manifest, bytes)) => {
             let filename = format!("mds-{}.exe", manifest.version);
             Response::builder()
                 .status(StatusCode::OK)
@@ -1628,7 +1698,7 @@ async fn download_bin(State(state): State<AppState>) -> Response {
 }
 
 async fn download_zip(State(state): State<AppState>) -> Response {
-    let Some((manifest, exe)) = mds_update::load_newest(&state.releases).ok().flatten() else {
+    let Some((manifest, exe)) = newest_windows(&state) else {
         return Response::builder()
             .status(StatusCode::NOT_FOUND)
             .header(header::CONTENT_TYPE, "text/plain; charset=utf-8")
@@ -1691,6 +1761,7 @@ struct SearchPaint {
     mark: Option<crate::visits::SearchMark>,
     adult_cookie: bool,
     refused: bool,
+    held: bool,
 }
 
 enum LocalReady {
@@ -1875,6 +1946,9 @@ async fn search(
     } else {
         painted(&state, html).into_response()
     };
+    if paint.held {
+        response.extensions_mut().insert(PaceHold);
+    }
     if paint.adult_cookie {
         if let Ok(value) = HeaderValue::from_str("mds_adult=1; Path=/; Max-Age=2592000; SameSite=Lax; HttpOnly") {
             response.headers_mut().insert(header::SET_COOKIE, value);
@@ -1944,6 +2018,7 @@ async fn gather_search(state: &AppState, headers: &HeaderMap, params: &SearchPar
             mark: None,
             adult_cookie: false,
             refused: false,
+            held: false,
         };
     }
     if query_lane(&query) == Lane::Hidden {
@@ -1968,7 +2043,37 @@ async fn gather_search(state: &AppState, headers: &HeaderMap, params: &SearchPar
             }),
             adult_cookie: false,
             refused: true,
+            held: false,
         };
+    }
+    let cookie = headers.get(header::COOKIE).and_then(|value| value.to_str().ok());
+    if let Some(token) = session_token(cookie) {
+        let now = std::time::Instant::now();
+        let open = {
+            let mut book = state.visits.lock().unwrap_or_else(|poison| poison.into_inner());
+            book.pace_open(&token, now)
+        };
+        if !open {
+            return SearchPaint {
+                query,
+                open: Vec::new(),
+                adult: Vec::new(),
+                adult_open: false,
+                page,
+                error: Some("Слишком часто. Подождите немного и повторите запрос.".into()),
+                region: chosen,
+                tab,
+                theme,
+                lat,
+                lon,
+                radius,
+                offer: None,
+                mark: None,
+                adult_cookie: false,
+                refused: false,
+                held: true,
+            };
+        }
     }
     let adult_open = params.adult.as_deref() == Some("1") || cookie_is(headers, "mds_adult", "1");
     let local = local_search(state, &query, kind_mask, theme_bits).await;
@@ -2044,6 +2149,7 @@ async fn gather_search(state: &AppState, headers: &HeaderMap, params: &SearchPar
                 }),
                 adult_cookie: params.adult.as_deref() == Some("1"),
                 refused: false,
+                held: false,
             }
         }
         Err(err) => SearchPaint {
@@ -2067,6 +2173,7 @@ async fn gather_search(state: &AppState, headers: &HeaderMap, params: &SearchPar
             }),
             adult_cookie: params.adult.as_deref() == Some("1"),
             refused: false,
+            held: false,
         },
     }
 }

@@ -2293,6 +2293,21 @@ impl Index {
         self.meta_set("bees_page", if on { "1" } else { "0" })
     }
 
+    /// Один раз ставит страницы с символом битой кодировки в ближайшее перечитывание
+    /// и забывает метку сервера, чтобы ответ «не изменилась» не сохранил старый текст.
+    pub fn queue_garbled_reread(&self) -> Result<usize, IndexError> {
+        if self.meta_get("garbled_reread")?.as_deref() == Some("1") {
+            return Ok(0);
+        }
+        let changed = self.conn.execute(
+            "UPDATE pages SET next_check = strftime('%s','now'), etag = NULL, modified = NULL
+             WHERE instr(title, char(65533)) > 0 OR instr(substr(text, 1, 800), char(65533)) > 0",
+            [],
+        )?;
+        self.meta_set("garbled_reread", "1")?;
+        Ok(changed)
+    }
+
     pub fn shell_ceiling(&self) -> Result<ShellCeiling, IndexError> {
         Ok(ShellCeiling {
             max_batch: clamp_meta(self.meta_get("shell_max_batch")?, 2, 30, 8),
@@ -2360,9 +2375,12 @@ impl Index {
         let jobs = {
             let mut stmt = tx
                 .prepare(&format!(
-                    "SELECT url, etag, modified FROM pages
+                    "SELECT url,
+                            CASE WHEN instr(title, char(65533)) > 0 THEN NULL ELSE etag END,
+                            CASE WHEN instr(title, char(65533)) > 0 THEN NULL ELSE modified END
+                     FROM pages
                      WHERE next_check <= strftime('%s','now') AND {NOT_VOLUNTEER}
-                     ORDER BY next_check ASC, id ASC LIMIT ?1"
+                     ORDER BY (instr(title, char(65533)) > 0) DESC, next_check ASC, id ASC LIMIT ?1"
                 ))
                 .map_err(|source| IndexError::Sqlite {
                     context: "refresh",

@@ -6,11 +6,11 @@ mod author;
 use clap::{Parser, Subcommand};
 use mds_crawl::CrawlPolicy;
 use mds_node::{
-    hash_admin_password, index_fixture_dir, run_lite, serve, serve_face, sync_model, Engine, FaceConfig, LiteConfig,
-    ServeConfig,
+    hash_admin_password, index_fixture_dir, pull_release, run_lite, serve, serve_face, sync_model, Engine, FaceConfig,
+    LiteConfig, Pull, ServeConfig,
 };
 use mds_update::{
-    generate_keypair, public_from_secret, save_release, sign_model, sign_release, PINNED_PUBLIC_HEX,
+    generate_keypair, public_from_secret, save_release, sign_model, sign_release, Placed, PINNED_PUBLIC_HEX,
     TRUSTED_NODES,
 };
 
@@ -124,6 +124,12 @@ enum Command {
         version: String,
         #[arg(long, default_value = "data/releases")]
         out: PathBuf,
+    },
+    /// Забрать подписанный файл своей системы с улья и поставить его на место этой программы.
+    Update {
+        /// Адрес улья, например https://beesearch.ru.
+        #[arg(long)]
+        hive: String,
     },
     /// Подписать каталог модели роя. Секрет остаётся у оператора, улей только отдаёт файлы.
     PublishModel {
@@ -322,6 +328,19 @@ async fn main() -> anyhow::Result<()> {
             );
             println!("работающая нода подхватит файл и отдаст его соседям по --peers");
         }
+        Command::Update { hive } => match pull_release(&hive).await? {
+            Pull::Current(version) => println!("уже стоит версия {version}"),
+            Pull::Installed {
+                version,
+                placed: Placed::Replaced,
+            } => println!("версия {version} проверена и записана. Перезапустите службу."),
+            Pull::Installed {
+                version,
+                placed: Placed::Staged(path),
+            } => println!(
+                "версия {version} проверена и записана в {path}. Остановите программу, замените ею текущий файл и запустите снова."
+            ),
+        },
         Command::PublishModel { key, dir, name } => {
             let secret = std::fs::read_to_string(&key)?;
             let public = public_from_secret(&secret)?;

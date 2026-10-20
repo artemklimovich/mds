@@ -99,7 +99,7 @@ pub fn render_results(
     let mut body = if let Some(error) = error {
         format!("<p class=\"error\">{}</p>", escape(error))
     } else if query.is_empty() {
-        "<p class=\"hint\">Поиск по страницам, которые обошла эта пчела. Слова и смысл, на русском и на английском, без фильтра по языку.</p>".into()
+        "<p class=\"hint\">Пчелопоиск — свободный децентрализованный поиск живых сайтов. В выдаче ссылка на страницу, без рекламы и без пересказа вместо ссылки. Индекс держат отдельные ноды, ноду можно поставить самому.</p>".into()
     } else if hits.is_empty() && adult.is_empty() {
         if tab_mask(tab) == 0 && theme_mask(theme) == 0 {
             "<p class=\"hint\">Ничего не нашлось.</p>".into()
@@ -172,11 +172,11 @@ pub fn render_results(
             } else {
                 shop_rail(hit, &mut seen_shops)
             };
+            let title = escape(&visible_title(hit));
+            let snippet = escape(&visible_snippet(hit));
             list.push_str(&format!(
                 "<li>{shot}<a href=\"{url}\">{title}</a>{price}<div class=\"url\">{url}</div><p>{snippet}</p>{badges}{rail}</li>",
                 url = escape(&hit.url),
-                title = escape(&hit.title),
-                snippet = escape(&hit.snippet),
             ));
         }
         if open_list {
@@ -317,13 +317,62 @@ p.region-now + p.subject-now, p.subject-now + p.region-now {{ margin-top: 2px; }
 nav.kinds {{ display: flex; flex-wrap: wrap; gap: 8px 14px; margin: 4px 0 16px; }}
 nav.kinds a {{ color: #5f6368; text-decoration: none; font-size: 14px; padding-bottom: 6px; }}
 nav.kinds a.on {{ color: #202124; font-weight: 600; border-bottom: 2px solid #202124; }}
-.bee-story .portrait {{ display: block; width: 220px; height: 220px; margin: 4px auto 8px; }}
-.bee-story h3 {{ margin: 22px 0 8px; font-size: 20px; }}
+.bee-story h3 {{ margin: 0 0 8px; font-size: 20px; scroll-margin-top: 12px; }}
+nav.bee-toc {{ display: flex; flex-wrap: wrap; gap: 8px 14px; margin: 4px 0 18px; }}
+nav.bee-toc a {{ color: #5c3a12; }}
+.bee-story section {{ margin: 8px 0 22px; padding-top: 18px; border-top: 1px solid #f0e2a8; }}
+figure.bee-shot {{ margin: 0 0 12px; max-width: 420px; }}
+figure.bee-shot .frame {{ position: relative; display: block; }}
+figure.bee-shot img {{ display: block; width: 100%; height: auto; border-radius: 12px; background: #f6f1e7; }}
+figure.bee-shot .photo {{ position: absolute; left: 0; top: 0; width: 100%; height: 100%; object-fit: cover; opacity: 0; }}
+figure.bee-shot:hover .photo, figure.bee-shot:focus-within .photo {{ opacity: 1; }}
+figure.bee-shot figcaption {{ margin: 6px 0 0; color: #6b645c; font-size: 12px; line-height: 1.4; }}
+figure.bee-shot figcaption a {{ color: #5c3a12; }}
 form.bee-find {{ display: flex; gap: 8px; align-items: center; margin: 12px 0; }}
 form.bee-find input[name=q] {{ flex: 1; min-width: 0; height: 44px; border: 1px solid #e7e1d6; border-radius: 22px; padding: 0 16px; font: inherit; font-size: 16px; }}
 form.bee-find button {{ height: 44px; padding: 0 16px; border: 0; border-radius: 22px; background: #1c1612; color: #fff; font: inherit; cursor: pointer; }}
 .bee-picks {{ display: flex; flex-wrap: wrap; gap: 8px; margin: 8px 0 16px; }}
 .bee-picks a {{ padding: 6px 12px; border-radius: 16px; background: #fff8e1; border: 1px solid #f0e2a8; color: #1c1612; text-decoration: none; }}
+body.bees {{ background: radial-gradient(ellipse at 8% -8%, #ffe7a3 0, transparent 32%), radial-gradient(ellipse at 100% 0, #f6d98a 0, transparent 26%), #fffaf2; color: #1c1612; }}
+body.bees main {{ max-width: 1180px; padding: 20px 32px 56px; }}
+body.bees h1 {{ text-align: center; margin: 0 0 4px; }}
+body.bees form[action="/search"]:not(.bee-find) {{ max-width: 680px; margin: 8px auto 18px; }}
+body.bees article h2 {{ margin: 8px 0 10px; font-family: Georgia, "Times New Roman", serif; font-size: clamp(40px, 5vw, 68px); font-weight: 500; letter-spacing: -0.035em; line-height: 0.95; text-align: center; }}
+body.bees .bee-lead {{ max-width: 62ch; margin: 0 auto 28px; font-size: 18px; line-height: 1.55; color: #3d342c; text-align: center; }}
+body.bees .bee-sheet {{ display: grid; grid-template-columns: 232px minmax(0, 1fr); gap: 28px; align-items: start; }}
+body.bees nav.bee-toc {{ position: sticky; top: 16px; display: flex; flex-direction: column; flex-wrap: nowrap; gap: 2px; margin: 0; padding: 10px; border: 1px solid #f0e2a8; border-radius: 18px; background: rgba(255,255,255,.78); }}
+body.bees nav.bee-toc a {{ display: flex; gap: 8px; align-items: baseline; padding: 7px 8px; border-radius: 10px; color: #5c3a12; text-decoration: none; line-height: 1.3; }}
+body.bees nav.bee-toc a span {{ flex: 0 0 auto; color: #c9a227; font-size: 12px; font-variant-numeric: tabular-nums; }}
+body.bees nav.bee-toc a:hover {{ background: #fff8e1; }}
+body.bees .bee-chapters {{ display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }}
+body.bees .bee-story section {{ margin: 0; padding: 20px 22px 16px; border: 1px solid #f0e2a8; border-radius: 22px; background: #fff; }}
+body.bees .bee-story section:has(.bee-shot) {{ grid-column: 1 / -1; display: grid; grid-template-columns: minmax(240px, 380px) minmax(0, 1fr); gap: 8px 28px; align-items: start; }}
+body.bees .bee-story section:has(.bee-shot) > .bee-shot {{ grid-column: 1; grid-row: 1 / span 4; max-width: none; margin: 0; }}
+body.bees .bee-story section:nth-of-type(even):has(.bee-shot) > .bee-shot {{ grid-column: 2; }}
+body.bees .bee-story section:nth-of-type(even):has(.bee-shot) > h3,
+body.bees .bee-story section:nth-of-type(even):has(.bee-shot) > p,
+body.bees .bee-story section:nth-of-type(even):has(.bee-shot) > .bee-picks,
+body.bees .bee-story section:nth-of-type(even):has(.bee-shot) > form {{ grid-column: 1; }}
+body.bees .bee-story h3 {{ font-family: Georgia, "Times New Roman", serif; font-size: 28px; font-weight: 500; }}
+body.bees .bee-story section p {{ margin: 0 0 10px; line-height: 1.55; }}
+body.bees form.bee-find {{ margin: 8px 0 0; }}
+body.bees figure.bee-shot img {{ border-radius: 16px; }}
+@media (max-width: 900px) {{
+  body.bees main {{ max-width: none; padding: 12px 14px 40px; }}
+  body.bees article h2 {{ font-size: 36px; }}
+  body.bees .bee-sheet {{ grid-template-columns: 1fr; gap: 14px; }}
+  body.bees nav.bee-toc {{ position: static; flex-direction: row; overflow-x: auto; gap: 6px; }}
+  body.bees nav.bee-toc a {{ white-space: nowrap; }}
+  body.bees .bee-chapters {{ grid-template-columns: 1fr; }}
+  body.bees .bee-story section:has(.bee-shot),
+  body.bees .bee-story section:nth-of-type(even):has(.bee-shot) {{ grid-template-columns: 1fr; }}
+  body.bees .bee-story section:has(.bee-shot) > .bee-shot,
+  body.bees .bee-story section:nth-of-type(even):has(.bee-shot) > .bee-shot,
+  body.bees .bee-story section:nth-of-type(even):has(.bee-shot) > h3,
+  body.bees .bee-story section:nth-of-type(even):has(.bee-shot) > p,
+  body.bees .bee-story section:nth-of-type(even):has(.bee-shot) > .bee-picks,
+  body.bees .bee-story section:nth-of-type(even):has(.bee-shot) > form {{ grid-column: 1; grid-row: auto; }}
+}}
 a.shot img {{ display: block; max-width: 120px; max-height: 72px; margin: 0 0 6px; object-fit: cover; border-radius: 8px; }}
 span.price {{ margin-left: 8px; color: #137333; font-size: 16px; }}
 ul.offers {{ list-style: none; padding: 0; margin: 6px 0 0; }}
@@ -944,8 +993,8 @@ fn adult_section(query: &str, adult: &[Hit], adult_open: bool) -> String {
             out.push_str(&format!(
                 "<li><a href=\"{url}\">{title}</a><div class=\"url\">{url}</div><p>{snippet}</p></li>",
                 url = escape(&hit.url),
-                title = escape(&hit.title),
-                snippet = escape(&hit.snippet),
+                title = escape(&visible_title(hit)),
+                snippet = escape(&visible_snippet(hit)),
             ));
         }
         out.push_str("</ol>");
@@ -954,8 +1003,8 @@ fn adult_section(query: &str, adult: &[Hit], adult_open: bool) -> String {
         for hit in adult.iter().take(10) {
             out.push_str(&format!(
                 "<li><span>{title}</span><p>{snippet}</p></li>",
-                title = escape(&hit.title),
-                snippet = escape(&hit.snippet),
+                title = escape(&visible_title(hit)),
+                snippet = escape(&visible_snippet(hit)),
             ));
         }
         out.push_str("</ol>");
@@ -1838,7 +1887,9 @@ pub fn page_for_sites() -> String {
 <li>В выдаче появляется значок «держит пчелу» и небольшой подъём среди близких результатов. Страница с более точным совпадением слов остаётся выше.</li>
 <li>Когда на сайте тихо, пчела разбирает чужую очередь и ускоряет общий индекс.</li>
 </ul>
-<p>Новую сборку кладёт администратор этого сайта и перезапускает службу. Лёгкая пчела файл сама не меняет, и кабинет улья на чужой сервер обновление не присылает. Чем пчела отличается от полной ноды — на странице <a href="/indexing">Индексация</a>.</p>"#,
+<p>Новую сборку ставит администратор этого сайта и перезапускает службу. Команда забирает с улья файл этой системы, сверяет подпись и ставит его на место. Карточка <code>pchela.txt</code> при этом не меняется.</p>
+<pre>mds update --hive https://beesearch.ru</pre>
+<p>Лёгкая пчела файл сама не меняет по таймеру, и кабинет улья на чужой сервер обновление не присылает. Чем пчела отличается от полной ноды — на странице <a href="/indexing">Индексация</a>.</p>"#,
     )
 }
 
@@ -1885,7 +1936,7 @@ pub fn page_indexing() -> String {
 <p>Лёгкая пчела стоит на том же сервере, что и сайт. Она не открывает чужой поиск и не держит модель: модели нужен примерно 1 ГБ, а общий индекс — десятки гигабайт. Сначала она отдаёт свои новые и изменённые страницы. Страница без изменений по кругу не гоняется. Когда своих изменений нет, она помогает обойти чужую очередь улья. Темп этой очереди задаёт кабинет улья. Человек ищет на улье.</p>
 <p>Польза для сайта: потолок в сто страниц снимается, улей принимает страницы, которые отдаёт пчела. В выдаче появляется значок «держит пчелу» и небольшой подъём среди близких ссылок. Более точное совпадение слов остаётся выше. Как поставить:</p>
 <pre>mds node --lite --site https://ваш-сайт --hive https://beesearch.ru</pre>
-<p>Имя из журнала пчелы кладётся одной строкой в <code>/.well-known/pchela.txt</code> на этом сайте. Новую сборку лёгкой пчелы на сервер кладут вручную и перезапускают службу: сама она файл не меняет.</p>
+<p>Имя из журнала пчелы кладётся одной строкой в <code>/.well-known/pchela.txt</code> на этом сайте. Обновление запускает администратор: <code>mds update --hive https://beesearch.ru</code>, затем перезапуск службы. Сама по таймеру пчела файл не меняет, карточка на сайте остаётся.</p>
 <h3>Зачем полная нода</h3>
 <p>Полная нода — свой улей. Она держит кусок индекса, считает смысл запроса и открывает страницу поиска для людей своего края или своей компании. Журнал запросов остаётся на этой ноде и не уезжает в общий центр. Нужны память под модель и диск под страницы. Без соседней ноды она отвечает только своим индексом. С соседями запрос идёт к тем, кто держит нужный шард, и не больше чем к трём копиям.</p>
 <p>Её ставят, когда нужен свой адрес поиска в той же сети. Лёгкая пчела для этого не подходит: она поиск для людей не открывает. Файл и подключение — на странице <a href="/download">Скачать ноду</a>.</p>
@@ -1936,14 +1987,16 @@ pub fn page_download(release_version: Option<&str>) -> String {
 <h3>Скачать готовую программу</h3>
 <p>Одна программа. Мини-нода рядом с сайтом, полная нода и дополнительная нода на свободный компьютер — это один и тот же файл, отличаются команды. В Windows файл называется <code>mds.exe</code>, в Linux — <code>mds</code>. Полная нода забирает модель с улья при первом запуске, около 1 ГБ. Ссылки на файл весов на этой странице нет. Мини-нода модель не качает.</p>
 <ul>
-<li><a href="/download/pchela-windows-x64.zip">Windows, 64-бит, с этого улья</a></li>
-<li><a href="/download/pchela-linux-x64.tar.gz">Linux x86_64 с этого улья: Ubuntu 24.04 и другие Linux с glibc 2.39</a></li>
+<li><a href="/download/pchela-windows-x64.zip">Windows, 64-бит, с этого улья</a>. <a href="/download/pchela-windows-x64.zip.sha256">Контрольная сумма</a></li>
+<li><a href="/download/pchela-linux-x64.tar.gz">Linux x86_64 с этого улья: Ubuntu 24.04 и другие Linux с glibc 2.39</a>. <a href="/download/pchela-linux-x64.tar.gz.sha256">Контрольная сумма</a></li>
 <li><a href="{RELEASE_WINDOWS}">Windows, 64-бит, копия на GitHub</a></li>
 <li><a href="{RELEASE_LINUX}">Linux x86_64, копия на GitHub</a></li>
 <li><a href="/android">Приложение для Android</a></li>
 </ul>
 <p>Сайт этого улья — <a href="https://beesearch.ru/">https://beesearch.ru/</a>. Кабинет оператора — <a href="https://admin.beesearch.ru/login">https://admin.beesearch.ru/login</a>. В выложенную программу вписан адрес <a href="https://45.158.46.52/">https://45.158.46.52/</a>: он открывает ту же машину. Если адрес соседа не указан, нода подключается к ней сама. Улей запускают с <code>--alone</code>, чтобы он не звонил сам себе.</p>
-<p>Полная нода подхватывает новую версию сама, если в сети лежит подписанный файл новее того, что у неё запущен. На странице поиска появляется строка «Нужно обновиться». Архив со страницы загрузки сам программу не подменяет. Лёгкая пчела свой файл не меняет: новую сборку кладут на сервер сайта вручную и перезапускают службу. Телефон публичным входом не является. Приложение и то, как оно помогает индексу, — на странице <a href="/android">Приложение для Android</a>.</p>
+<p>Полная нода подхватывает новую версию сама, если в сети лежит подписанный файл новее того, что у неё запущен. На странице поиска появляется строка «Нужно обновиться». Архив со страницы загрузки сам программу не подменяет. Лёгкая пчела свой файл не меняет по таймеру. Хозяин машины запускает обновление: программа забирает с улья файл своей системы, сверяет подпись и ставит его на место. Службу после этого перезапускают. Карточка pchela.txt не меняется.</p>
+<pre>mds update --hive https://beesearch.ru</pre>
+<p>Телефон публичным входом не является. Приложение и то, как оно помогает индексу, — на странице <a href="/android">Приложение для Android</a>.</p>
 <p>Исходный код: <a href="{SOURCE_REPO}">{SOURCE_REPO}</a>.</p>
 <h3>Как подключить её к поиску</h3>
 <p>После запуска нода открывает свой сайт со строкой поиска. Чтобы она вошла в общую сеть, при старте укажите хотя бы один адрес соседней ноды. Без соседа нода отвечает только своим индексом.</p>
@@ -1986,7 +2039,7 @@ pub fn page_hive() -> String {
 <p>Шард — сохранённый кусок индекса. Пока улей один, он отвечает всем индексом, который собрал сам. Когда полных нод несколько, запрос идёт к тем, кто держит нужный шард, и не больше чем к трём копиям. Если одна копия отвечает заметно медленнее, улей в этот раз её не ждёт.</p>
 <p>Лёгкая пчела, компьютер без сайта и телефон шард не держат и на чужой поиск не отвечают. Они приносят текст, индекс остаётся на улье. Журнал запросов хранится на той ноде, которая ответила, без адреса человека.</p>
 <h3>Обновление</h3>
-<p>Полная нода подхватывает новую версию сама, если в сети лежит подписанный файл новее того, что у неё запущен. На странице поиска появляется строка «Нужно обновиться». Пока такого выпуска нет, новую сборку кладут вручную и перезапускают службу. Архив со страницы загрузки сам программу не подменяет.</p>
+<p>Полная нода подхватывает новую версию сама, если в сети лежит подписанный файл новее того, что у неё запущен. На странице поиска появляется строка «Нужно обновиться». Пока такого выпуска нет, новую сборку кладут вручную и перезапускают службу. Архив со страницы загрузки сам программу не подменяет. Лёгкая пчела и компьютер без сайта по таймеру файл не меняют: там запускают <code>mds update --hive https://beesearch.ru</code> и перезапускают службу.</p>
 <p><a href="/computer">Компьютер без сайта</a></p>"#,
     )
 }
@@ -2003,7 +2056,8 @@ pub fn page_computer() -> String {
 <p>Улей выдаёт адреса из очереди. Компьютер открывает страницы, забирает текст и отдаёт его улью. Улей записывает текст в индекс и сам считает смысл. Страница без изменений в индекс повторно не встраивается. Своего сайта у этой пчелы нет, поэтому файл <code>/.well-known/pchela.txt</code> не нужен.</p>
 <p>Темп берётся из кабинета улья, из потолка на странице «Нода»: сколько страниц за заход и какая минимальная пауза. Это тот же потолок, что у телефона в режиме «как сервер». Пчела рядом с сайтом ходит другим темпом, его задают на странице «Пчёлы»: сначала свои новые и изменённые страницы, потом чужая очередь.</p>
 <h3>Обновление</h3>
-<p>Файл на этом компьютере сам не меняется. Новую сборку скачивают со страницы загрузки, кладут на место старой и перезапускают программу. Кабинет улья обновление на чужой компьютер не отправляет: это было бы управление чужой машиной.</p>
+<p>Файл на этом компьютере сам не меняется по таймеру. Обновление запускают так: программа забирает с улья файл своей системы, сверяет подпись и ставит его на место. Службу после этого перезапускают. Тот же архив можно скачать со страницы загрузки и сверить по контрольной сумме. Кабинет улья сам на чужой компьютер файл не присылает.</p>
+<pre>mds update --hive https://beesearch.ru</pre>
 <p>Если у компьютера есть свой сайт, команда другая: <code>mds node --lite --site https://ваш-сайт --hive https://beesearch.ru</code>. Как её подтвердить — на странице <a href="/for-sites">Сайту</a>.</p>
 <p><a href="/hive">Сервер-улей</a></p>"#,
     )
@@ -2033,48 +2087,241 @@ pub fn page_android() -> String {
 pub fn page_help() -> String {
     article(
         "Помочь проекту",
-        r#"<p>Пчелопоиск — волонтёрский поиск. Выдачу не продают. Деньги нужны на улей: сервер, диск и нормальный канал, чтобы страницы открывались и обход не вставал.</p>
-<p>Один публичный улей — это 4 ядра, 8 ГБ памяти и SSD около 100 ГБ. Такой сервер стоит порядка двух тысяч рублей в месяц. Узкий канал за эти деньги не подходит.</p>
-<p>Перевод держит инфраструктуру роя. Рекламы в выдаче от этого не появится.</p>
-<p>Пожертвования идут на развитие проекта и в фонд на сохранение медоносных пчёл.</p>
+        r#"<p>Сейчас люди ищут на одном публичном улье. Цель — сто таких ульев, а дальше тысяча: свой вход в краях России и СНГ, чтобы поиск не стоял на одной машине, а индекс делился по регионам и держался, если один сервер замолчит.</p>
+<p>Улей — это сервер, с которого ищут люди. Мини-нода и телефон сервером не становятся: они приносят текст, индекс пишет улей. Рекламы в выдаче от участия не появляется.</p>
+<h3>Поставить улей</h3>
+<p>Именно эти машины закрывают цель в сто и в тысячу. Нужны белый адрес, домен и обычный канал. Видеокарта не нужна: модель считает на процессоре и занимает около 1 ГБ памяти.</p>
+<ul>
+<li>Публичный улей на десятки тысяч страниц: 4 ядра, 8 ГБ памяти, SSD около 100 ГБ.</li>
+<li>Крупный шард, около миллиона страниц: 8 ядер, 16 ГБ памяти, SSD около 500 ГБ.</li>
+<li>Узкий канал вроде 0,5 Мбит/с не подходит: с этой машины идут и ответы людям, и обход. Одного IP хватает. Диск лучше SSD: на жёстком диске ответы медленнее.</li>
+</ul>
+<p><a href="/hive">Как поставить улей</a>. <a href="/download">Скачать ноду</a>.</p>
+<h3>Мини-нода на сайте</h3>
+<p>На сервере, где уже лежит сайт, ставится лёгкая пчела. Отдельная машина не нужна: модель она не качает и чужой поиск не открывает. Сначала отдаёт свои новые страницы, потом помогает обойти чужую очередь. Сайт подтверждается файлом <code>/.well-known/pchela.txt</code>.</p>
+<p><a href="/for-sites">Что сделать на сайте</a>.</p>
+<h3>Мини-нода на отдельном компьютере</h3>
+<p>Старый или свободный компьютер с интернетом. Белый адрес и открытый порт не нужны. Свою страницу поиска он не открывает: читает очередь улья и отдаёт текст. Люди по-прежнему ищут на улье.</p>
+<p><a href="/computer">Компьютер без сайта</a>.</p>
+<h3>Телефон</h3>
+<p>Приложение открывает поиск. Пока индексация включена, телефон примерно раз в десять минут читает до двух страниц из очереди и отдаёт текст улью. Это работает по Wi-Fi и по мобильной сети, и когда приложение свёрнуто. Телефон не вход для других людей и шард не держит.</p>
+<p><a href="/android">Скачать приложение и включить индексацию</a>.</p>
+<h3>Деньгами</h3>
+<p>Пожертвования идут на развитие проекта и в фонд на сохранение медоносных пчёл. На них держат улей, у которого ещё нет своей машины: сервер, диск и канал.</p>
 <p>Фонд сохранения медоносных пчёл, Московская область. ОГРН 1265000072116, присвоен 15.10.2026. ИНН 5003176058, КПП 500301001. Президент Климович Артём Геннадьевич.</p>"#,
     )
 }
 
+struct BeeChapter {
+    id: &'static str,
+    title: &'static str,
+    figure: &'static str,
+    text: &'static str,
+    queries: &'static [(&'static str, &'static str)],
+}
+
+fn bee_picks(queries: &[(&str, &str)]) -> String {
+    queries
+        .iter()
+        .map(|(query, label)| format!("<a href=\"/search?q={}&amp;region=\">{label}</a>", encode_query(query)))
+        .collect()
+}
+
+fn bee_find(placeholder: &str) -> String {
+    format!(
+        r#"<form class="bee-find" action="/search" method="get"><input type="hidden" name="region" value=""><input name="q" placeholder="{placeholder}" aria-label="Запрос про пчёл"><button type="submit">Найти</button></form>"#
+    )
+}
+
+fn b64(bytes: &[u8]) -> String {
+    const TAB: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    let mut i = 0;
+    while i + 3 <= bytes.len() {
+        let n = ((bytes[i] as u32) << 16) | ((bytes[i + 1] as u32) << 8) | (bytes[i + 2] as u32);
+        out.push(TAB[((n >> 18) & 63) as usize] as char);
+        out.push(TAB[((n >> 12) & 63) as usize] as char);
+        out.push(TAB[((n >> 6) & 63) as usize] as char);
+        out.push(TAB[(n & 63) as usize] as char);
+        i += 3;
+    }
+    match bytes.len() - i {
+        1 => {
+            let n = (bytes[i] as u32) << 16;
+            out.push(TAB[((n >> 18) & 63) as usize] as char);
+            out.push(TAB[((n >> 12) & 63) as usize] as char);
+            out.push('=');
+            out.push('=');
+        }
+        2 => {
+            let n = ((bytes[i] as u32) << 16) | ((bytes[i + 1] as u32) << 8);
+            out.push(TAB[((n >> 18) & 63) as usize] as char);
+            out.push(TAB[((n >> 12) & 63) as usize] as char);
+            out.push(TAB[((n >> 6) & 63) as usize] as char);
+            out.push('=');
+        }
+        _ => {}
+    }
+    out
+}
+
+fn bee_shot(kind: &str) -> String {
+    let (draw, photo, alt, credit) = match kind {
+        "pollen" => (
+            include_bytes!("../assets/bee-pollen-draw.jpg").as_slice(),
+            include_bytes!("../assets/bee-pollen.jpg").as_slice(),
+            "Медоносная пчела в пыльце на цветке",
+            r#"Фото: <a href="https://commons.wikimedia.org/wiki/File:Bee_Collecting_Pollen_2004-08-14.jpg">Jon Sullivan</a>, общественное достояние."#,
+        ),
+        "flower" => (
+            include_bytes!("../assets/bee-nectar-draw.jpg").as_slice(),
+            include_bytes!("../assets/bee-nectar.jpg").as_slice(),
+            "Медоносная пчела на цветке",
+            r#"Фото: <a href="https://commons.wikimedia.org/wiki/File:European_honey_bee_extracts_nectar.jpg">John Severns</a>, общественное достояние."#,
+        ),
+        "comb" => (
+            include_bytes!("../assets/bee-comb-draw.jpg").as_slice(),
+            include_bytes!("../assets/bee-comb.jpg").as_slice(),
+            "Медоносная пчела на сотах",
+            r#"Фото: <a href="https://commons.wikimedia.org/wiki/File:Western_honey_bee_on_a_honeycomb.jpg">Matthew T Rader</a>, CC BY-SA 4.0."#,
+        ),
+        "hive" => (
+            include_bytes!("../assets/bee-yard-draw.jpg").as_slice(),
+            include_bytes!("../assets/bee-yard.jpg").as_slice(),
+            "Открытый улей с рамками",
+            r#"Фото: <a href="https://commons.wikimedia.org/wiki/File:Open_Langstroth_hive_of_Italian_honeybees.jpg">Benlisquare</a>, CC BY-SA 4.0."#,
+        ),
+        _ => return String::new(),
+    };
+    format!(
+        r#"<figure class="bee-shot" tabindex="0"><span class="frame"><img class="draw" alt="{alt}" src="data:image/jpeg;base64,{draw}"><img class="photo" alt="" src="data:image/jpeg;base64,{photo}"></span><figcaption>Наведите, чтобы увидеть снимок. {credit}</figcaption></figure>"#,
+        draw = b64(draw),
+        photo = b64(photo),
+    )
+}
+
+fn bee_chapter(chapter: &BeeChapter) -> String {
+    let figure = bee_shot(chapter.figure);
+    format!(
+        r#"<section id="{id}"><h3>{title}</h3>{figure}<p>{text}</p><div class="bee-picks">{picks}</div>{find}</section>"#,
+        id = chapter.id,
+        title = chapter.title,
+        text = chapter.text,
+        picks = bee_picks(chapter.queries),
+        find = bee_find(chapter.queries.first().map(|(query, _)| *query).unwrap_or("пчёлы")),
+    )
+}
+
 pub fn page_bees() -> String {
-    let picks = [
-        ("пчеловодство", "Пчеловодство"),
-        ("пасека", "Пасека"),
-        ("медоносная пчела", "Медоносная пчела"),
-        ("мёд", "Мёд"),
-        ("медоносные растения", "Медоносы"),
-    ]
-    .into_iter()
-    .map(|(query, label)| format!("<a href=\"/search?q={}&amp;region=\">{label}</a>", encode_query(query)))
-    .collect::<String>();
-    article(
+    static READY: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    READY.get_or_init(compose_bees_page).clone()
+}
+
+fn compose_bees_page() -> String {
+    let chapters = [
+        BeeChapter {
+            id: "who",
+            title: "Пчела и медоносная пчела",
+            figure: "pollen",
+            text: "Пчёлы — множество видов, которые кормятся нектаром и пыльцой. Медоносная пчела — один из них, её и держат на пасеке. Шмель, пчела-листорез и пчела, которая гнездится в земле, тоже пчёлы. Семья улья устроена у них по-другому.",
+            queries: &[("медоносная пчела", "Медоносная пчела"), ("дикие пчёлы", "Дикие пчёлы")],
+        },
+        BeeChapter {
+            id: "family",
+            title: "Семья",
+            figure: "comb",
+            text: "Семья медоносной пчелы держит одну матку. Летом в ней десятки тысяч рабочих пчёл и трутни. Матка кладёт яйца. Рабочие кормят расплод, строят соты, носят нектар и стерегут леток. Трутни нужны семье летом. Год семьи читается по взятку: весеннее развитие, главный медосбор и подготовка к зимовке.",
+            queries: &[("пчелиная семья", "Пчелиная семья"), ("пчелиная матка", "Матка"), ("трутень", "Трутень")],
+        },
+        BeeChapter {
+            id: "flower",
+            title: "Цветок и опыление",
+            figure: "flower",
+            text: "С цветка пчела берёт нектар как корм и пыльцу как белок. Пыльца цепляется к волоскам и попадает на другой цветок. Так завязываются плоды яблони, гречихи, подсолнечника и луговых трав. В Центральной России и в Московской области это чаще сад, клевер и луг, чем одно степное поле. Диким пчёлам нужен разный цвет весь сезон.",
+            queries: &[("опыление пчёлами", "Опыление"), ("медоносные растения", "Медоносы")],
+        },
+        BeeChapter {
+            id: "sight",
+            title: "Как пчела видит",
+            figure: "",
+            text: "У пчелы два больших фасеточных глаза и три простых глазка на темени. Фасетки складывают картину в полёте. Красный она различает плохо, а ультрафиолет на лепестке видит. Сборщица, вернувшись в улей, показывает направление корма пробежкой по соту. Эту пробежку называют танцем.",
+            queries: &[("зрение пчелы", "Зрение пчелы"), ("танец пчёл", "Танец пчёл")],
+        },
+        BeeChapter {
+            id: "hive",
+            title: "Улей и пасека",
+            figure: "hive",
+            text: "Пасека — место, где стоят ульи. В улье рамки с сотами: в ячейках расплод, перга и мёд. Леток — вход, его сторожат. Взяток — время, когда цветок отдаёт много нектара. Зимой семья сидит клубом на сотах и ест то, что успела сложить.",
+            queries: &[("пасека", "Пасека"), ("улей", "Улей"), ("зимовка пчёл", "Зимовка")],
+        },
+        BeeChapter {
+            id: "honey",
+            title: "Мёд и другие продукты",
+            figure: "",
+            text: "Мёд семья делает из нектара и запечатывает в ячейке, когда он созрел. Воск она выделяет сама и строит из него соты. Перга — пыльца, сложенная в ячейку. Прополис — смолистая замазка щелей. Это разные продукты: мёд не заменяет пергу, а воск не заменяет мёд.",
+            queries: &[("натуральный мёд", "Натуральный мёд"), ("перга", "Перга"), ("пчелиный воск", "Воск")],
+        },
+        BeeChapter {
+            id: "plants",
+            title: "Медоносы",
+            figure: "",
+            text: "Медонос — растение, с которого семья берёт нектар или пыльцу. В стране это липа, гречиха, подсолнечник, акация, донник, кипрей, садовые цветы и луговое разнотравье. В Центральной России и в Московской области середину лета держит липа, а рядом цветут сад, клевер и луг. На юге дольше цветут акация и подсолнечник, в Сибири — кипрей. У каждого свой срок.",
+            queries: &[("медоносы", "Медоносы"), ("липовый мёд", "Липовый мёд"), ("гречишный мёд", "Гречишный мёд")],
+        },
+        BeeChapter {
+            id: "land",
+            title: "Пчеловодство в стране",
+            figure: "",
+            text: "На юге медосбор начинается раньше, и семья раньше набирает силу. В Центральной России, и в Московской области тоже, главный взяток чаще приходится на середину лета: липа, луг, клевер и сады, пасеки у леса и у дач. Зима здесь короче сибирской, но корм на клуб всё равно закладывают. В Сибири лето короткое, и пасека готовит зимовку заранее. Породу и календарь осмотров подбирают под место, а не по одной таблице на всю страну.",
+            queries: &[
+                ("пчеловодство", "Пчеловодство"),
+                ("пчеловодство Московской области", "Московская область"),
+                ("пчеловодство Центральной России", "Центральная Россия"),
+                ("пчеловодство Сибири", "Сибирь"),
+                ("пчеловодство Кубани", "Кубань"),
+            ],
+        },
+        BeeChapter {
+            id: "loss",
+            title: "От чего гибнет семья",
+            figure: "",
+            text: "Семья слабеет от голодной зимовки, от клеща варроа, от болезней расплода и от обработки поля в часы лёта. Яд на цветущем рапсе или в саду убивает сборщиц, которые не успевают вернуться. В Центральной России и в Московской области улей чаще стоит у сада и дачи, чем у одного большого поля. Сильная семья держится кормом, осмотром и тем, что рядом цветёт не одно поле.",
+            queries: &[("гибель пчёл", "Гибель пчёл"), ("варроатоз", "Варроатоз"), ("пестициды и пчёлы", "Пестициды и пчёлы")],
+        },
+        BeeChapter {
+            id: "read",
+            title: "Где читать дальше",
+            figure: "",
+            text: "Дальше стоит открывать живую страницу хозяйства, общества пчеловодов, книги или института. Адрес ведёт на сам сайт. Запрос уходит в тот же поиск, что и обычная строка, и ищет по всей стране. Пока кнопку «Найти» не нажали, улей страницы не считает и модель не будит.",
+            queries: &[("общество пчеловодов", "Общество пчеловодов"), ("книга по пчеловодству", "Книга")],
+        },
+    ];
+    let toc = chapters
+        .iter()
+        .enumerate()
+        .map(|(index, chapter)| {
+            format!(
+                "<a href=\"#{id}\"><span>{num:02}</span>{title}</a>",
+                id = chapter.id,
+                num = index + 1,
+                title = chapter.title
+            )
+        })
+        .collect::<String>();
+    let body = chapters.iter().map(bee_chapter).collect::<String>();
+    let page = article(
         "Всё о пчёлах",
         &format!(
-            r#"<div class="bee-story">{bee}
-<p>Короткая справка о медоносной пчеле и пчеловодстве. Это не пересказ чужой статьи и не ответ вместо ссылки. Ниже можно искать живые страницы пасек, хозяйств и книг по всей стране: регион этой ноды к запросу не прикрепляется.</p>
-<h3>Медоносная пчела</h3>
-<p>Медоносная пчела живёт семьёй, а не поодиночке. Семья держит одну матку, летом десятки тысяч рабочих пчёл и трутней. Рабочие приносят нектар и пыльцу, строят соты, кормят расплод и стерегут леток.</p>
-<h3>Мёд и опыление</h3>
-<p>Мёд семья делает из нектара и кормится им зимой. По дороге с цветка на цветок пчёлы переносят пыльцу. Без этого хуже урожаи садов, полей гречихи, подсолнечника и лугового разнотравья.</p>
-<h3>Пчеловодство</h3>
-<p>Пчеловод держит семьи в ульях на пасеке. В сезон смотрит расплод, силу семьи и взяток, откачивает зрелый мёд и готовит зимовку. Сроки медосбора и породы разные: на юге, в средней полосе и в Сибири пасека живёт не в один календарь.</p>
-<h3>Найти по всей стране</h3>
-<p>Запрос уходит в тот же поиск, что и обычная строка. Пока кнопку не нажали, улей страницы не считает и модель не будит. Карточки маркетплейсов и видеоплощадки в эту выдачу не подмешиваются: их отсекает общий поиск.</p>
-<form class="bee-find" action="/search" method="get">
-<input type="hidden" name="region" value="">
-<input name="q" placeholder="Порода, пасека, мёд, растение" aria-label="Запрос про пчёл">
-<button type="submit">Найти</button>
-</form>
-<div class="bee-picks">{picks}</div>
+            r#"<div class="bee-story">
+<p class="bee-lead">Здесь можно разобраться, кто такая пчела, как живёт семья и что искать дальше. Текст этого раздела свой. Каждая глава открывает поиск живых страниц по всей стране: регион ноды к запросу не прикрепляется. Рисунок карандашом, снимок открывается при наведении.</p>
+<div class="bee-sheet">
+<nav class="bee-toc" aria-label="Главы">{toc}</nav>
+<div class="bee-chapters">{body}</div>
+</div>
 </div>"#,
-            bee = bee_svg("portrait"),
         ),
-    )
+    );
+    page.replacen("<body>", "<body class=\"bees\">", 1)
 }
 
 pub fn page_lost() -> String {
@@ -2253,6 +2500,18 @@ fn badges(
     out
 }
 
+fn visible_title(hit: &Hit) -> String {
+    let clean = mds_types::shown_text(&hit.title);
+    if !clean.is_empty() {
+        return clean;
+    }
+    host_of_url(&hit.url).unwrap_or_else(|| hit.url.clone())
+}
+
+fn visible_snippet(hit: &Hit) -> String {
+    mds_types::shown_text(&hit.snippet)
+}
+
 fn escape(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
     for ch in text.chars() {
@@ -2335,7 +2594,8 @@ mod tests {
         assert!(home.contains("class=\"home\""));
         assert!(home.contains("Bee search"));
         assert!(home.contains("Пчелопоиск"));
-        assert!(home.contains("без фильтра по языку"));
+        assert!(home.contains("без рекламы"));
+        assert!(home.contains("децентрализованный поиск"));
         assert!(home.contains("ПчелоПоиск"));
         assert!(home.contains("class=\"name\">Поиск"));
         assert!(home.contains("class=\"bee\""));
@@ -2402,19 +2662,46 @@ mod tests {
         assert!(help.contains("1265000072116"));
         assert!(help.contains("Фонд сохранения медоносных пчёл"));
         assert!(help.contains("на развитие проекта и в фонд"));
+        assert!(help.contains("сто таких ульев"));
+        assert!(help.contains("тысяча"));
+        assert!(help.contains("8 ядер, 16 ГБ"));
+        assert!(help.contains("href=\"/hive\""));
+        assert!(help.contains("href=\"/for-sites\""));
+        assert!(help.contains("href=\"/computer\""));
+        assert!(help.contains("href=\"/android\""));
+        assert!(!help.contains("двух тысяч"));
         assert!(help.contains("5003176058"));
         assert!(!help.contains("Когда появятся реквизиты"));
         assert!(help.contains("https://dartalab.ru/"));
         let story = page_bees();
+        assert_eq!(story, page_bees());
         assert!(story.contains("Медоносная пчела"));
         assert!(story.contains("одну матку"));
         assert!(story.contains("по всей стране"));
-        assert!(story.contains("class=\"portrait\""));
+        assert!(story.contains("class=\"bees\""));
+        assert!(story.contains("class=\"bee-sheet\""));
+        assert!(story.contains("class=\"bee-shot\""));
+        assert!(story.contains("data:image/jpeg;base64,"));
+        assert!(story.contains("Наведите, чтобы увидеть снимок"));
         assert!(story.contains("name=\"region\" value=\"\""));
         assert!(story.contains("Пчеловодство"));
+        assert!(story.contains("Московская область"));
+        assert!(story.contains("Центральной России"));
+        assert!(story.contains("href=\"#family\""));
+        assert!(story.contains("id=\"read\""));
+        assert!(story.contains("Варроатоз"));
+        assert_eq!(story.matches("class=\"bee-shot\"").count(), 4);
+        assert_eq!(story.matches("class=\"bee-find\"").count(), 10);
         let hidden = render_results("", &[], &[], false, 1, None, None, "", "", None, None, None, false);
         assert!(!hidden.contains("href=\"/bees\""));
         assert!(hidden.contains("class=\"home\""));
+        let mut broken = sample(1);
+        broken.url = "http://www.liveinternet.ru/nb_friends.php".into();
+        broken.title = "\u{FFFD}\u{FFFD} | \u{FFFD}/\u{FFFD}".into();
+        broken.snippet = "\u{FFFD} \u{FFFD} \u{FFFD}".into();
+        let row = render_results("пчёлы", &[broken], &[], false, 1, None, None, "", "", None, None, None, true);
+        assert!(row.contains("liveinternet.ru"));
+        assert!(!row.contains('\u{FFFD}'));
         assert_eq!(html.matches("https://dartalab.ru/").count(), 1);
         assert!(!html.contains("id=\"how\""));
     }
@@ -2468,6 +2755,10 @@ mod tests {
         assert!(page_download(None).contains("href=\"/computer\""));
         assert!(page_download(None).contains("Какую ноду ставить"));
         assert!(page_download(None).contains("Лёгкая пчела свой файл не меняет"));
+        assert!(page_download(None).contains("mds update --hive https://beesearch.ru"));
+        assert!(page_download(None).contains("/download/pchela-linux-x64.tar.gz.sha256"));
+        assert!(page_computer().contains("mds update --hive https://beesearch.ru"));
+        assert!(page_for_sites().contains("mds update --hive https://beesearch.ru"));
         let add = page_add("https://пасека.рф", None, false);
         assert!(add.contains("Проверить и добавить"));
         assert!(add.contains("https://пасека.рф"));

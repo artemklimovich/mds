@@ -2,8 +2,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use mds_update::{
-    load_newest, running_hash, save_notice, save_release, should_replace, stage_and_relaunch, verify_pinned,
-    ReleaseManifest, VERSION,
+    host_os, load_newest, place_verified, running_hash, save_notice, save_release, should_replace, stage_and_relaunch,
+    verify_pinned, Placed, ReleaseManifest, VERSION,
 };
 
 use crate::NodeError;
@@ -104,6 +104,60 @@ fn try_apply(manifest: &ReleaseManifest, bytes: &[u8]) -> Result<(), NodeError> 
     );
     stage_and_relaunch(bytes)?;
     std::process::exit(0);
+}
+
+pub enum Pull {
+    Current(String),
+    Installed { version: String, placed: Placed },
+}
+
+pub async fn pull_release(hive: &str) -> Result<Pull, NodeError> {
+    let hive = hive.trim().trim_end_matches('/');
+    if !hive.starts_with("http://") && !hive.starts_with("https://") {
+        return Err(NodeError::Message("улью нужен адрес http".into()));
+    }
+    let os = host_os().ok_or_else(|| NodeError::Message("для этой системы пакета нет".into()))?;
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(120))
+        .user_agent(mds_crawl::USER_AGENT)
+        .build()
+        .map_err(|err| NodeError::Message(err.to_string()))?;
+    let response = client
+        .get(format!("{hive}/peer/update"))
+        .query(&[("os", os)])
+        .send()
+        .await
+        .map_err(|err| NodeError::Message(err.to_string()))?;
+    if !response.status().is_success() {
+        return Err(NodeError::Message("улей не отдал описание версии".into()));
+    }
+    let body = response
+        .bytes()
+        .await
+        .map_err(|err| NodeError::Message(err.to_string()))?;
+    let manifest: ReleaseManifest = serde_json::from_slice(&body).map_err(|err| NodeError::Message(err.to_string()))?;
+    if !should_replace(VERSION, &running_hash(), &manifest) {
+        return Ok(Pull::Current(VERSION.to_string()));
+    }
+    let blob = client
+        .get(format!("{hive}/peer/update.bin"))
+        .query(&[("os", os)])
+        .send()
+        .await
+        .map_err(|err| NodeError::Message(err.to_string()))?;
+    if !blob.status().is_success() {
+        return Err(NodeError::Message("улей не отдал файл версии".into()));
+    }
+    let bytes = blob
+        .bytes()
+        .await
+        .map_err(|err| NodeError::Message(err.to_string()))?;
+    verify_pinned(&manifest, &bytes)?;
+    let placed = place_verified(&bytes)?;
+    Ok(Pull::Installed {
+        version: manifest.version,
+        placed,
+    })
 }
 
 fn peer_base(peer: &str) -> Option<String> {

@@ -1623,7 +1623,7 @@ dependencies = [
 
 [[package]]
 name = "mds-cli"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1637,7 +1637,7 @@ dependencies = [
 
 [[package]]
 name = "mds-crawl"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blake3",
  "encoding_rs",
@@ -1651,7 +1651,7 @@ dependencies = [
 
 [[package]]
 name = "mds-dht"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "blake3",
  "mds-types",
@@ -1660,7 +1660,7 @@ dependencies = [
 
 [[package]]
 name = "mds-embed"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "fastembed",
  "mds-types",
@@ -1670,7 +1670,7 @@ dependencies = [
 
 [[package]]
 name = "mds-index"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "mds-crawl",
  "mds-types",
@@ -1680,7 +1680,7 @@ dependencies = [
 
 [[package]]
 name = "mds-node"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "argon2",
  "axum",
@@ -1706,7 +1706,7 @@ dependencies = [
 
 [[package]]
 name = "mds-rank"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "mds-index",
  "mds-types",
@@ -1714,7 +1714,7 @@ dependencies = [
 
 [[package]]
 name = "mds-types"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "thiserror",
@@ -1722,7 +1722,7 @@ dependencies = [
 
 [[package]]
 name = "mds-update"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "ed25519-dalek",
  "mds-wire",
@@ -1735,7 +1735,7 @@ dependencies = [
 
 [[package]]
 name = "mds-web"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "mds-types",
  "serde",
@@ -1743,7 +1743,7 @@ dependencies = [
 
 [[package]]
 name = "mds-wire"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "mds-types",
  "serde",
