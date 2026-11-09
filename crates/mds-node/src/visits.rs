@@ -101,6 +101,10 @@ impl VisitBook {
         true
     }
 
+    pub fn flush_idle(&mut self, now: Instant) -> VisitDelta {
+        self.sweep(now)
+    }
+
     fn sweep(&mut self, now: Instant) -> VisitDelta {
         let mut delta = VisitDelta::default();
         let idle = self
@@ -121,6 +125,43 @@ impl VisitBook {
         }
         delta
     }
+}
+
+/// Боты, превью ссылок и предварительная загрузка в заходы поиска не входят.
+pub fn ignore_traffic(user_agent: &str, purpose: &str) -> bool {
+    let purpose = purpose.to_ascii_lowercase();
+    if purpose.contains("prefetch") || purpose.contains("prerender") {
+        return true;
+    }
+    let ua = user_agent.trim().to_ascii_lowercase();
+    if ua.is_empty() {
+        return true;
+    }
+    [
+        "bot",
+        "crawler",
+        "spider",
+        "crawling",
+        "preview",
+        "mds-bot",
+        "curl/",
+        "wget/",
+        "python-requests",
+        "httpie",
+        "go-http-client",
+        "prometheus",
+        "uptime",
+        "healthcheck",
+        "monitor",
+        "headless",
+        "scrapy",
+        "facebookexternalhit",
+        "whatsapp",
+        "telegram",
+        "slackbot",
+    ]
+    .iter()
+    .any(|mark| ua.contains(mark))
 }
 
 fn note_pace(visit: &mut OpenVisit, now: Instant) {
@@ -161,6 +202,18 @@ mod tests {
     }
 
     #[test]
+    fn idle_flush_writes_time_without_the_next_person() {
+        let mut book = VisitBook::default();
+        let now = Instant::now();
+        book.page("a", now);
+        book.page("a", now + Duration::from_secs(40));
+        let closed = book.flush_idle(now + IDLE + Duration::from_secs(41));
+        assert_eq!(closed.timed_visits, 1);
+        assert_eq!(closed.dwell_seconds, 40);
+        assert_eq!(closed.visits, 0);
+    }
+
+    #[test]
     fn idle_visit_adds_time_between_requests_only() {
         let mut book = VisitBook::default();
         let now = Instant::now();
@@ -190,5 +243,14 @@ mod tests {
         assert!(!book.pace_open("a", now + Duration::from_secs(30)));
         assert!(book.pace_open("a", now + Duration::from_secs(61)));
         assert!(book.pace_open("fresh", now));
+    }
+
+    #[test]
+    fn crawlers_and_prefetch_are_not_people() {
+        assert!(ignore_traffic("Mozilla/5.0 compatible; Googlebot/2.1", ""));
+        assert!(ignore_traffic("MDS-Bot", ""));
+        assert!(ignore_traffic("Mozilla/5.0", "prefetch"));
+        assert!(ignore_traffic("", ""));
+        assert!(!ignore_traffic("Mozilla/5.0 Chrome/120.0.0.0", ""));
     }
 }

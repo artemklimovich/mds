@@ -7,8 +7,14 @@ import android.graphics.Color
 import android.net.Uri
 import android.os.Build
 import android.os.Bundle
+import android.os.PowerManager
+import android.provider.Settings
 import android.view.Gravity
 import android.view.View
+import android.webkit.GeolocationPermissions
+import android.webkit.RenderProcessGoneDetail
+import android.webkit.WebChromeClient
+import android.webkit.WebResourceError
 import android.webkit.WebResourceRequest
 import android.webkit.WebView
 import android.webkit.WebViewClient
@@ -27,6 +33,10 @@ class MainActivity : AppCompatActivity() {
     private lateinit var gate: LinearLayout
     private var searching = false
     private var resetHistory = false
+    private var geoOrigin: String? = null
+    private var geoCallback: GeolocationPermissions.Callback? = null
+    private var lastCrawl = "Обход ещё не ходил к улью."
+    private var opening = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -45,14 +55,14 @@ class MainActivity : AppCompatActivity() {
                 }
                 prefs.edit().putString("pace", next).apply()
                 text = paceLabel()
-                HiveService.stop(this@MainActivity)
                 HiveService.start(this@MainActivity)
             }
         }
         status = TextView(this).apply {
             text = "Проверяю версию приложения"
-            setPadding(32, 28, 32, 16)
-            textSize = 14f
+            setPadding(24, 8, 24, 8)
+            textSize = 13f
+            maxLines = 3
             setTextColor(Color.parseColor("#4d5156"))
         }
         backToSearch = Button(this).apply {
@@ -81,19 +91,57 @@ class MainActivity : AppCompatActivity() {
                 }
 
                 override fun onPageStarted(view: WebView?, url: String?, favicon: android.graphics.Bitmap?) {
+                    opening = true
+                    status.text = "Открываю страницу…"
                     placeBack(url)
                 }
 
                 override fun onPageFinished(view: WebView?, url: String?) {
+                    opening = false
+                    status.text = lastCrawl
                     placeBack(url)
                     if (resetHistory) {
                         resetHistory = false
                         view?.clearHistory()
                     }
                 }
+
+                override fun onReceivedError(view: WebView, request: WebResourceRequest, error: WebResourceError) {
+                    if (!request.isForMainFrame) return
+                    opening = false
+                    status.text = "Страница не открылась. Нажмите «К поиску»."
+                }
+
+                override fun onRenderProcessGone(view: WebView, detail: RenderProcessGoneDetail): Boolean {
+                    opening = false
+                    status.text = "Экран поиска сбросился, открываю снова."
+                    view.loadUrl(TrustedNodes.hive())
+                    return true
+                }
             }
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
+            setBackgroundColor(Color.parseColor("#f6f1e7"))
+            settings.setGeolocationEnabled(true)
+            webChromeClient = object : WebChromeClient() {
+                override fun onGeolocationPermissionsShowPrompt(
+                    origin: String?,
+                    callback: GeolocationPermissions.Callback,
+                ) {
+                    val fine = checkSelfPermission(Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED
+                    val coarse = checkSelfPermission(Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+                    if (fine || coarse) {
+                        callback.invoke(origin, true, false)
+                        return
+                    }
+                    geoOrigin = origin
+                    geoCallback = callback
+                    requestPermissions(
+                        arrayOf(Manifest.permission.ACCESS_FINE_LOCATION, Manifest.permission.ACCESS_COARSE_LOCATION),
+                        2,
+                    )
+                }
+            }
             layoutParams = LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 0,
@@ -143,17 +191,61 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == 1) {
+            askBattery()
+            return
+        }
+        if (requestCode != 2) return
+        val ok = grantResults.any { it == PackageManager.PERMISSION_GRANTED }
+        geoCallback?.invoke(geoOrigin, ok, false)
+        geoCallback = null
+        geoOrigin = null
+    }
+
+    override fun onStart() {
+        super.onStart()
+        HiveStatus.listener = { text ->
+            runOnUiThread {
+                lastCrawl = text
+                if (searching && !opening) status.text = text
+            }
+        }
+    }
+
+    override fun onStop() {
+        HiveStatus.listener = null
+        super.onStop()
+    }
+
     private fun showSearch() {
         searching = true
         gate.visibility = View.GONE
-        status.visibility = View.GONE
+        status.visibility = View.VISIBLE
+        status.text = lastCrawl
         backToSearch.visibility = View.GONE
         web.visibility = View.VISIBLE
         web.loadUrl(TrustedNodes.hive())
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 1)
+        } else {
+            askBattery()
         }
         HiveService.start(this)
+    }
+
+    private fun askBattery() {
+        if (Build.VERSION.SDK_INT < 23) return
+        val prefs = getSharedPreferences("pchela", MODE_PRIVATE)
+        if (prefs.getBoolean("battery_asked", false)) return
+        val power = getSystemService(PowerManager::class.java) ?: return
+        if (power.isIgnoringBatteryOptimizations(packageName)) return
+        prefs.edit().putBoolean("battery_asked", true).apply()
+        try {
+            startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
+        } catch (_: Exception) {
+        }
     }
 
     private fun showGate(version: String) {

@@ -1,6 +1,6 @@
 use std::collections::HashSet;
 
-use mds_types::{host_of_url, open_feed, press_feed, region_names, tab_mask, theme_mask, Hit};
+use mds_types::{host_of_url, is_hive_host, open_feed, press_feed, region_names, tab_mask, theme_mask, Hit};
 use serde::{Deserialize, Serialize};
 
 pub const PAGE_SIZE: usize = 25;
@@ -74,6 +74,63 @@ pub fn offer_region(page: String, label: &str, href: &str) -> String {
         escape(label)
     );
     page.replacen("</main>", &format!("{line}</main>"), 1)
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReferenceCard {
+    pub source: String,
+    pub title: String,
+    pub extract: String,
+    pub url: String,
+}
+
+/// Короткий блок под строкой поиска. Страницы Википедии и Рувики в общий список не входят.
+pub fn reference_block(page: String, query: &str, notes: &[ReferenceCard]) -> String {
+    let query = query.trim();
+    if query.is_empty() {
+        return page;
+    }
+    let mut block = String::from(
+        "<section class=\"reference\"><h2>Справка</h2><p class=\"src\">Википедия и Рувики в общий индекс не входят.</p>",
+    );
+    if notes.is_empty() {
+        block.push_str(&format!(
+            "<p><a href=\"{}\">Рувики</a> · <a href=\"{}\">Википедия</a></p>",
+            escape(&wiki_search("https://ru.ruwiki.ru/w/index.php?search=", query)),
+            escape(&wiki_search("https://ru.wikipedia.org/w/index.php?search=", query)),
+        ));
+    } else {
+        for note in notes {
+            block.push_str(&format!(
+                "<article><a href=\"{url}\">{title}</a><div class=\"src\">{source}</div><p>{extract}</p></article>",
+                url = escape(&note.url),
+                title = escape(&note.title),
+                source = escape(&note.source),
+                extract = escape(&note.extract),
+            ));
+        }
+    }
+    block.push_str("</section>");
+    page.replacen("</form>", &format!("</form>{block}"), 1)
+}
+
+fn wiki_search(base: &str, query: &str) -> String {
+    let mut out = String::from(base);
+    for ch in query.chars().take(80) {
+        if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
+            out.push(ch);
+        } else {
+            let mut buf = [0_u8; 4];
+            for byte in ch.encode_utf8(&mut buf).as_bytes() {
+                out.push_str(&format!("%{byte:02X}"));
+            }
+        }
+    }
+    out
+}
+
+fn bee_swarm() -> String {
+    format!("<canvas class=\"swarm\" id=\"swarm\" aria-hidden=\"true\"></canvas>{BEE_SCRIPT}")
 }
 
 pub fn render(query: &str, hits: &[Hit], page: usize, error: Option<&str>) -> String {
@@ -155,6 +212,7 @@ pub fn render_results(
                 hit.via_words,
                 hit.via_meaning,
                 hit.volunteer,
+                is_hive_host(&host_of_url(&hit.url).unwrap_or_default()),
                 hit.region.as_deref(),
                 hit.place.as_deref(),
                 hit.distance_km,
@@ -257,6 +315,7 @@ fn document(
     let focus = if autofocus { " autofocus" } else { "" };
     let clear_hidden = if query.trim().is_empty() { " hidden" } else { "" };
     let root = if home { " class=\"home\"" } else { "" };
+    let swarm = if home { bee_swarm() } else { String::new() };
     let mark = wordmark();
     let english = if home { "<p class=\"en\">Bee search</p>" } else { "" };
     format!(
@@ -277,9 +336,21 @@ h1 {{ margin: 0 0 8px; text-align: center; }}
 .logo .name {{ font-family: Georgia, "Times New Roman", serif; font-size: 42px; font-weight: 700; letter-spacing: -0.03em; }}
 .home .logo .name {{ font-size: 68px; }}
 .home main {{ max-width: 640px; padding-top: 10vh; text-align: center; }}
+body.home {{ background: #f6f1e7; }}
+body.home canvas.swarm {{ position: fixed; inset: 0; width: 100%; height: 100%; z-index: 0; pointer-events: none; }}
+body.home main {{ position: relative; z-index: 2; }}
+body.home footer {{ position: relative; z-index: 0; }}
+body.home main::before {{ content: ""; position: absolute; z-index: -1; left: 50%; top: 4vh; width: min(760px, 108%); height: 70vh; transform: translateX(-50%); pointer-events: none; background: radial-gradient(ellipse at center, rgba(246,241,231,.94) 0%, rgba(246,241,231,.78) 42%, rgba(246,241,231,0) 74%); }}
+.home .hint, .home .en, .home .logo .name {{ text-shadow: 0 0 12px #f6f1e7, 0 0 22px #f6f1e7; }}
+section.reference {{ margin: 0 0 18px; padding: 12px 14px 4px; border: 1px solid #f0e2a8; border-radius: 16px; background: #fffdf6; text-align: left; }}
+section.reference h2 {{ margin: 0 0 6px; font-size: 15px; }}
+section.reference .src {{ margin: 0 0 8px; color: #6b645c; font-size: 12px; }}
+section.reference article {{ margin: 0 0 12px; }}
+section.reference article p {{ margin: 4px 0 0; color: #3d342c; }}
+section.reference a {{ color: #5c3a12; }}
 .home .en {{ margin: 4px 0 28px; color: #6b645c; font-size: 13px; letter-spacing: 0.22em; text-transform: uppercase; }}
-form {{ position: relative; margin: 12px 0 22px; }}
-form:has(details[open]) {{ margin-bottom: 58px; }}
+form {{ position: relative; z-index: 3; margin: 12px 0 22px; }}
+form:has(details[open]) {{ margin-bottom: min(72vh, 520px); }}
 .ask {{ display: flex; align-items: center; gap: 8px; border: 1px solid #e7e1d6; border-radius: 32px; padding: 6px 6px 6px 20px; background: #fff; box-shadow: 0 6px 18px rgba(28,22,18,.08); }}
 .ask:focus-within {{ border-color: #1c1612; box-shadow: 0 8px 22px rgba(28,22,18,.12); }}
 h2.band {{ font-size: 16px; font-weight: 600; margin: 8px 0 12px; }}
@@ -423,19 +494,23 @@ ul.check {{ list-style: none; padding: 0; margin: 8px 0 16px; }}
 ul.check li {{ margin: 0 0 8px; }}
 ul.check li.ok {{ color: #137333; }}
 ul.check li.fix {{ color: #8a4b08; }}
-footer {{ position: relative; flex-shrink: 0; margin-top: auto; border-top: 1px solid #dadce0; background: #f8f9fa; }}
-.foot {{ max-width: 680px; margin: 0 auto; padding: 22px 16px 28px; color: #4d5156; font-size: 14px; line-height: 1.5; text-align: center; }}
-.foot nav {{ display: flex; flex-wrap: wrap; gap: 14px; margin-bottom: 12px; justify-content: center; }}
+footer {{ position: relative; flex-shrink: 0; margin-top: auto; border-top: 1px solid #e7e1d6; background: #f8f9fa; }}
+.foot {{ max-width: 920px; margin: 0 auto; padding: 8px 16px 10px; color: #4d5156; font-size: 13px; line-height: 1.3; text-align: center; }}
+.foot nav {{ display: flex; flex-wrap: wrap; gap: 6px 12px; margin: 0 0 6px; justify-content: center; }}
 .foot a {{ color: #1a0dab; }}
-p.census {{ margin: 0 0 10px; color: #70757a; font-size: 13px; text-align: center; }}
-p.credit {{ display: flex; align-items: center; flex-wrap: wrap; gap: 12px; margin: 0; justify-content: center; }}
-.comb {{ position: static; display: block; width: 72px; height: 72px; margin: 12px auto 0; }}
-a.help {{ flex: 0 0 auto; margin: 0; padding: 3px 10px; border-radius: 12px; background: #fff8e1; border: 1px solid #f0c14b; color: #5c3a12; font-size: 12px; font-weight: 600; line-height: 1.4; text-decoration: none; white-space: nowrap; }}
+.foot .meta {{ display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 8px 14px; }}
+p.census {{ margin: 0; color: #70757a; font-size: 12px; text-align: center; }}
+p.credit {{ display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 0; justify-content: center; }}
+.comb {{ position: static; display: block; width: 28px; height: 28px; margin: 0; flex: 0 0 auto; }}
+a.help {{ flex: 0 0 auto; margin: 0; padding: 2px 9px; border-radius: 12px; background: #fff8e1; border: 1px solid #f0c14b; color: #5c3a12; font-size: 12px; font-weight: 600; line-height: 1.3; text-decoration: none; white-space: nowrap; }}
 body.cabinet main {{ max-width: 1080px; }}
 .cabinet {{ display: flex; gap: 28px; align-items: flex-start; }}
 .side {{ position: sticky; top: 12px; flex: 0 0 168px; display: grid; gap: 2px; }}
 .side a {{ display: block; padding: 8px 12px; border-radius: 8px; color: #3c4043; text-decoration: none; font-size: 14px; }}
 .side a:hover {{ background: #f1f3f4; }}
+.side a.on {{ background: #1c1612; color: #fff; }}
+.live-chart {{ min-height: 120px; }}
+.sheet-wait {{ color: #70757a; }}
 .sheets {{ flex: 1; min-width: 0; }}
 .sheets section {{ scroll-margin-top: 12px; margin: 0 0 28px; padding-bottom: 8px; }}
 .bars {{ display: grid; gap: 8px; margin: 8px 0 16px; }}
@@ -468,6 +543,7 @@ form.inline input {{ height: 36px; border: 1px solid #dadce0; border-radius: 8px
 </style>
 </head>
 <body{root}>
+{swarm}
 <main>
 <h1>{mark}</h1>
 {english}
@@ -494,6 +570,7 @@ form.inline input {{ height: 36px; border: 1px solid #dadce0; border-radius: 8px
         subject_line = subject_line(theme),
         tabs = tab_row(query, region, tab, theme, lat, lon, radius, home, show_bees),
         bee = search_bee_svg(),
+        swarm = swarm,
         ask_script = ASK_SCRIPT,
     )
 }
@@ -528,6 +605,7 @@ fn tab_row(
         ("gov", "Органы власти"),
         ("jobs", "Работа"),
         ("services", "Услуги"),
+        ("channel", "Каналы и соцсети"),
     ];
     let mut out = String::from("<nav class=\"kinds\" aria-label=\"Тип страницы\">");
     for (id, label) in TABS {
@@ -543,6 +621,127 @@ fn tab_row(
     out.push_str("</nav>");
     out
 }
+
+const BEE_SCRIPT: &str = r##"<script>
+(function () {
+  var canvas = document.getElementById("swarm");
+  if (!canvas) return;
+  var ctx = canvas.getContext("2d");
+  var reduce = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+  var pace = reduce ? 0.4 : 1;
+  var openWing = "~<(###)>~";
+  var shutWing = "v<(###)>v";
+  var bees = [];
+  var dust = [];
+  function layout() {
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
+    var w = window.innerWidth;
+    var h = window.innerHeight;
+    canvas.width = Math.floor(w * dpr);
+    canvas.height = Math.floor(h * dpr);
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    if (bees.length) return;
+    var n = Math.max(14, Math.min(26, Math.round(w / 58)));
+    for (var i = 0; i < n; i++) {
+      var depth = Math.random();
+      var dir = Math.random() < 0.5 ? -1 : 1;
+      bees.push({
+        x: Math.random() * w,
+        y0: h * (0.06 + Math.random() * 0.88),
+        vx: dir * (80 + depth * 140),
+        amp: 12 + depth * 42,
+        freq: 0.85 + Math.random() * 1.15,
+        phase: Math.random() * 6.28,
+        scale: 0.7 + depth * 0.95,
+        flap: 6 + Math.random() * 4
+      });
+    }
+    bees.sort(function (a, b) { return a.scale - b.scale; });
+    for (var d = 0; d < 36; d++) {
+      dust.push({
+        x: Math.random() * w,
+        y: Math.random() * h,
+        vx: (Math.random() - 0.5) * 22,
+        vy: -10 - Math.random() * 18
+      });
+    }
+  }
+  function mirror(ch) {
+    if (ch === "(") return ")";
+    if (ch === ")") return "(";
+    if (ch === "<") return ">";
+    if (ch === ">") return "<";
+    return ch;
+  }
+  function drawBee(bee, t, trail) {
+    var glyph = Math.floor(t * bee.flap + bee.phase) % 2 === 0 ? openWing : shutWing;
+    var chars = glyph.split("");
+    if (bee.vx < 0) {
+      chars.reverse();
+      for (var k = 0; k < chars.length; k++) chars[k] = mirror(chars[k]);
+    }
+    var y = bee.y0 + Math.sin(t * bee.freq + bee.phase) * bee.amp;
+    var size = Math.round(16 * bee.scale);
+    ctx.save();
+    ctx.translate(bee.x, y);
+    ctx.font = size + "px ui-monospace, Menlo, Consolas, monospace";
+    ctx.textBaseline = "middle";
+    var step = size * 0.62;
+    var alpha = trail ? 0.14 : 0.34 + bee.scale * 0.38;
+    for (var col = 0; col < chars.length; col++) {
+      var ch = chars[col];
+      var wing = ch === "~" || ch === "v";
+      ctx.fillStyle = wing ? "#c9a227" : (ch === "#" ? "#5c3a12" : "#1c1612");
+      ctx.globalAlpha = wing ? Math.min(0.95, alpha + 0.22) : alpha;
+      ctx.fillText(ch, (col - chars.length / 2) * step, 0);
+    }
+    ctx.restore();
+  }
+  var last = 0;
+  function paint(now) {
+    var w = window.innerWidth;
+    var h = window.innerHeight;
+    var dt = Math.min(0.05, last ? (now - last) / 1000 : 0.016);
+    last = now;
+    var t = now / 1000;
+    ctx.clearRect(0, 0, w, h);
+    ctx.globalAlpha = 1;
+    ctx.fillStyle = "#f6f1e7";
+    ctx.fillRect(0, 0, w, h);
+    ctx.fillStyle = "#c9a227";
+    ctx.font = "13px ui-monospace, Menlo, Consolas, monospace";
+    for (var i = 0; i < dust.length; i++) {
+      var speck = dust[i];
+      speck.x += speck.vx * dt * pace;
+      speck.y += speck.vy * dt * pace;
+      if (speck.y < -8) speck.y = h + 8;
+      if (speck.x < -8) speck.x = w + 8;
+      if (speck.x > w + 8) speck.x = -8;
+      ctx.globalAlpha = 0.35;
+      ctx.fillText(".", speck.x, speck.y);
+    }
+    for (var j = 0; j < bees.length; j++) {
+      var bee = bees[j];
+      bee.x += bee.vx * dt * pace;
+      if (bee.x > w + 90) bee.x = -90;
+      if (bee.x < -90) bee.x = w + 90;
+      var here = bee.x;
+      bee.x = here - bee.vx * 0.11 * pace;
+      drawBee(bee, t * pace, true);
+      bee.x = here;
+      drawBee(bee, t * pace, false);
+    }
+    requestAnimationFrame(paint);
+  }
+  layout();
+  window.addEventListener("resize", function () {
+    bees.length = 0;
+    dust.length = 0;
+    layout();
+  });
+  paint(performance.now());
+})();
+</script>"##;
 
 const ASK_SCRIPT: &str = r#"<script>
 (function () {
@@ -675,6 +874,9 @@ const ASK_SCRIPT: &str = r#"<script>
           lonInput.value = pos.coords.longitude.toFixed(3);
           var boxNow = document.querySelector("textarea[name=q]");
           if (boxNow && boxNow.value.trim() && boxNow.form) boxNow.form.requestSubmit();
+        }, function () {
+          radiusInput.value = "";
+          for (var j = 0; j < items.length; j++) items[j].classList.remove("on");
         });
       }
     });
@@ -706,9 +908,9 @@ document.querySelectorAll("section.wire").forEach(function (box) {
   var button = box.querySelector("button.wire-open");
   var rail = box.querySelector(".rail");
   var row = box.querySelector(".wire-row");
-  var query = (box.getAttribute("data-q") || "").toLowerCase().split(/\s+/).filter(Boolean);
   var feed = box.getAttribute("data-feed") || "";
   var offers = box.getAttribute("data-offers") || "";
+  var query = (feed || offers) ? [] : (box.getAttribute("data-q") || "").toLowerCase().split(/\s+/).filter(Boolean);
   var loaded = false;
   button.addEventListener("click", function () {
     if (!rail.hidden) {
@@ -745,7 +947,7 @@ document.querySelectorAll("section.wire").forEach(function (box) {
       if (!shown) {
         var empty = document.createElement("p");
         empty.className = "hint";
-        empty.textContent = offers ? "В фиде товаров сейчас нет." : "В свежих лентах этого запроса нет.";
+        empty.textContent = offers ? "В фиде товаров сейчас нет." : (feed ? "Свежие заголовки этого сайта сейчас не прочитались." : "В свежих лентах этого запроса нет.");
         row.appendChild(empty);
       }
     }).catch(function () {
@@ -1079,6 +1281,12 @@ pub struct BeeLine {
     pub month: i64,
     pub all: i64,
     pub quiet: bool,
+    #[serde(default)]
+    pub last: String,
+    #[serde(default)]
+    pub version: String,
+    #[serde(default)]
+    pub need_update: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -1090,6 +1298,8 @@ pub struct ActivityPoint {
     pub shell_pages: i64,
     pub cpu: i64,
     pub ram: i64,
+    #[serde(default)]
+    pub search_ms: i64,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -1108,6 +1318,12 @@ pub struct OperatorReport {
     pub db_bytes: u64,
     pub searches_per_minute: u64,
     pub avg_ms: u64,
+    #[serde(default)]
+    pub max_ms: u64,
+    #[serde(default)]
+    pub hour_peak_ms: u64,
+    #[serde(default)]
+    pub search_pace: Vec<ActivityPoint>,
     pub peers: Vec<PeerLine>,
     pub shells: ShellLine,
     pub bees: Vec<BeeLine>,
@@ -1173,16 +1389,6 @@ fn chosen_span(span: &str) -> &'static str {
     }
 }
 
-fn activity_rows<'a>(report: &'a OperatorReport, span: &str) -> &'a [ActivityPoint] {
-    match span {
-        "hour" => &report.activity.hours,
-        "day" => &report.activity.days,
-        "week" => &report.activity.weeks,
-        "month" => &report.activity.months,
-        _ => &report.activity.minutes,
-    }
-}
-
 fn short_bucket(span: &str, bucket: &str) -> String {
     match span {
         "minute" => bucket.rsplit(' ').next().unwrap_or(bucket).to_string(),
@@ -1209,7 +1415,7 @@ fn short_bucket(span: &str, bucket: &str) -> String {
     }
 }
 
-fn series_chart(name: &str, unit: &str, points: &[ActivityPoint], span: &str, color: &str, pick: fn(&ActivityPoint) -> i64) -> String {
+pub fn series_chart(name: &str, unit: &str, points: &[ActivityPoint], span: &str, color: &str, pick: fn(&ActivityPoint) -> i64) -> String {
     let drawn = points
         .iter()
         .map(|point| (short_bucket(span, &point.label), pick(point)))
@@ -1258,6 +1464,113 @@ fn span_nav(base: &str, span: &str) -> String {
     }
     nav.push_str("</nav>");
     nav
+}
+
+pub fn pair_chart(name: &str, points: &[(String, i64)], color: &str) -> String {
+    let last = points.last().map(|(_, value)| *value).unwrap_or(0);
+    format!(
+        "<p class=\"series\"><i style=\"background:{color}\"></i><span>{}</span><b>{}</b></p>{}",
+        escape(name),
+        grouped(last),
+        time_chart(points, color)
+    )
+}
+
+fn live_chart(name: &str, title: &str, legend: &str, span: &str) -> String {
+    format!(
+        "<h3>{title}</h3><div class=\"live-chart\" data-chart=\"{name}\" data-span=\"{span}\"><p class=\"legend\">Загружаю график…</p></div><p class=\"legend\">{legend}</p>"
+    )
+}
+
+const CABINET_SCRIPT: &str = r#"<script>
+(function () {
+  var root = document.querySelector("[data-sheet-root]");
+  if (!root) return;
+  var base = root.getAttribute("data-base") || "";
+  var sheet = root.getAttribute("data-sheet") || "node";
+  var span = root.getAttribute("data-span") || "minute";
+  var host = root.getAttribute("data-host") || "";
+  function fillCharts(scope) {
+    var boxes = scope.querySelectorAll("[data-chart]");
+    for (var i = 0; i < boxes.length; i++) {
+      (function (box) {
+        var name = box.getAttribute("data-chart");
+        var grain = box.getAttribute("data-span") || span;
+        var url = base + "/operator/chart?name=" + encodeURIComponent(name) + "&span=" + encodeURIComponent(grain);
+        fetch(url, { credentials: "same-origin" }).then(function (res) {
+          if (!res.ok) throw new Error("chart");
+          return res.text();
+        }).then(function (html) {
+          box.innerHTML = html;
+        }).catch(function () {
+          box.innerHTML = "<p class=\"legend\">График сейчас не открылся.</p>";
+        });
+      })(boxes[i]);
+    }
+  }
+  function loadSheet() {
+    var url = base + "/operator/live?sheet=" + encodeURIComponent(sheet) + "&span=" + encodeURIComponent(span);
+    if (host) url += "&host=" + encodeURIComponent(host);
+    fetch(url, { credentials: "same-origin" }).then(function (res) {
+      if (!res.ok) throw new Error("live");
+      return res.text();
+    }).then(function (html) {
+      root.innerHTML = html;
+      fillCharts(root);
+    }).catch(function () {
+      root.innerHTML = "<p class=\"sheet-wait\">Лист сейчас не открылся.</p>";
+    });
+  }
+  loadSheet();
+  if (sheet === "node" || sheet === "visits") {
+    setInterval(function () { fillCharts(root); }, 20000);
+  }
+})();
+</script>"#;
+
+fn side_nav(base: &str, sheet: &str, span: &str) -> String {
+    let base = escape(base);
+    let mut nav = String::from("<nav class=\"side\">");
+    for (key, title) in [
+        ("node", "Нода"),
+        ("visits", "Заходы"),
+        ("queries", "Запросы"),
+        ("journal", "Журнал"),
+        ("bees", "Пчёлы"),
+        ("lists", "Списки"),
+        ("index", "Индекс"),
+        ("door", "Дверь"),
+    ] {
+        let class = if key == sheet { " class=\"on\"" } else { "" };
+        let href = if key == "node" {
+            format!("{base}/operator?sheet=node&span={span}")
+        } else {
+            format!("{base}/operator?sheet={key}")
+        };
+        nav.push_str(&format!("<a href=\"{href}\"{class}>{title}</a>"));
+    }
+    nav.push_str("</nav>");
+    nav
+}
+
+pub fn cabinet_frame(base: &str, sheet: &str, span: &str, host: &str, note: &str) -> String {
+    let sheet = match sheet {
+        "visits" | "queries" | "journal" | "bees" | "index" | "door" | "lists" => sheet,
+        _ => "node",
+    };
+    let span = chosen_span(span);
+    let base_esc = escape(base);
+    let host_esc = escape(host);
+    let mut body = format!(
+        "<div class=\"cabinet\">{}<div class=\"sheets\" data-sheet-root data-base=\"{base_esc}\" data-sheet=\"{sheet}\" data-span=\"{span}\" data-host=\"{host_esc}\">",
+        side_nav(base, sheet, span)
+    );
+    if !note.is_empty() {
+        body.push_str(&format!("<p class=\"hint\">{}</p>", escape(note)));
+    }
+    body.push_str("<p class=\"sheet-wait\">Собираю лист…</p></div></div>");
+    body.push_str(CABINET_SCRIPT);
+    document("", &body, false, false, None, "", "", None, None, None, false).replacen("<body>", "<body class=\"cabinet\">", 1)
 }
 
 pub fn time_chart(points: &[(String, i64)], color: &str) -> String {
@@ -1361,6 +1674,23 @@ pub struct MapLine {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct HostCard {
+    pub host: String,
+    pub pages: i64,
+    pub queued: i64,
+    pub banned: bool,
+    pub muted: bool,
+    pub keep: bool,
+    pub volunteer: bool,
+    pub government: bool,
+    pub hive: bool,
+    pub tool_docs: bool,
+    pub model_maker: bool,
+    pub in_focus: bool,
+    pub rule: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CabinetSheets {
     pub version: String,
     pub region_label: String,
@@ -1369,6 +1699,12 @@ pub struct CabinetSheets {
     pub visits_day: VisitNumbers,
     pub visits_week: VisitNumbers,
     pub visits_month: VisitNumbers,
+    #[serde(default)]
+    pub visit_day_title: String,
+    #[serde(default)]
+    pub visit_week_title: String,
+    #[serde(default)]
+    pub visit_month_title: String,
     pub queries_day: Vec<(String, i64)>,
     pub queries_week: Vec<(String, i64)>,
     pub queries_month: Vec<(String, i64)>,
@@ -1377,28 +1713,49 @@ pub struct CabinetSheets {
     pub kind_counts: Vec<(String, String, String, i64)>,
     #[serde(default)]
     pub muted: Vec<String>,
+    #[serde(default)]
+    pub keep: Vec<String>,
+    #[serde(default)]
+    pub banned: Vec<String>,
+    #[serde(default)]
+    pub docs: Vec<String>,
+    #[serde(default)]
+    pub inspect: Option<HostCard>,
     pub bee_hosts: Vec<String>,
     pub nodes: Vec<NodeChip>,
     pub map_version: Option<u64>,
     pub map_places: Vec<MapLine>,
     pub csrf: String,
     pub base: String,
+    #[serde(default)]
+    pub mcp_keys: Vec<McpKeyLine>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct McpKeyLine {
+    pub id: String,
+    pub issued: String,
+    pub revoked: Option<String>,
 }
 
 pub fn cabinet_sheets(view: &CabinetSheets, sheet: &str) -> (String, String) {
+    if matches!(sheet, "node" | "journal" | "bees") {
+        return (String::new(), String::new());
+    }
     let mut stats = String::from(
-        "<section id=\"visits\"><h2>Заходы</h2><p>Это браузеры, не имена людей. Адрес не пишется и к запросу не привязывается. Время — от первого запроса визита до последнего; одна открытая страница времени не даёт. Отказ — ушёл, не поискав и не открыв вторую страницу.</p>",
+        "<section id=\"visits\"><h2>Заходы</h2>
+<p>Заход — сессия браузера, не имя человека и не уникальный посетитель. Новая сессия: первый заход без cookie или тишина 30 минут. Один человек на другой день — новый заход. Поиск — нажал «Найти». Главная без запроса поиском не считается. Боты, предпросмотр ссылок и предварительная загрузка сюда не входят. Адрес человека не пишется и к запросу не привязывается.</p>
+<p>Неделя — с понедельника по сегодня. Месяц — с первого числа. Первого числа месяц и сегодня совпадают; в неделю при этом входят дни прошлого месяца. Время — от первого запроса сессии до последнего; одна открытая страница времени не даёт. Отказ — ушёл, не поискав и не открыв вторую страницу.</p>",
     );
-    stats.push_str("<h3>По дням</h3>");
-    stats.push_str(&time_chart(
-        &view.days.iter().map(|(day, visits, _)| (short_label(day), *visits)).collect::<Vec<_>>(),
-        "#1a73e8",
-    ));
-    stats.push_str("<p class=\"legend\">Точки — заходы по дням.</p>");
+    stats.push_str(&live_chart("visits", "Заходы по дням", "Столбик — сутки. Число сессий браузера за день, не уникальные люди и не поиски. До отсечения ботов в эти дни входили роботы.", "day"));
+    stats.push_str(&live_chart("searches", "Поиски по дням", "Сколько раз нажали «Найти». Главная без запроса сюда не входит.", "day"));
+    let day_title = if view.visit_day_title.is_empty() { "Сегодня".to_string() } else { view.visit_day_title.clone() };
+    let week_title = if view.visit_week_title.is_empty() { "Неделя".to_string() } else { view.visit_week_title.clone() };
+    let month_title = if view.visit_month_title.is_empty() { "Месяц".to_string() } else { view.visit_month_title.clone() };
     for (title, report) in [
-        ("Сегодня", view.visits_day),
-        ("За неделю", view.visits_week),
-        ("За месяц", view.visits_month),
+        (day_title.as_str(), view.visits_day),
+        (week_title.as_str(), view.visits_week),
+        (month_title.as_str(), view.visits_month),
     ] {
         stats.push_str(&format!("<h3>{title}</h3>{}", visit_block(report)));
     }
@@ -1411,11 +1768,8 @@ pub fn cabinet_sheets(view: &CabinetSheets, sheet: &str) -> (String, String) {
         stats.push_str("");
     } else {
     stats.push_str("<section id=\"queries\"><h2>Запросы</h2><p>Одинаковый текст склеен. Число — сколько раз его спросили за этот срок. Буквы ё и е не склеиваются.</p>");
-    stats.push_str(&time_chart(
-        &view.days.iter().map(|(day, _, searches)| (short_label(day), *searches)).collect::<Vec<_>>(),
-        "#e6a817",
-    ));
-    stats.push_str("<p class=\"legend\">Точки — поиски по дням.</p>");
+    stats.push_str("<div class=\"live-chart\" data-chart=\"searches\" data-span=\"day\"><p class=\"legend\">Загружаю график…</p></div>");
+    stats.push_str("<p class=\"legend\">Поиски по дням, не заходы на главную.</p>");
     stats.push_str("<h3>Сегодня</h3><ul class=\"check\">");
     for (query, count) in view.queries_day.iter().take(8) {
         stats.push_str(&format!("<li>{} — {}</li>", escape(query), count));
@@ -1429,6 +1783,9 @@ pub fn cabinet_sheets(view: &CabinetSheets, sheet: &str) -> (String, String) {
         stats.push_str("</ul>");
     }
     stats.push_str("</section>");
+    }
+    if sheet == "lists" {
+        return (String::new(), lists_sheet(view));
     }
     let csrf = escape(&view.csrf);
     let base = escape(&view.base);
@@ -1455,7 +1812,9 @@ pub fn cabinet_sheets(view: &CabinetSheets, sheet: &str) -> (String, String) {
         ));
     }
     rest.push_str("</table><h3>Скрыть сайт из выдачи</h3>");
-    rest.push_str("<p>Страницы сайта остаются в базе этой ноды. В поиске этой ноды сайт не показывается, пока оператор его не вернёт. Другой улей этот список не получает и решает сам. Удаления страниц здесь нет: обход иначе принёс бы их снова. Остановить пчелу, которая приносит страницы, — отдельная кнопка на странице «Пчёлы».</p>");
+    rest.push_str(&format!(
+        "<p>Страницы сайта остаются в базе этой ноды. В поиске этой ноды сайт не показывается, пока оператор его не вернёт. Другой улей этот список не получает. Запрет обхода и снятие потолка — на листе <a href=\"{base}/operator?sheet=lists\">Списки</a>.</p>"
+    ));
     rest.push_str(&format!(
         "<form class=\"inline\" method=\"post\" action=\"{base}/operator?sheet=index\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\"><input name=\"host\" placeholder=\"сайт или https://сайт\" required><button name=\"action\" value=\"mute\">Скрыть из выдачи</button><button name=\"action\" value=\"unmute\">Вернуть в выдачу</button></form>"
     ));
@@ -1512,9 +1871,30 @@ pub fn cabinet_sheets(view: &CabinetSheets, sheet: &str) -> (String, String) {
         rest.push_str("<p>Подписанной карты нет, поэтому кнопка другого края не показывается.</p>");
     }
     rest.push_str(&format!(
-        "<h3>MCP</h3><p>Адрес MCP: <code>{base}/mcp</code>. Снаружи это https://admin.beesearch.ru/mcp. Ключ отдельно от пароля кабинета.</p>
-<form method=\"post\" action=\"{base}/operator\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\"><button name=\"action\" value=\"issue_mcp\">Выдать ключ</button><button name=\"action\" value=\"revoke_mcp\">Отозвать</button></form></section>"
+        "<h3>MCP</h3><p>Адрес MCP: <code>{base}/mcp</code>. Снаружи это https://admin.beesearch.ru/mcp. Ключ отдельно от пароля кабинета. Сам ключ показывается один раз при выдаче. Здесь номер, дата и отзыв. Несколько живых ключей могут работать сразу: каждый агент — свой. Отозванный в списке остаётся, но дверь им уже не открывается.</p>
+<form class=\"inline\" method=\"post\" action=\"{base}/operator?sheet=door\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\"><button name=\"action\" value=\"issue_mcp\">Выдать ключ</button></form>"
     ));
+    if view.mcp_keys.is_empty() {
+        rest.push_str("<p>Выданных ключей пока нет.</p>");
+    } else {
+        rest.push_str("<table class=\"log\"><tr><th>Номер</th><th>Выдан</th><th>Состояние</th><th></th></tr>");
+        for key in &view.mcp_keys {
+            rest.push_str("<tr>");
+            rest.push_str(&format!("<td><code>{}</code></td>", escape(&key.id)));
+            rest.push_str(&format!("<td>{}</td>", escape(&key.issued)));
+            if let Some(revoked) = &key.revoked {
+                rest.push_str(&format!("<td>отозван {}</td><td></td>", escape(revoked)));
+            } else {
+                rest.push_str(&format!(
+                    "<td>действует</td><td><form class=\"inline\" method=\"post\" action=\"{base}/operator?sheet=door\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\"><input type=\"hidden\" name=\"id\" value=\"{}\"><button name=\"action\" value=\"revoke_mcp\">Отозвать</button></form></td>",
+                    escape(&key.id)
+                ));
+            }
+            rest.push_str("</tr>");
+        }
+        rest.push_str("</table>");
+    }
+    rest.push_str("</section>");
     let door_at = rest.find("<section id=\"door\">").unwrap_or(rest.len());
     let index_html = rest[..door_at].to_string();
     let door_html = rest[door_at..].to_string();
@@ -1552,13 +1932,167 @@ fn visit_block(report: VisitNumbers) -> String {
     )
 }
 
-pub fn page_operator(report: &OperatorReport, stats: &str, rest: &str, sheet: &str) -> String {
+fn lists_sheet(view: &CabinetSheets) -> String {
+    let csrf = escape(&view.csrf);
+    let base = escape(&view.base);
+    let mut body = String::from(
+        "<section id=\"lists\"><h2>Списки</h2>
+<p>Правильных списков у оператора четыре, не восемь. Остальное — правила продукта в коде: зона Россия/СНГ, только главная у поставщика модели, главная издания, без карточек маркетплейса. Их каждый день руками не правят — иначе улей разъедется с git. Сами хосты справки ниже видны, чтобы снять или поставить блок.</p>
+<p>Спичка зажигает обход, потолок не снимает. Пчела, орган власти, справка моделей и SDK и ваш список «без потолка» страницы не режут. Скрыть — не показывать в поиске этого улья. Не обходить — не брать в очередь. Остановить пчелу — на листе «Пчёлы».</p>",
+    );
+    body.push_str("<h3>Проверка домена</h3>");
+    body.push_str("<p>Введите сайт. Улей скажет, какой блок на нём стоит, сколько страниц уже в индексе и сколько ждёт в очереди.</p>");
+    body.push_str(&format!(
+        "<form class=\"inline\" method=\"get\" action=\"{base}/operator\"><input type=\"hidden\" name=\"sheet\" value=\"lists\"><input name=\"host\" placeholder=\"сайт или https://сайт\" required value=\"{}\"><button>Проверить</button></form>",
+        view.inspect.as_ref().map(|card| escape(&card.host)).unwrap_or_default()
+    ));
+    if let Some(card) = &view.inspect {
+        body.push_str("<ul class=\"load\">");
+        body.push_str(&format!("<li>Сайт: {}</li>", escape(&card.host)));
+        body.push_str(&format!("<li>Правило: {}</li>", escape(&card.rule)));
+        body.push_str(&format!("<li>Страниц в индексе: {}</li>", card.pages));
+        body.push_str(&format!("<li>В очереди: {}</li>", card.queued));
+        if card.muted {
+            body.push_str("<li>Скрыт из выдачи этой ноды</li>");
+        }
+        if card.banned {
+            body.push_str("<li class=\"fix\">Обход закрыт</li>");
+        }
+        if card.keep {
+            body.push_str("<li>Ваш список без потолка</li>");
+        }
+        if card.volunteer {
+            body.push_str("<li>Пчела</li>");
+        }
+        if card.government {
+            body.push_str("<li>Орган власти</li>");
+        }
+        if card.hive {
+            body.push_str("<li>Улей</li>");
+        }
+        if card.tool_docs {
+            body.push_str("<li>Справка моделей или SDK</li>");
+        }
+        if card.model_maker {
+            body.push_str("<li>Поставщик модели, только главная</li>");
+        }
+        body.push_str("</ul>");
+        body.push_str(&format!(
+            "<form class=\"inline\" method=\"post\" action=\"{base}/operator?sheet=lists\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\"><input type=\"hidden\" name=\"host\" value=\"{}\">",
+            escape(&card.host)
+        ));
+        if card.keep {
+            body.push_str("<button name=\"action\" value=\"unkeep\">Вернуть потолок</button>");
+        } else if !card.volunteer && !card.government && !card.hive && !card.tool_docs {
+            body.push_str("<button name=\"action\" value=\"keep\">Снять потолок</button>");
+        }
+        if card.banned {
+            body.push_str("<button name=\"action\" value=\"unban\">Снова обходить</button>");
+        } else {
+            body.push_str("<button name=\"action\" value=\"ban\">Не обходить</button>");
+        }
+        if card.muted {
+            body.push_str("<button name=\"action\" value=\"unmute\">Вернуть в выдачу</button>");
+        } else {
+            body.push_str("<button name=\"action\" value=\"mute\">Скрыть из выдачи</button>");
+        }
+        body.push_str("</form>");
+    }
+    body.push_str("<h3>Без потолка, ваш список</h3>");
+    body.push_str("<p>Сайт обходится целиком на этом улье. Сюда не надо копировать .gov.ru и docs.openclaw.ai — они уже без потолка по правилу.</p>");
+    body.push_str(&format!(
+        "<form class=\"inline\" method=\"post\" action=\"{base}/operator?sheet=lists\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\"><input name=\"host\" placeholder=\"сайт или https://сайт\" required><button name=\"action\" value=\"keep\">Снять потолок</button><button name=\"action\" value=\"unkeep\">Вернуть потолок</button></form>"
+    ));
+    if view.keep.is_empty() {
+        body.push_str("<p>Своих сайтов без потолка нет.</p>");
+    } else {
+        body.push_str(&host_check_list(&view.keep, &base, None));
+    }
+    body.push_str("<h3>Уже без потолка по правилу</h3>");
+    body.push_str("<p>Эти хосты в код, не в ваш keep. Чтобы закрыть обход — проверка домена или форма ниже. Органы власти: .gov.ru, .mil.ru, ЦБ, госуслуги.</p>");
+    body.push_str("<ul class=\"load\">");
+    body.push_str(&format!("<li>Пчёлы: {}</li>", view.bee_hosts.len()));
+    body.push_str("<li>Улей: beesearch.ru</li></ul>");
+    if !view.bee_hosts.is_empty() {
+        body.push_str("<ul class=\"check\">");
+        for host in &view.bee_hosts {
+            body.push_str(&format!(
+                "<li>пчела {} <form class=\"inline\" method=\"get\" action=\"{base}/operator\"><input type=\"hidden\" name=\"sheet\" value=\"lists\"><input type=\"hidden\" name=\"host\" value=\"{}\"><button>Проверить</button></form></li>",
+                escape(host),
+                escape(host)
+            ));
+        }
+        body.push_str("</ul>");
+    }
+    body.push_str("<h3>Справка моделей и SDK</h3>");
+    if view.docs.is_empty() {
+        body.push_str("<p>Список справки пуст.</p>");
+    } else {
+        body.push_str("<ul class=\"check\">");
+        for host in &view.docs {
+            body.push_str(&format!(
+                "<li>{} <form class=\"inline\" method=\"get\" action=\"{base}/operator\"><input type=\"hidden\" name=\"sheet\" value=\"lists\"><input type=\"hidden\" name=\"host\" value=\"{}\"><button>Проверить</button></form></li>",
+                escape(host),
+                escape(host)
+            ));
+        }
+        body.push_str("</ul>");
+    }
+    body.push_str("<h3>Не обходить</h3>");
+    body.push_str("<p>В очередь не ставится, уже стоявшее закрывается. Страницы из базы не удаляются. Чтобы не показывать в поиске — скрыть ниже.</p>");
+    body.push_str(&format!(
+        "<form class=\"inline\" method=\"post\" action=\"{base}/operator?sheet=lists\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\"><input name=\"host\" placeholder=\"сайт или https://сайт\" required><button name=\"action\" value=\"ban\">Не обходить</button><button name=\"action\" value=\"unban\">Снова обходить</button></form>"
+    ));
+    if view.banned.is_empty() {
+        body.push_str("<p>Запрета на обход нет.</p>");
+    } else {
+        body.push_str(&host_check_list(&view.banned, &base, Some("fix")));
+    }
+    body.push_str("<h3>Скрыть из выдачи</h3>");
+    body.push_str("<p>Поиск этой ноды сайт не показывает. Другой улей список не получает. Обход сам по себе не останавливается.</p>");
+    body.push_str(&format!(
+        "<form class=\"inline\" method=\"post\" action=\"{base}/operator?sheet=lists\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\"><input name=\"host\" placeholder=\"сайт или https://сайт\" required><button name=\"action\" value=\"mute\">Скрыть из выдачи</button><button name=\"action\" value=\"unmute\">Вернуть в выдачу</button></form>"
+    ));
+    if view.muted.is_empty() {
+        body.push_str("<p>Скрытых сайтов нет.</p>");
+    } else {
+        body.push_str(&host_check_list(&view.muted, &base, None));
+    }
+    body.push_str("<h3>Спичка</h3>");
+    body.push_str("<p>Один адрес в очередь. Потолок не снимается. Полный старт — файл urls.txt на машине улья.</p>");
+    body.push_str(&format!(
+        "<form class=\"inline\" method=\"post\" action=\"{base}/operator?sheet=lists\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\"><input name=\"url\" placeholder=\"https://сайт/страница\" required><button name=\"action\" value=\"enqueue\">Добавить в обход</button></form>"
+    ));
+    body.push_str("</section>");
+    body
+}
+
+fn host_check_list(hosts: &[String], base: &str, class: Option<&str>) -> String {
+    let mut body = String::from("<ul class=\"check\">");
+    for host in hosts {
+        let mark = class.map(|name| format!(" class=\"{name}\"")).unwrap_or_default();
+        body.push_str(&format!(
+            "<li{mark}>{} <form class=\"inline\" method=\"get\" action=\"{base}/operator\"><input type=\"hidden\" name=\"sheet\" value=\"lists\"><input type=\"hidden\" name=\"host\" value=\"{}\"><button>Проверить</button></form></li>",
+            escape(host),
+            escape(host)
+        ));
+    }
+    body.push_str("</ul>");
+    body
+}
+
+pub fn cabinet_inner(report: &OperatorReport, stats: &str, rest: &str, sheet: &str) -> String {
     let sheet = match sheet {
-        "visits" | "queries" | "journal" | "bees" | "index" | "door" => sheet,
+        "visits" | "queries" | "journal" | "bees" | "index" | "door" | "lists" => sheet,
         _ => "node",
     };
+    let peak = report.hour_peak_ms.max(report.max_ms);
     let pace = if report.searches_per_minute == 0 {
-        "Поисков за последнюю минуту не было.".to_string()
+        if peak == 0 {
+            "Поисков за последнюю минуту не было.".to_string()
+        } else {
+            format!("Поисков за последнюю минуту не было. Пик трёх часов: {peak} мс.")
+        }
     } else if report.avg_ms == 0 {
         format!(
             "Поисков за последнюю минуту: {}. Время ответа в этом запуске ещё не измерено.",
@@ -1566,27 +2100,25 @@ pub fn page_operator(report: &OperatorReport, stats: &str, rest: &str, sheet: &s
         )
     } else {
         format!(
-            "Поисков за последнюю минуту: {}. Среднее время ответа: {} мс.",
-            report.searches_per_minute, report.avg_ms
+            "Поисков за последнюю минуту: {}. Среднее время ответа: {} мс. Пик минуты: {} мс. Пик трёх часов: {peak} мс.",
+            report.searches_per_minute, report.avg_ms, report.max_ms
         )
     };
     let span = chosen_span(&report.span);
-    let base_nav = escape(&report.base);
     let spans = span_nav(&report.base, span);
-    let pages_chart = series_chart("Новые страницы", "", activity_rows(report, span), span, "#1a73e8", |point| point.new_pages);
-    let hosts_chart = series_chart("Новые сайты", "", activity_rows(report, span), span, "#e37400", |point| point.new_hosts);
-    let walk_chart = series_chart("Обход", "", activity_rows(report, span), span, "#188038", |point| point.walked);
-    let phone_chart = series_chart("Телефоны", "", activity_rows(report, span), span, "#c9a227", |point| point.shell_pages);
-    let cpu_chart = series_chart("Процессор", "%", activity_rows(report, span), span, "#188038", |point| point.cpu);
-    let ram_chart = series_chart("Память", "%", activity_rows(report, span), span, "#a142f4", |point| point.ram);
-    let mut body = format!(
-        "<div class=\"cabinet\"><nav class=\"side\"><a href=\"{base_nav}/operator?sheet=node&span={span}\">Нода</a><a href=\"{base_nav}/operator?sheet=visits\">Заходы</a><a href=\"{base_nav}/operator?sheet=queries\">Запросы</a><a href=\"{base_nav}/operator?sheet=journal\">Журнал</a><a href=\"{base_nav}/operator?sheet=bees\">Пчёлы</a><a href=\"{base_nav}/operator?sheet=index\">Индекс</a><a href=\"{base_nav}/operator?sheet=door\">Дверь</a></nav><div class=\"sheets\">"
-    );
+    let pages_chart = live_chart("pages", "Новые страницы", "Адреса, которых в индексе ещё не было. График сам обновляется, страницу перезагружать не нужно.", span);
+    let hosts_chart = live_chart("hosts", "Новые сайты", "Хосты, которые появились впервые.", span);
+    let walk_chart = live_chart("walked", "Обход", "Новые, изменённые и страницы без изменений. Линия идёт, даже когда новых адресов мало.", span);
+    let phone_chart = live_chart("phones", "Телефоны", "Страницы, которые телефоны принесли за выбранный срок.", span);
+    let cpu_chart = live_chart("cpu", "Процессор", "Доля процессора машины, проценты. Если линия упирается в верх, скорость лучше снизить.", span);
+    let ram_chart = live_chart("ram", "Память", "Доля памяти машины, проценты.", span);
+    let search_chart = live_chart("search", "Ответ поиска", "Пик ответа за минуту, миллисекунды. Высокий пик — модель занята обходом или сразу несколько поисков.", "minute");
+    let mut body = String::new();
     if sheet == "node" {
     body.push_str(&format!(
         "<section id=\"node\"><h2>Нода <a class=\"refresh\" href=\"{base}/operator?sheet=node&span={span}\">Обновить</a></h2>
 <p>Адреса людей сюда не пишутся. Новая страница — адрес, которого в индексе ещё не было. Повтор без изменений в это число не входит.</p>
-<p>График читается один раз, когда страница открылась. Кнопка «Обновить» спрашивает улей ещё раз. Пока страница открыта, улей сам ничего не шлёт, поэтому от графика машина не грузится. Минуты копятся три часа, часы — две недели. Дни, недели и месяцы складываются из уже записанных суток.</p>
+<p>Числа листа — снимок, когда лист открылся. Графики подгружаются отдельно и обновляются сами. Минуты копятся три часа, часы — две недели. Дни, недели и месяцы складываются из уже записанных суток.</p>
 {spans}
 <ul class=\"load\">
 <li>Сайтов в поиске: {sites}</li>
@@ -1601,21 +2133,12 @@ pub fn page_operator(report: &OperatorReport, stats: &str, rest: &str, sheet: &s
 <li>База: {db} МБ</li>
 <li>{pace}</li>
 </ul>
-<h3>Новые страницы</h3>
 {pages_chart}
-<p class=\"legend\">Адреса, которых в индексе ещё не было.</p>
-<h3>Новые сайты</h3>
 {hosts_chart}
-<p class=\"legend\">Хосты, которые появились впервые.</p>
-<h3>Обход</h3>
 {walk_chart}
-<p class=\"legend\">Новые, изменённые и страницы без изменений. Линия идёт, даже когда новых адресов мало.</p>
-<h3>Процессор</h3>
 {cpu_chart}
-<p class=\"legend\">Доля процессора машины, проценты. Если линия упирается в верх, скорость лучше снизить.</p>
-<h3>Память</h3>
 {ram_chart}
-<p class=\"legend\">Доля памяти машины, проценты.</p>
+{search_chart}
 <form class=\"inline\" method=\"post\" action=\"{base}/operator?sheet=node\"><input type=\"hidden\" name=\"csrf\" value=\"{csrf}\">
 <label>Страниц за заход улья <input name=\"batch\" type=\"number\" min=\"1\" max=\"24\" value=\"{crawl_batch}\"></label>
 <label>Пауза улья, секунд <input name=\"gap\" type=\"number\" min=\"2\" max=\"300\" value=\"{crawl_gap}\"></label>
@@ -1632,7 +2155,6 @@ pub fn page_operator(report: &OperatorReport, stats: &str, rest: &str, sheet: &s
 <h3>Телефоны</h3>
 <p>Разные приложения и страницы, которые улей записал как новые или изменённые. Повтор той же страницы не считается. Идентификатор приложения к запросу не привязывается. Каждый телефон получает свой темп, а не одну общую очередь на всех.</p>
 {phone_chart}
-<p class=\"legend\">Страницы, которые телефоны принесли за выбранный срок.</p>
 <ul class=\"load\">
 <li>Сегодня: {day_apps} приложений, {day_pages} страниц</li>
 <li>За неделю: {week_apps} приложений, {week_pages} страниц</li>
@@ -1647,7 +2169,7 @@ pub fn page_operator(report: &OperatorReport, stats: &str, rest: &str, sheet: &s
 <label>Минимальная пауза, минут <input name=\"min_gap\" type=\"number\" min=\"1\" max=\"60\" value=\"{min_gap}\"></label>
 <label>Выдач всем помощникам за 10 минут <input name=\"grants\" type=\"number\" min=\"4\" max=\"600\" value=\"{grants}\"></label>
 <button name=\"action\" value=\"shell_pace\">Сохранить</button></form>
-<p>Обычный режим телефона берёт первые три числа: две страницы и десять минут. Приложение 0.1.9 слушает паузу улья от одной минуты. Общий потолок выдач держит эту машину: смысл считает она одна, и писатель базы тоже один. Поднимать его стоит, пока график процессора не упирается вверх.</p>",
+<p>Обычный режим телефона берёт первые три числа: две страницы и десять минут. Режим «быстрее» берёт до восьми страниц и паузу до двух минут, но не выходит за потолок. Режим «как сервер» берёт потолок страниц и минимальную паузу. Приложение 0.1.10 слушает эту паузу от одной минуты. Общий потолок выдач держит эту машину: смысл считает она одна, и писатель базы тоже один. Поднимать его стоит, пока график процессора не упирается вверх.</p>",
         sites = report.sites,
         pages = report.pages,
         new_today = report.new_today,
@@ -1667,6 +2189,7 @@ pub fn page_operator(report: &OperatorReport, stats: &str, rest: &str, sheet: &s
         phone_chart = phone_chart,
         cpu_chart = cpu_chart,
         ram_chart = ram_chart,
+        search_chart = search_chart,
         crawl_batch = report.crawl_batch,
         crawl_gap = report.crawl_gap,
         leased = report.leased,
@@ -1703,7 +2226,7 @@ pub fn page_operator(report: &OperatorReport, stats: &str, rest: &str, sheet: &s
     if report.peers.is_empty() {
         body.push_str("<p>Соседей в этом запуске нет. Нода отвечает своим индексом.</p>");
     } else {
-        body.push_str("<table class=\"log\"><tr><th>Пчела</th><th>Ответ, мс</th><th>Жива</th><th>Бакеты</th><th>Страницы</th></tr>");
+        body.push_str("<table class=\"log\"><tr><th>Сосед</th><th>Ответ, мс</th><th>Жива</th><th>Бакеты</th><th>Страницы</th></tr>");
         for peer in &report.peers {
             let alive = if peer.alive { "да" } else { "нет" };
             let silent = peer.latency_ms == 0 && peer.buckets == 0 && peer.pages == 0;
@@ -1722,7 +2245,7 @@ pub fn page_operator(report: &OperatorReport, stats: &str, rest: &str, sheet: &s
             ));
         }
         body.push_str("</table>");
-        body.push_str("<p class=\"legend\">«Жива» значит, что сосед ответил в этом запуске. Прочерк в ответе, бакетах и страницах значит, что отчёта об индексе ещё не было. Это не пустой поиск и не остановка обхода.</p>");
+        body.push_str("<p class=\"legend\">Это другие ноды со своим индексом. Лёгкие пчёлы сайтов сюда не входят — они на листе «Пчёлы». «Жива» значит, что сосед ответил в этом запуске. Прочерк в ответе, бакетах и страницах значит, что отчёта об индексе ещё не было.</p>");
     }
     body.push_str("</section>");
     }
@@ -1745,7 +2268,7 @@ pub fn page_operator(report: &OperatorReport, stats: &str, rest: &str, sheet: &s
     }
     if sheet == "bees" {
     body.push_str("<section id=\"bees\"><h2>Пчёлы</h2>");
-    body.push_str("<p>Столбцы — страницы, которые улей записал как новые или изменённые. Та же страница без изменений больше не считается. Свой сайт идёт первым: новые и изменённые страницы забираются сразу. Когда своих изменений нет, пчела берёт чужие адреса из очереди улья.</p>");
+    body.push_str("<p>Столбцы «День», «Неделя», «Месяц», «Всего» — страницы, которые улей записал как новые или изменённые. Та же страница без изменений сюда не входит. «Была» — последний звонок пчелы, даже если новых страниц не было. «Сборка» — версия файла пчелы. Если сборка пустая или помечена «обновить», возьмите свежий файл на странице «Компьютер».</p>");
     body.push_str("<p>Компьютер без своего сайта запускается так: <code>mds node --lite --hive https://адрес-улья</code>. Модель и база ему не нужны. Он разбирает чужую очередь темпом ниже. На сайте пчела по-прежнему доказывает себя файлом <code>/.well-known/pchela.txt</code>.</p>");
     body.push_str(&format!(
         "<form class=\"inline\" method=\"post\" action=\"{}/operator?sheet=bees\"><input type=\"hidden\" name=\"csrf\" value=\"{}\"><label>Чужих адресов за заход <input name=\"batch\" type=\"number\" min=\"1\" max=\"24\" value=\"{}\"></label><label>Пауза, секунд <input name=\"gap\" type=\"number\" min=\"60\" max=\"3600\" value=\"{}\"></label><button name=\"action\" value=\"bee_pace\">Скорость пчёл</button></form>",
@@ -1757,12 +2280,23 @@ pub fn page_operator(report: &OperatorReport, stats: &str, rest: &str, sheet: &s
     if report.bees.is_empty() {
         body.push_str("<p>Подтверждённых сайтов нет.</p>");
     } else {
-        body.push_str("<table class=\"log bees\"><tr><th>Сайт</th><th>День</th><th>Неделя</th><th>Месяц</th><th>Всего</th></tr>");
+        body.push_str("<table class=\"log bees\"><tr><th>Сайт</th><th>День</th><th>Неделя</th><th>Месяц</th><th>Всего</th><th>Была</th><th>Сборка</th></tr>");
         for bee in &report.bees {
             let mark = if bee.quiet { " <span class=\"quiet\">молчит</span>" } else { "" };
+            let build = if bee.version.is_empty() {
+                "не сообщает".to_string()
+            } else {
+                escape(&bee.version)
+            };
+            let upd = if bee.need_update {
+                " <span class=\"quiet\">обновить</span>"
+            } else {
+                ""
+            };
+            let last = if bee.last.is_empty() { "—" } else { bee.last.as_str() };
             body.push_str(&format!(
-                "<tr><td>{}{mark}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>",
-                escape(&bee.host), bee.day, bee.week, bee.month, bee.all
+                "<tr><td>{}{mark}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{}</td><td>{build}{upd}</td></tr>",
+                escape(&bee.host), bee.day, bee.week, bee.month, bee.all, escape(last)
             ));
         }
         body.push_str("</table>");
@@ -1787,8 +2321,7 @@ pub fn page_operator(report: &OperatorReport, stats: &str, rest: &str, sheet: &s
         body.push_str(&format!("<p class=\"hint\">{}</p>", escape(&report.note)));
     }
     body.push_str(rest);
-    body.push_str("</div></div>");
-    document("", &body, false, false, None, "", "", None, None, None, false).replacen("<body>", "<body class=\"cabinet\">", 1)
+    body
 }
 
 pub fn page_how() -> String {
@@ -1801,7 +2334,8 @@ pub fn page_how() -> String {
 <p>Страница с noindex или заголовком X-Robots-Tag: noindex в индекс не попадает. Ссылка с nofollow в очередь не ставится. Файлы .mdx нода не читает.</p>
 <h3>Как выбирается выдача</h3>
 <p>Один и тот же запрос ищется двумя способами. Точные слова ищутся по заголовку и тексту. Близкий смысл ищется по вектору страницы. Списки склеиваются, и в выдаче остаётся ссылка, короткий отрывок и отметка «слова», «смысл» или обе сразу.</p>
-<p>Буквы «е» и «ё» считаются разными: «мёд» и «мед» — разные запросы. Если во фразе есть намерение купить, известный хост маркетплейса получает штраф, прямой сайт остаётся выше.</p>
+<p>Слова запроса ищутся в заголовке и тексте. Если слов несколько, выше стоит страница, где они стоят рядом. Буквы «е» и «ё» находятся обе, точное написание выше. Близкий смысл считается по заголовку и началу страницы и сравнивается со всеми страницами этой ноды. Он добирает страницу, на которой этих слов нет, и стоит ниже словесного совпадения. Если во фразе есть намерение купить, известный хост маркетплейса получает штраф, прямой сайт остаётся выше.</p>
+<p>Обход держит сайты России и СНГ. Из других стран в индекс входят сайты, которые сами делают модели или сервисы искусственного интеллекта, а также GitHub, AWS, VS Code и OpenClaw. У поставщика модели берётся главная, не чаты и не страница с вопросом в адресе. Документация моделей, SDK агентов, GitHub, AWS, VS Code и OpenClaw идёт без потолка в сто страниц. Кнопка «спросить главу в чате» в индекс не входит. Википедия и Рувики в общий индекс не кладутся: их короткая справка стоит отдельным блоком под запросом.</p>
 <h3>Пчела, рой, улей, пасека</h3>
 <p>Одна нода — это пчела. Несколько нод, соединённых в одну сеть, — рой. Улей — региональный вход, домен, с которого люди ищут. Этот улей открыт на <a href="https://beesearch.ru/">https://beesearch.ru/</a>, кабинет оператора — на <a href="https://admin.beesearch.ru/login">https://admin.beesearch.ru/login</a>. Пасека — страна, сеть таких ульев. Робот при обходе по-прежнему называется MDS-Bot.</p>
 <h3>Несколько нод</h3>
@@ -1810,7 +2344,7 @@ pub fn page_how() -> String {
 <p>Пчела за домашним роутером не открывает порт наружу. Лёгкая пчела сама звонит улью: <code>mds node --lite --site https://ваш-сайт --hive https://beesearch.ru</code>. На сайте лежит файл <code>/.well-known/pchela.txt</code>, в нём одна строка — имя, которое пчела печатает при запуске. Улей принимает новые и изменённые страницы этого сайта. Когда своих изменений нет, пчела берёт чужие адреса из очереди. Компьютер без своего сайта запускается без <code>--site</code>, команда на странице <a href="/computer">Компьютер</a>. Общий пароль для входа не нужен. Улей открыт на https://beesearch.ru. Домашней пчеле хватает обычного интернета.</p>
 <p>Страницы с нарушением закона в выдачу не попадают. Материалы 18+ стоят отдельным блоком и замкнуты, пока человек не подтвердит возраст. Журнал запросов хранит только текст и числа на этой ноде, без адреса человека, и открывается только с компьютера, где нода запущена.</p>
 <h3>Сколько страниц берётся с одного сайта</h3>
-<p>Обычный сайт обходится до 100 страниц: этого хватает, чтобы его найти, и один каталог не заполняет поиск. Если страниц больше, владелец перечисляет до ста своих ссылок в <a href="/llms">/llms.txt</a>. Индексируются они. Сайт, на сервере которого стоит лёгкая пчела, отдаёт все свои страницы. Подробности и ответы, зачем ставить ноду, — на странице <a href="/indexing">Индексация</a>.</p>
+<p>Обычный сайт обходится до 100 страниц: этого хватает, чтобы его найти, и один каталог не заполняет поиск. Если страниц больше, владелец перечисляет до ста своих ссылок в <a href="/llms">/llms.txt</a>. Индексируются они. Сайт, на сервере которого стоит лёгкая пчела, отдаёт все свои страницы. Органы власти и справка GitHub, AWS, VS Code и OpenClaw потолком не режутся. Поставщик модели — только главная. Подробности и ответы, зачем ставить ноду, — на странице <a href="/indexing">Индексация</a>.</p>
 <p><a href="/download">Скачать ноду и подключить её</a></p>"#,
     )
 }
@@ -1929,7 +2463,8 @@ pub fn page_indexing() -> String {
         "Индексация",
         r#"<p>Пчелопоиск находит сайт по его страницам. Сколько страниц берётся и зачем рядом с сайтом стоит своя нода — здесь.</p>
 <h3>Сколько страниц с одного сайта</h3>
-<p>Обычный сайт обходится до ста страниц. Этого хватает, чтобы сайт находился, и длинный каталог не занимает весь поиск. Страницы, которые уже лежат в индексе, из-за этого потолка не удаляются.</p>
+<p>Обычный сайт обходится до ста страниц. Этого хватает, чтобы сайт находился, и длинный каталог не занимает весь поиск. Если в индексе уже больше ста страниц, лишние адреса уходят, короткие остаются. Сайт со своей пчелой этот потолок не режет. Сайты органов власти, госуслуг, законов и тендеров тоже не режутся: с них нужны слушания, гранты и услуги целиком. Документация моделей и SDK агентов (OpenAI, Anthropic, GigaChat, Yandex AI Studio, LangChain, MCP, GitHub, AWS, VS Code, OpenClaw) тоже идёт целиком: в поиск нужны главы, не чат. Кнопка «спросить эту главу в чате» в индекс не входит. Сайт поставщика модели — только главная, без чатов и без вопроса в адресе.</p>
+<p>В индекс входят сайты России и СНГ. Из других стран остаются поставщики моделей и сервисов искусственного интеллекта, а также GitHub, AWS, VS Code и OpenClaw. Википедия и Рувики общий индекс не занимают. Оператор улья может снять потолок с одного сайта, закрыть обход или скрыть сайт из выдачи этой ноды. Это списки кабинета, не общий каталог продукта: органы власти и справка в админку не копируются.</p>
 <p>Если страниц больше ста, владелец сам выбирает, какие важнее. В корне сайта, в <a href="/llms">/llms.txt</a> или <a href="/llms">/llms.md</a>, он пишет ссылки своего сайта, не больше ста. Индексируются они. Ссылки на чужие сайты из этой карточки в список не входят. Остальные адреса этого сайта в очередь не ставятся.</p>
 <p>Сайт завода и мастерской остаётся со своими изделиями: у производства короткий свой список. Интернет-магазин в индекс целиком не копируется. В выдаче виден сам магазин, а несколько подходящих предложений браузер может подгрузить с сайта магазина в момент запроса, если магазин это разрешает. Сто магазинов с одним и тем же товаром поиск не собирает.</p>
 <h3>Зачем нода рядом с сайтом</h3>
@@ -2072,7 +2607,9 @@ pub fn page_android() -> String {
 <p>Приложение открывает поиск этого улья. Ссылка из выдачи открывается в том же окне: это браузер внутри приложения, отдельное приложение браузера не запускается. Кнопка «К поиску» возвращает на строку поиска. Сайт из выдачи отдаёт сам сайт. Улей в этот момент страницу сайта не качает и этим не нагружается: он уже отдал только страницу поиска.</p>
 <h3>Как телефон помогает сети</h3>
 <p>Примерно раз в десять минут телефон берёт у улья до двух адресов из очереди. Эти адреса улей и так собирался прочитать. Телефон сам открывает их, забирает текст и отдаёт улью. Улей записывает текст в индекс и сам считает смысл страницы. Эти две страницы улей уже не качает, поэтому очередь обхода идёт быстрее. Телефон индекс у себя не хранит и не разбирает: он приносит текст, а индекс пишет улей.</p>
-<p>Так происходит и по Wi-Fi, и по мобильной сети, и когда приложение свёрнуто. На экране телефона остаётся короткое уведомление «Пчелопоиск». Кнопка «Остановить» в уведомлении помощь прекращает. У каждого телефона свой темп. Обычный режим — две страницы и пауза десять минут. В приложении 0.1.9 кнопка «Темп» может взять больше, до потолка, который оператор задал в кабинете, и пауза слушается от одной минуты. Старый телефон у розетки в режиме «как сервер» разбирает очередь круглосуточно в этих пределах.</p>
+<p>Так происходит и по Wi-Fi, и по мобильной сети, и когда приложение свёрнуто. Под кнопкой «Темп» и в уведомлении «Пчелопоиск» видно режим, сколько страниц отдано и через сколько минут следующий заход. Пока страница открывается, там написано «Открываю страницу». Кнопка «Остановить» в уведомлении помощь прекращает. Если телефон ограничивает батарею, свёрнутый обход засыпает: приложение один раз просит это ограничение снять. Место для радиуса поиска к этому обходу не относится.</p>
+<p>У каждого телефона свой темп. Обычный режим — две страницы и пауза десять минут. Кнопка «Темп» переключает «быстрее» и «как сервер» в пределах потолка кабинета, пауза слушается от одной минуты. Старый телефон у розетки в режиме «как сервер» разбирает очередь круглосуточно в этих пределах. На слабом телефоне этот режим тяжелее: он качает больше страниц рядом с открытым поиском.</p>
+<p>Кнопка радиуса рядом с запросом спрашивает место телефона. Координаты уходят только в этот поиск, чтобы поднять близкие сайты, и округляются примерно до ста метров. Приложение их не сохраняет.</p>
 <p>Чужой поиск через телефон не идёт: люди по-прежнему ищут на улье.</p>
 <h3>Что такое шард</h3>
 <p>Шард — это сохранённый кусок индекса. Нода, которая его держит, отвечает по этому куску на чужие запросы. Телефон такой кусок не хранит и на чужие запросы не отвечает. Поэтому приложение шардом не называется: оно не запасная копия поиска и не вход в сеть для других людей.</p>
@@ -2408,9 +2945,11 @@ fn footer() -> String {
 <a href="/download">Скачать ноду</a>
 <a href="/add">Добавить сайт</a>
 </nav>
-<p class="census">В поиске %%SITES%% и %%PAGES%%.</p>
-<p class="credit"><span>Разработка креативной лаборатории <a href="https://dartalab.ru/">DARTA</a>.</span><a class="help" href="/help">Помочь проекту</a></p>
+<div class="meta">
 <svg class="comb" viewBox="0 0 128 128" aria-hidden="true"><g fill="#f9cb0b"><path d="m59.86475 67.82129a1.48481 1.48481 0 0 1 -.74463-.19922l-14.39258-8.25293-5.50635 3.08447a1.49985 1.49985 0 0 1 -1.46582-2.61718l6.248-3.5a1.49964 1.49964 0 0 1 1.479.00732l15.12993 8.67676a1.49973 1.49973 0 0 1 -.74755 2.80078z"/><path d="m54.354 107.72754a1.50024 1.50024 0 0 1 -.75244-2.79883l13.09668-7.57422-.0166-25.32812-.94922-.54688a1.50018 1.50018 0 1 1 1.498-2.59961l1.69922.9795a1.49827 1.49827 0 0 1 .751 1.29882l.01856 27.06055a1.50127 1.50127 0 0 1 -.749 1.2998l-13.84668 8.00782a1.49211 1.49211 0 0 1 -.74952.20117z"/><path d="m44.77344 113.2666a1.49676 1.49676 0 0 1 -.749-.20019l-23.44436-13.51465a1.50034 1.50034 0 0 1 -.751-1.29883l-.00342-4.55371a1.5004 1.5004 0 0 1 1.499-1.501h.001a1.49986 1.49986 0 0 1 1.5 1.499l.00293 3.6875 21.94385 12.64941 2.63428-1.52344a1.50031 1.50031 0 0 1 1.502 2.59766l-3.38428 1.957a1.5049 1.5049 0 0 1 -.751.20125z"/><path d="m76.32324 23.25293a1.49178 1.49178 0 0 1 -.748-.20117l-6.37797-3.67676a1.49975 1.49975 0 1 1 1.498-2.59863l6.37793 3.67676a1.50014 1.50014 0 0 1 -.75 2.7998z"/><path d="m68.18555 72.66016a1.50009 1.50009 0 0 1 -.752-2.79883l22.67583-13.11328-.001-2.24366a1.49976 1.49976 0 0 1 1.499-1.501h.001a1.50018 1.50018 0 0 1 1.5 1.499l.00195 3.10986a1.49988 1.49988 0 0 1 -.749 1.29932l-23.42578 13.54743a1.49387 1.49387 0 0 1 -.75.20116z"/><path d="m44.73975 59.146a1.49986 1.49986 0 0 1 -1.5-1.499l-.01856-27.061a1.49947 1.49947 0 0 1 .749-1.29932l23.42629-13.54645a1.49707 1.49707 0 0 1 1.5-.001l1.79883 1.03711a1.49975 1.49975 0 1 1 -1.498 2.59863l-1.04883-.60449-21.9268 12.67972.01807 26.1948a1.49977 1.49977 0 0 1 -1.499 1.501z"/><path d="m107.92871 103.81836a1.50008 1.50008 0 0 1 -.75195-2.79883l6.39355-3.69726-.0166-25.32813-21.94433-12.64941-21.92579 12.67968.01661 25.32813 6.32617 3.64648a1.50018 1.50018 0 0 1 -1.49805 2.59961l-7.07617-4.0791a1.49827 1.49827 0 0 1 -.751-1.29883l-.01855-27.06054a1.50127 1.50127 0 0 1 .749-1.29981l23.42578-13.5459a1.49825 1.49825 0 0 1 1.5-.001l23.44434 13.51367a1.49828 1.49828 0 0 1 .751 1.29883l.01856 27.06054a1.50129 1.50129 0 0 1 -.749 1.29981l-7.14356 4.13086a1.49386 1.49386 0 0 1 -.75001.2012z"/></g><path d="m39.56354 76.5401c.32348-.35632.64062-.72253.94281-1.10846a16.814 16.814 0 0 0 3.54785-7.876c.38721-2.8916-.37354-5.24658-2.14209-6.63134-1.76856-1.38575-4.23779-1.55762-6.95117-.48828a16.13117 16.13117 0 0 0 -5.81757 4.18774c-4.15484-4.55859-9.57715-6.1994-12.77325-3.69946-3.46 2.70947-2.84229 9.08154 1.40576 14.50732.247.31531.50018.6308.75622.94226a9.20241 9.20241 0 0 0 2.10315 18.16223h16.18409a9.20737 9.20737 0 0 0 2.7442-17.996zm-12.95026 14.996a35 35 0 0 0 .54541-6.207 35.46647 35.46647 0 0 0 -.36389-5.03 5.72943 5.72943 0 0 0 3.569 1.15985 8.512 8.512 0 0 0 2.317-.3493 32.74556 32.74556 0 0 1 .26941 4.21942 31.76 31.76 0 0 1 -.60749 6.207zm9.44824-28.30908a6.16994 6.16994 0 0 1 2.229-.47559 2.82389 2.82389 0 0 1 1.772.53516c.88379.6919 1.25488 2.103 1.01807 3.87061a13.78553 13.78553 0 0 1 -2.93659 6.4248 13.791 13.791 0 0 1 -5.5332 4.39258c-1.65967.65332-3.11719.63281-4.00146-.05957-1.80127-1.41016-1.45606-5.98535 1.91845-10.2959a13.78338 13.78338 0 0 1 5.53373-4.39206zm-17.84179.05957c1.70953-1.33856 5.74981-.09717 9.04364 3.74207a14.06909 14.06909 0 0 0 -2.6695 9.09338h-2.20849a20.31311 20.31311 0 0 1 -2.2472-2.54c-3.375-4.30958-3.71972-8.88526-1.91845-10.29542zm-3.791 22.04248a6.21359 6.21359 0 0 1 6.20654-6.207h2.91651a31.78523 31.78523 0 0 1 .60693 6.207 31.70458 31.70458 0 0 1 -.60821 6.207h-2.91525a6.21359 6.21359 0 0 1 -6.20654-6.20697zm22.39063 6.207h-1.42178a35.00225 35.00225 0 0 0 .55262-6.207 35.3936 35.3936 0 0 0 -.42414-5.45233c.38855-.22748.7713-.48444 1.15058-.7547h.1427a6.207 6.207 0 0 1 0 12.41406z" fill="#153d45"/><circle cx="18.544" cy="84.209" fill="#153d45" r="1.821"/><path d="m104.79517 34.35016q.71245-.75742 1.38256-1.60993a19.48713 19.48713 0 0 0 4.11622-9.12988c.44238-3.30127-.417-5.98291-2.41895-7.55029-3.70154-2.89795-10.03082-.89856-14.848 4.52472-4.8121-5.41321-11.148-7.41535-14.84341-4.52472-2.00195 1.56738-2.86132 4.249-2.41894 7.55029a19.48711 19.48711 0 0 0 4.11621 9.12988c.37726.48188.767.962 1.16095 1.43024a10.554 10.554 0 0 0 1.99139 20.91889h19.01953a10.5502 10.5502 0 0 0 2.74244-20.7392zm-18.12256 17.7392h-3.63941a7.55665 7.55665 0 0 1 0-15.11329h3.645a37.89224 37.89224 0 0 1 -.00555 15.11329zm1.19751-19.22071a9.76145 9.76145 0 0 0 .11029 1.10742h-2.99414a23.47223 23.47223 0 0 1 -2.74408-3.08544 16.471 16.471 0 0 1 -3.50391-7.67823c-.1709-1.27685-.23047-3.59619 1.29492-4.79 2.42542-1.90149 7.41877.198 11.11347 4.58185a21.07219 21.07219 0 0 0 -2.09491 3.89175 1.49991 1.49991 0 1 0 2.77929 1.1289 18.68337 18.68337 0 0 1 2.62012-4.46631c3.73731-4.77148 9.03906-7.12255 11.57422-5.13623 1.52539 1.19385 1.46582 3.51319 1.29492 4.79a16.47084 16.47084 0 0 1 -3.5039 7.67823c-3.73633 4.77148-9.03418 7.12255-11.57422 5.13671a4.28061 4.28061 0 0 1 -1.374-3.27 1.50005 1.50005 0 1 0 -2.998.11133zm9.13714 19.22071h-7.27185a40.6984 40.6984 0 0 0 .70111-7.55665 41.20461 41.20461 0 0 0 -.51751-6.56347 6.04962 6.04962 0 0 0 .47357.41992 6.49577 6.49577 0 0 0 4.084 1.32813 9.97228 9.97228 0 0 0 2.92749-.47107 38.50108 38.50108 0 0 1 .3645 5.28649 37.46367 37.46367 0 0 1 -.76131 7.55665zm5.04547 0h-1.9898a40.729 40.729 0 0 0 .70562-7.55665 41.27586 41.27586 0 0 0 -.52215-6.54229 17.61976 17.61976 0 0 0 1.57342-1.01435h.23291a7.55665 7.55665 0 0 1 0 15.11329z" fill="#153d45"/><path d="m80.57617 41.33887a1.87744 1.87744 0 1 0 1.87793 1.87744 1.87924 1.87924 0 0 0 -1.87793-1.87744z" fill="#153d45"/><path d="m102.56335 94.54c.32343-.35633.64045-.72241.94251-1.10834a16.80326 16.80326 0 0 0 3.54785-7.877c.3877-2.89063-.373-5.2461-2.1416-6.62989-3.204-2.50964-8.61322-.8645-12.76959 3.69751-4.15515-4.55694-9.5774-6.19781-12.7724-3.69848-1.76856 1.38476-2.5293 3.74023-2.1416 6.63086a16.80335 16.80335 0 0 0 3.54687 7.876c.24689.31586.50012.63166.75629.94342a9.20236 9.20236 0 0 0 2.10406 18.162h16.1836a9.20732 9.20732 0 0 0 2.744-17.99615zm-12.94989 14.99613a35.00845 35.00845 0 0 0 .54572-6.207 35.41766 35.41766 0 0 0 -.36414-5.02978 5.72948 5.72948 0 0 0 3.56824 1.15965 8.51228 8.51228 0 0 0 2.31677-.34912 32.68884 32.68884 0 0 1 .27015 4.21924 31.71952 31.71952 0 0 1 -.60834 6.207zm11.69416-28.77343a2.79691 2.79691 0 0 1 1.75488.52441c.88379.69141 1.25488 2.10156 1.01855 3.86914a13.794 13.794 0 0 1 -2.93652 6.42578h-.001a13.78539 13.78539 0 0 1 -5.53222 4.39258c-1.6582.6543-3.11817.63379-4.00195-.06055-.88379-.6914-1.25489-2.10156-1.01856-3.86914a13.80279 13.80279 0 0 1 2.93652-6.42578c2.54006-3.24314 5.63577-4.85644 7.7803-4.85644zm-21.10645 4.39355c-.23633-1.76758.13477-3.17773 1.01856-3.87012 1.70648-1.33453 5.74768-.09784 9.04431 3.74451a16.10514 16.10514 0 0 0 -2.64588 6.61584 9.82692 9.82692 0 0 0 -.02545 2.47559h-2.20782a20.29205 20.29205 0 0 1 -2.24719-2.54 13.79411 13.79411 0 0 1 -2.93653-6.42582zm-2.77246 18.17285a6.2137 6.2137 0 0 1 6.207-6.207h2.91663a32.00952 32.00952 0 0 1 -.00153 12.41406h-2.9151a6.2137 6.2137 0 0 1 -6.207-6.20706zm22.39063 6.207h-1.42182a35.00923 35.00923 0 0 0 .55268-6.207 35.38662 35.38662 0 0 0 -.42414-5.45233c.38855-.22748.7713-.48444 1.15058-.7547h.1427a6.207 6.207 0 0 1 0 12.41406z" fill="#153d45"/><path d="m81.54492 100.3877a1.82129 1.82129 0 1 0 1.82031 1.82128 1.82381 1.82381 0 0 0 -1.82031-1.82128z" fill="#153d45"/></svg>
+<p class="census">В поиске %%SITES%% и %%PAGES%%.</p>
+<p class="credit"><span>Разработка <a href="https://dartalab.ru/">DARTAlab</a></span><a class="help" href="/help">Помочь проекту</a></p>
+</div>
 </div>
 </footer>"##
         .to_string()
@@ -2465,6 +3004,7 @@ fn badges(
     words: bool,
     meaning: bool,
     volunteer: bool,
+    hive: bool,
     region: Option<&str>,
     place: Option<&str>,
     distance_km: Option<f32>,
@@ -2494,7 +3034,9 @@ fn badges(
     if meaning {
         out.push_str("<span class=\"badge\">смысл</span>");
     }
-    if volunteer {
+    if hive {
+        out.push_str("<span class=\"badge bee\">улей</span>");
+    } else if volunteer {
         out.push_str("<span class=\"badge bee\">держит пчелу</span>");
     }
     out
@@ -2542,6 +3084,26 @@ fn encode_query(text: &str) -> String {
 mod tests {
     use super::*;
 
+    #[test]
+    fn reference_block_stays_beside_the_results() {
+        let page = reference_block(
+            "<form></form><ol class=\"results\"></ol>".into(),
+            "мёд",
+            &[ReferenceCard {
+                source: "Рувики".into(),
+                title: "Мёд".into(),
+                extract: "сладкий продукт".into(),
+                url: "https://ru.ruwiki.ru/wiki/Med".into(),
+            }],
+        );
+        assert!(page.contains("Справка"));
+        assert!(page.contains("сладкий продукт"));
+        assert!(page.contains("https://ru.ruwiki.ru/wiki/Med"));
+        let links = reference_block("<form></form>".into(), "мёд", &[]);
+        assert!(links.contains("ru.wikipedia.org"));
+        assert!(links.contains("ru.ruwiki.ru"));
+    }
+
     fn sample(n: usize) -> Hit {
         Hit {
             url: format!("https://example.com/{n}"),
@@ -2588,9 +3150,12 @@ mod tests {
         assert!(html.contains("&lt;script&gt;"));
         assert!(html.contains("<textarea name=\"q\" rows=\"1\" autofocus placeholder=\"Запрос\">&lt;script&gt;</textarea>"));
         assert_eq!(html.matches("<script>").count(), 1);
+        assert!(!html.contains("id=\"swarm\""));
         assert!(html.contains("https://dartalab.ru/"));
         assert!(html.contains("<title>Пчелопоиск</title>"));
         let home = render("", &[], 1, None);
+        assert!(home.contains("id=\"swarm\""));
+        assert!(home.contains("prefers-reduced-motion"));
         assert!(home.contains("class=\"home\""));
         assert!(home.contains("Bee search"));
         assert!(home.contains("Пчелопоиск"));
@@ -2609,20 +3174,31 @@ mod tests {
         assert!(home.contains("Помочь проекту"));
         assert!(home.contains("class=\"credit\""));
         assert!(home.contains("h1 { margin: 0 0 8px; text-align: center; }"));
-        let credit = home.find("Разработка креативной лаборатории").unwrap();
+        let credit = home.find("Разработка").unwrap();
+        let brand = home.find("DARTAlab").unwrap();
         let help = home.find("class=\"help\"").unwrap();
-        assert!(credit < help);
+        assert!(credit < brand);
+        assert!(brand < help);
+        assert!(!home.contains("креативной лаборатории"));
         let stamped = stamp_census("%%SITES%% и %%PAGES%%".into(), 21, 5);
         assert_eq!(stamped, "21 сайт и 5 страниц");
         assert_eq!(stamp_census("%%SITES%% %%PAGES%%".into(), 11, 22), "11 сайтов 22 страницы");
         assert_eq!(stamp_census("%%SITES%% %%PAGES%%".into(), 2, 1), "2 сайта 1 страница");
         assert!(home.contains("class=\"comb\""));
-        let comb = home.find("class=\"comb\"").unwrap();
-        assert!(help < comb);
+        assert!(home.contains("class=\"meta\""));
+        assert!(home.contains("requestAnimationFrame(paint)"));
         let mut bee = sample(1);
         bee.volunteer = true;
         let marked = render("мёд", &[bee], 1, None);
         assert!(marked.contains("держит пчелу"));
+        let mut hive = sample(2);
+        hive.url = "https://beesearch.ru/".into();
+        hive.title = "Пчелопоиск".into();
+        let hive_marked = render("пчелопоиск", &[hive], 1, None);
+        assert!(hive_marked.contains(">улей<"));
+        assert!(!hive_marked.contains("держит пчелу"));
+        assert!(home.contains("body.home footer { position: relative; z-index: 0; }"));
+        assert!(home.contains("margin-bottom: min(72vh, 520px)"));
         assert!(page_for_sites().contains("--lite"));
         assert!(html.contains("href=\"/manifesto\""));
         assert!(html.contains("href=\"/how\""));
@@ -2633,6 +3209,8 @@ mod tests {
         assert!(html.contains("nav class=\"kinds\""));
         assert!(html.contains(">Работа</a>"));
         assert!(html.contains("tab=jobs"));
+        assert!(html.contains(">Каналы и соцсети</a>"));
+        assert!(html.contains("tab=channel"));
         assert!(html.contains("href=\"/bees\">Всё о пчёлах"));
         assert!(html.contains("aria-label=\"Очистить запрос\""));
         assert!(!html.contains("Очистить запрос\" hidden"));
@@ -2739,11 +3317,16 @@ mod tests {
         assert!(phone.contains("Что такое шард"));
         assert!(phone.contains("браузер внутри приложения"));
         assert!(phone.contains("когда приложение свёрнуто"));
+        assert!(phone.contains("место телефона"));
         assert!(phone.contains("индекс пишет улей"));
         assert!(phone.contains("К поиску"));
         assert!(phone.contains("/download/pchela-android.apk"));
         assert!(indexing.contains("Если сломается Яндекс или Гугл"));
         assert!(indexing.contains("до ста страниц"));
+        assert!(indexing.contains("только главная, без чатов"));
+        assert!(indexing.contains("списки кабинета"));
+        assert!(page_how().contains("не чаты и не страница с вопросом"));
+        assert!(page_how().contains("Документация моделей, SDK агентов"));
         assert!(page_manifesto().contains("Если крупный поиск встанет"));
         assert!(page_how().contains("href=\"/indexing\""));
         assert!(page_for_sites().contains("чужие адреса"));
@@ -2888,6 +3471,213 @@ mod tests {
         assert!(html.contains("<p class=\"region-now\">Волгоградская область</p>"));
         assert!(html.contains("<details class=\"tune\">"));
         assert!(!html.contains("<details class=\"tune\" open>"));
+    }
+
+    #[test]
+    fn lists_sheet_manages_keep_ban_mute_and_seed() {
+        let zero = VisitNumbers {
+            visits: 0,
+            views: 0,
+            searches: 0,
+            bounces: 0,
+            dwell_seconds: 0,
+            timed_visits: 0,
+            empty_searches: 0,
+            search_errors: 0,
+            refused: 0,
+        };
+        let view = CabinetSheets {
+            version: "0.1.1".into(),
+            region_label: "Россия".into(),
+            model: "e5".into(),
+            days: vec![],
+            visits_day: zero,
+            visits_week: zero,
+            visits_month: zero,
+            visit_day_title: String::new(),
+            visit_week_title: String::new(),
+            visit_month_title: String::new(),
+            queries_day: vec![],
+            queries_week: vec![],
+            queries_month: vec![],
+            index_urls: vec![],
+            kind_counts: vec![],
+            muted: vec!["hide.ru".into()],
+            keep: vec!["plant.ru".into()],
+            banned: vec!["spam.ru".into()],
+            docs: vec!["docs.openclaw.ai".into(), "docs.coze.com".into()],
+            inspect: Some(HostCard {
+                host: "plant.ru".into(),
+                pages: 12,
+                queued: 3,
+                banned: false,
+                muted: false,
+                keep: true,
+                volunteer: false,
+                government: false,
+                hive: false,
+                tool_docs: false,
+                model_maker: false,
+                in_focus: true,
+                rule: "без потолка".into(),
+            }),
+            bee_hosts: vec!["paseka.ru".into()],
+            nodes: vec![],
+            map_version: None,
+            map_places: vec![],
+            csrf: "token".into(),
+            base: "https://admin.beesearch.ru".into(),
+            mcp_keys: vec![],
+        };
+        let (stats, rest) = cabinet_sheets(&view, "lists");
+        assert!(stats.is_empty());
+        assert!(rest.contains("id=\"lists\""));
+        assert!(rest.contains("plant.ru"));
+        assert!(rest.contains("spam.ru"));
+        assert!(rest.contains("hide.ru"));
+        assert!(rest.contains("paseka.ru"));
+        assert!(rest.contains("value=\"keep\""));
+        assert!(rest.contains("value=\"ban\""));
+        assert!(rest.contains("value=\"mute\""));
+        assert!(rest.contains("value=\"enqueue\""));
+        assert!(rest.contains("sheet=lists"));
+        assert!(rest.contains("docs.openclaw.ai"));
+        assert!(rest.contains("docs.coze.com"));
+        assert!(rest.contains("Проверить"));
+        assert!(rest.contains("Страниц в индексе: 12"));
+        assert!(rest.contains("без потолка"));
+        assert!(!rest.contains("value=\"gov\""));
+    }
+
+    #[test]
+    fn cabinet_frame_does_not_embed_charts() {
+        let html = cabinet_frame("/admin", "node", "minute", "", "");
+        assert!(html.contains("data-sheet-root"));
+        assert!(html.contains("/operator/live"));
+        assert!(html.contains("/operator/chart"));
+        assert!(html.contains("Собираю лист"));
+        assert!(!html.contains("class=\"chart\""));
+        assert!(!html.contains("data-chart="));
+        assert!(html.contains("class=\"on\""));
+    }
+
+    #[test]
+    fn visits_sheet_loads_charts_later() {
+        let zero = VisitNumbers {
+            visits: 0,
+            views: 0,
+            searches: 0,
+            bounces: 0,
+            dwell_seconds: 0,
+            timed_visits: 0,
+            empty_searches: 0,
+            search_errors: 0,
+            refused: 0,
+        };
+        let view = CabinetSheets {
+            version: "0.1.1".into(),
+            region_label: "Россия".into(),
+            model: "e5".into(),
+            days: vec![],
+            visits_day: zero,
+            visits_week: zero,
+            visits_month: zero,
+            visit_day_title: String::new(),
+            visit_week_title: String::new(),
+            visit_month_title: String::new(),
+            queries_day: vec![],
+            queries_week: vec![],
+            queries_month: vec![],
+            index_urls: vec![],
+            kind_counts: vec![],
+            muted: vec![],
+            keep: vec![],
+            banned: vec![],
+            docs: vec![],
+            inspect: None,
+            bee_hosts: vec![],
+            nodes: vec![],
+            map_version: None,
+            map_places: vec![],
+            csrf: "token".into(),
+            base: "/admin".into(),
+            mcp_keys: vec![],
+        };
+        let (stats, rest) = cabinet_sheets(&view, "visits");
+        assert!(rest.is_empty());
+        assert!(stats.contains("data-chart=\"visits\""));
+        assert!(stats.contains("data-chart=\"searches\""));
+        assert!(stats.contains("Боты"));
+        assert!(!stats.contains("<svg"));
+        assert!(stats.contains("Главная без запроса"));
+        assert!(stats.contains("сессия браузера"));
+        assert!(stats.contains("с понедельника"));
+    }
+
+    #[test]
+    fn door_sheet_lists_mcp_keys_with_revoke() {
+        let zero = VisitNumbers {
+            visits: 0,
+            views: 0,
+            searches: 0,
+            bounces: 0,
+            dwell_seconds: 0,
+            timed_visits: 0,
+            empty_searches: 0,
+            search_errors: 0,
+            refused: 0,
+        };
+        let view = CabinetSheets {
+            version: "0.1.1".into(),
+            region_label: "Россия".into(),
+            model: "e5".into(),
+            days: vec![],
+            visits_day: zero,
+            visits_week: zero,
+            visits_month: zero,
+            visit_day_title: String::new(),
+            visit_week_title: String::new(),
+            visit_month_title: String::new(),
+            queries_day: vec![],
+            queries_week: vec![],
+            queries_month: vec![],
+            index_urls: vec![],
+            kind_counts: vec![],
+            muted: vec![],
+            keep: vec![],
+            banned: vec![],
+            docs: vec![],
+            inspect: None,
+            bee_hosts: vec![],
+            nodes: vec![],
+            map_version: None,
+            map_places: vec![],
+            csrf: "token".into(),
+            base: "/admin".into(),
+            mcp_keys: vec![
+                McpKeyLine {
+                    id: "a1b2c3d4".into(),
+                    issued: "01.11.2026 17:10".into(),
+                    revoked: None,
+                },
+                McpKeyLine {
+                    id: "deadbeef".into(),
+                    issued: "20.10.2026 09:00".into(),
+                    revoked: Some("21.10.2026 12:00".into()),
+                },
+            ],
+        };
+        let (stats, rest) = cabinet_sheets(&view, "door");
+        assert!(stats.is_empty());
+        assert!(rest.contains("id=\"door\""));
+        assert!(rest.contains("a1b2c3d4"));
+        assert!(rest.contains("01.11.2026 17:10"));
+        assert!(rest.contains("действует"));
+        assert!(rest.contains("value=\"revoke_mcp\""));
+        assert!(rest.contains("deadbeef"));
+        assert!(rest.contains("отозван 21.10.2026 12:00"));
+        assert!(rest.contains("value=\"issue_mcp\""));
+        assert_eq!(rest.matches("value=\"revoke_mcp\"").count(), 1);
     }
 
     #[test]

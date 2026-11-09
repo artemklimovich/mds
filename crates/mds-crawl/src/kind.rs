@@ -1,6 +1,6 @@
 use mds_types::{
-    is_channel_host, is_document_url, is_marketplace_host, is_press_host, is_product_card, kind_from_stored,
-    KIND_ADS, KIND_AI, KIND_AUTO, KIND_BUILD, KIND_CHANNEL, KIND_EDU, KIND_GOODS, KIND_HAUL, KIND_IMAGE, KIND_JOBS, KIND_MEDICINE, KIND_NEWS, KIND_REALTY, KIND_SERVICE, KIND_SHOP, KIND_VIDEO,
+    is_channel_host, is_document_url, is_government_host, is_image_page, is_marketplace_host, is_press_host, is_product_card, is_product_url, is_raw_office_text, is_video_channel_host, is_video_page, is_webshop, kind_from_stored,
+    KIND_ADS, KIND_AI, KIND_AUTO, KIND_BUILD, KIND_CHANNEL, KIND_EDU, KIND_GOODS, KIND_GOV, KIND_HAUL, KIND_IMAGE, KIND_JOBS, KIND_MEDICINE, KIND_NEWS, KIND_REALTY, KIND_SERVICE, KIND_SHOP, KIND_VIDEO,
 };
 use url::Url;
 
@@ -26,10 +26,11 @@ pub fn classify_html(url: &str, host: &str, title: &str, text: &str, html: &str)
     if !blocked && (json_type(&lower, "jobposting") || lower.contains("\"@type\":\"jobposting\"")) {
         kind |= KIND_JOBS;
     }
-    if !blocked && (json_type(&lower, "product") || json_type(&lower, "offer")) {
+    let on_product = is_product_card(url) || is_product_url(url);
+    if !blocked && (json_type(&lower, "product") || json_type(&lower, "offer")) && (on_product || is_webshop(title, text)) {
         kind |= KIND_GOODS;
     }
-    if !blocked && (is_product_card(url) || html_has_product_card(&lower) || json_type(&lower, "product") || json_type(&lower, "offer")) {
+    if !blocked && is_webshop(title, text) {
         kind |= KIND_SHOP;
     }
     if !blocked {
@@ -37,9 +38,9 @@ pub fn classify_html(url: &str, host: &str, title: &str, text: &str, html: &str)
             || json_type(&lower, "dentist")
             || json_type(&lower, "medicalclinic")
             || json_type(&lower, "hospital");
-        let equipment = text.to_lowercase().contains("оборудование") || title.to_lowercase().contains("оборудование");
+        let equipment = on_product && (text.to_lowercase().contains("оборудование") || title.to_lowercase().contains("оборудование"));
         let pharmacy = title.to_lowercase().contains("аптека");
-        if medical && !equipment && !pharmacy {
+        if medical && !equipment && !pharmacy && !is_government_host(host) {
             kind |= KIND_MEDICINE;
         }
         if equipment {
@@ -65,11 +66,34 @@ pub fn classify_html(url: &str, host: &str, title: &str, text: &str, html: &str)
         kind |= KIND_VIDEO;
     }
     if is_channel_host(host) {
-        kind |= KIND_VIDEO | KIND_CHANNEL;
-        kind &= !(KIND_JOBS | KIND_SERVICE | KIND_MEDICINE | KIND_GOODS | KIND_NEWS | KIND_SHOP | KIND_HAUL | KIND_AUTO | KIND_REALTY | KIND_BUILD | KIND_EDU | KIND_ADS | KIND_AI);
+        kind |= KIND_CHANNEL;
+        if is_video_channel_host(host) {
+            kind |= KIND_VIDEO;
+        } else {
+            kind &= !KIND_VIDEO;
+        }
+        kind &= !(KIND_JOBS | KIND_SERVICE | KIND_GOODS | KIND_NEWS | KIND_SHOP | KIND_HAUL);
     }
     if is_press_host(host) {
         kind = KIND_NEWS;
+    }
+    if is_government_host(host) {
+        kind &= !(KIND_JOBS
+            | KIND_SERVICE
+            | KIND_MEDICINE
+            | KIND_GOODS
+            | KIND_SHOP
+            | KIND_HAUL
+            | KIND_AUTO
+            | KIND_REALTY
+            | KIND_BUILD
+            | KIND_EDU
+            | KIND_ADS
+            | KIND_AI);
+        kind |= KIND_GOV;
+    }
+    if kind & KIND_SHOP != 0 {
+        kind &= !KIND_HAUL;
     }
     let media_url = if kind & KIND_IMAGE != 0 { first_image(url, html) } else { None };
     let docs = document_pages(url, host, html);
@@ -114,20 +138,10 @@ fn json_theme(lower_html: &str) -> u32 {
     kind
 }
 
-fn media_flags(url: &str, text: &str, html: &str) -> (bool, bool) {
+fn media_flags(url: &str, _text: &str, html: &str) -> (bool, bool) {
     let lower = html.to_ascii_lowercase();
-    let path = url.to_ascii_lowercase();
-    let video = lower.contains("<video")
-        || og_type(&lower, "video")
-        || lower.contains("youtube.com/embed")
-        || lower.contains("youtube.com/watch")
-        || lower.contains("rutube.ru/")
-        || lower.contains("player.vimeo.com")
-        || lower.contains("vk.com/video")
-        || lower.contains("vkvideo.ru");
-    let short = text.chars().count() < 400;
-    let image_path = path.contains("/photo") || path.contains("/gallery") || path.contains("/foto") || path.contains("/image");
-    let image = (short || image_path || og_type(&lower, "image")) && lower.contains("<img");
+    let video = og_type(&lower, "video") || lower.contains("<video") || is_video_page(url);
+    let image = (is_image_page(url) || og_type(&lower, "image")) && lower.contains("<img");
     (image, video)
 }
 
@@ -147,8 +161,11 @@ fn news_href(base: &str, html: &str) -> Option<String> {
         let tag = &html[start..tag_end.min(html.len())];
         from = (tag_end + 1).min(html.len());
         let tag_lower = tag.to_ascii_lowercase();
-        let channel = tag_lower.contains("rss+xml") || tag_lower.contains("atom+xml") || tag_lower.contains("feed+json");
-        if !tag_lower.contains("alternate") || !channel {
+        let channel = tag_lower.contains("rss+xml")
+            || tag_lower.contains("atom+xml")
+            || tag_lower.contains("feed+json")
+            || tag_lower.contains("application/rss");
+        if !channel {
             continue;
         }
         let Some(href) = attr_quoted(tag, "href") else {
@@ -217,15 +234,36 @@ fn yml_href(base: &str, html: &str) -> Option<String> {
 fn price_of(html: &str) -> Option<String> {
     let lower = html.to_ascii_lowercase();
     let key = "itemprop=\"price\"";
-    let Some(rel) = lower.find(key) else {
-        return None;
+    if let Some(rel) = lower.find(key) {
+        let window = &html[rel..cut_at_char(html, rel, 180)];
+        let window_lower = window.to_ascii_lowercase();
+        if let Some(content) = window_lower.find("content=\"").map(|pos| pos + 9) {
+            let rest = &window[content..];
+            if let Some(end) = rest.find('"') {
+                let price = rest[..end].trim();
+                if !price.is_empty() && price.chars().count() <= 24 {
+                    return Some(price.to_string());
+                }
+            }
+        }
+    }
+    json_price(&lower)
+}
+
+fn json_price(lower_html: &str) -> Option<String> {
+    let key = "\"price\"";
+    let rel = lower_html.find(key)?;
+    let rest = lower_html[rel + key.len()..].trim_start();
+    let rest = rest.strip_prefix(':')?.trim_start();
+    let price = if let Some(body) = rest.strip_prefix('"') {
+        let end = body.find('"')?;
+        body[..end].trim()
+    } else {
+        let end = rest
+            .find(|ch: char| !(ch.is_ascii_digit() || ch == '.' || ch == ','))
+            .unwrap_or(rest.len());
+        rest[..end].trim()
     };
-    let window = &html[rel..cut_at_char(html, rel, 180)];
-    let window_lower = window.to_ascii_lowercase();
-    let content = window_lower.find("content=\"").map(|pos| pos + 9)?;
-    let rest = &window[content..];
-    let end = rest.find('"')?;
-    let price = rest[..end].trim();
     if price.is_empty() || price.chars().count() > 24 {
         None
     } else {
@@ -310,6 +348,9 @@ fn document_pages(base: &str, host: &str, html: &str) -> Vec<FetchedPage> {
         } else {
             anchor
         };
+        if is_raw_office_text(&title, "") {
+            continue;
+        }
         let text = title.clone();
         docs.push(FetchedPage {
             url,
@@ -371,14 +412,6 @@ pub fn drop_marketplace_cards(links: &mut Vec<String>) {
     });
 }
 
-fn html_has_product_card(lower_html: &str) -> bool {
-    lower_html.contains("/product")
-        || lower_html.contains("/item/")
-        || lower_html.contains("/goods/")
-        || lower_html.contains("/tovar/")
-        || lower_html.contains("/detail")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -432,11 +465,51 @@ mod tests {
         let html = r#"<html><head><link rel="alternate" type="application/rss+xml" href="/rss/news.xml"></head><body><p>Новости завода</p></body></html>"#;
         let kind = classify_html("https://zavod.example/news", "zavod.example", "Новости", "Новости завода", html);
         assert_eq!(kind.news_feed.as_deref(), Some("https://zavod.example/rss/news.xml"));
+        let without_rel = r#"<html><head><link type="application/rss+xml" href="/rss/news.xml"></head></html>"#;
+        let kind = classify_html("https://fas.gov.ru/news/1", "fas.gov.ru", "ФАС", "новость", without_rel);
+        assert_eq!(kind.news_feed.as_deref(), Some("https://fas.gov.ru/rss/news.xml"));
     }
 
     #[test]
     fn known_paper_keeps_its_feed_without_a_link_tag() {
         let kind = classify_html("https://www.kommersant.ru/", "www.kommersant.ru", "Коммерсантъ", "новости", "<html></html>");
         assert!(kind.news_feed.unwrap().contains("kommersant.ru/rss"));
+    }
+
+    #[test]
+    fn footer_embed_is_not_a_video_page() {
+        let html = r#"<html><body><p>О заводе. Длинный текст про цех и поставки.</p><iframe src="https://www.youtube.com/embed/abc"></iframe></body></html>"#;
+        let kind = classify_html("https://zavod.example/about", "zavod.example", "О заводе", "О заводе длинный текст", html);
+        assert_eq!(kind.kind & KIND_VIDEO, 0);
+    }
+
+    #[test]
+    fn max_channel_is_not_a_video_page() {
+        let html = r#"<html><body><p>Официальный канал. Жилой комплекс у метро.</p><iframe src="https://www.youtube.com/embed/abc"></iframe></body></html>"#;
+        let kind = classify_html(
+            "https://max.ru/channel_jkkatuar",
+            "max.ru",
+            "ЖК Катуар",
+            "жилой комплекс в мессенджере MAX",
+            html,
+        );
+        assert_eq!(kind.kind & KIND_CHANNEL, KIND_CHANNEL);
+        assert_eq!(kind.kind & KIND_VIDEO, 0);
+        assert_eq!(kind.kind & KIND_REALTY, KIND_REALTY);
+    }
+
+    #[test]
+    fn government_html_is_not_a_shop() {
+        let html = r#"<html><body><a href="/product/form">бланк</a><p>Главное управление МЧС</p></body></html>"#;
+        let kind = classify_html("https://01.mchs.gov.ru/", "01.mchs.gov.ru", "МЧС", "Главное управление", html);
+        assert_eq!(kind.kind & KIND_SHOP, 0);
+        assert_eq!(kind.kind & KIND_GOV, KIND_GOV);
+    }
+
+    #[test]
+    fn short_page_with_a_picture_is_not_a_gallery() {
+        let html = r#"<html><body><img src="/hero.jpg"><p>Новость ЖК</p></body></html>"#;
+        let kind = classify_html("https://jk.example/news/1", "jk.example", "Новость", "Короткий текст", html);
+        assert_eq!(kind.kind & KIND_IMAGE, 0);
     }
 }

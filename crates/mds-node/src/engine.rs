@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use mds_crawl::{is_broken_url, is_not_found, strip_boilerplate, tidy_url, CrawlPolicy, Crawler, FetchedPage};
 use mds_dht::{shard_key, LocalDirectory, Lsh};
-use mds_embed::Embedder;
+use mds_embed::{passage_text, Embedder, PASSAGE_KIND};
 use mds_index::{GeoPlaceRow, Index, IndexLine, ParkedPage, QueryStat, RankPlace, StoredLeaf, TextSpool, VisitDay, VisitDelta, VisitReport};
 use mds_rank::{drop_near_copies, fuse, page_lane, query_lane, Lane};
 use mds_types::{bare_host, host_of_url, quantize, Hit, QuantVector};
@@ -93,9 +93,9 @@ pub fn hits_for(
     kind_mask: u32,
     theme_mask: u32,
 ) -> Result<Vec<Hit>, NodeError> {
-    let bucket = lsh.bucket(vector);
+    let _ = lsh;
     let words = index.search_words(query, 100, kind_mask, theme_mask)?;
-    let meanings = index.search_vectors(vector, Some(bucket), 100, kind_mask, theme_mask)?;
+    let meanings = index.search_vectors(vector, None, 100, kind_mask, theme_mask)?;
     let mut ids: Vec<i64> = words
         .iter()
         .map(|hit| hit.id)
@@ -188,6 +188,8 @@ pub struct Engine {
     search_wants_model: bool,
     /// Адреса, которые сейчас считаются вне замка.
     embedding: Vec<String>,
+    /// После новой пачки склада берётся пачка пересчёта, пока векторы старого текста не кончатся.
+    refresh_turn: bool,
     lsh: Lsh,
     directory: LocalDirectory,
     cache: HashMap<String, CachedQuery>,
@@ -218,7 +220,7 @@ impl SearchLoad {
         }
     }
 
-    fn snapshot(&mut self) -> (u64, u64) {
+    fn snapshot(&mut self) -> (u64, u64, u64) {
         self.prune();
         let count = self.marks.len() as u64;
         let avg = if count == 0 {
@@ -226,7 +228,8 @@ impl SearchLoad {
         } else {
             (self.marks.iter().map(|mark| mark.1).sum::<u128>() / u128::from(count)) as u64
         };
-        (count, avg)
+        let max = self.marks.iter().map(|mark| mark.1).max().unwrap_or(0) as u64;
+        (count, avg, max)
     }
 }
 
@@ -253,6 +256,23 @@ pub enum PassageClaim {
     /// Со склада убраны страницы без вектора, можно брать дальше.
     Again,
     Ready(PassageBatch),
+    /// Старые страницы: тот же текст, новый заголовок и начало в вектор.
+    Refresh(RefreshBatch),
+}
+
+/// Пересчёт вектора без повторного обхода.
+pub struct RefreshBatch {
+    embedder: Embedder,
+    ids: Vec<i64>,
+    passages: Vec<String>,
+}
+
+impl RefreshBatch {
+    pub fn embed(&mut self) -> Result<Vec<Vec<f32>>, NodeError> {
+        self.embedder
+            .embed_passages(&self.passages)
+            .map_err(|err| NodeError::Message(err.to_string()))
+    }
 }
 
 impl Engine {
@@ -291,12 +311,20 @@ impl Engine {
         if removed > 0 {
             eprintln!("MDS: из индекса убрано {removed} страниц без адреса, с ответом «не найдено» или со склеенной ссылкой");
         }
+        let swept = index.sweep_focus()?;
+        if swept.dropped > 0 || swept.trimmed > 0 || swept.queue > 0 {
+            eprintln!(
+                "MDS: вне России, СНГ и поставщиков моделей убрано {} страниц, сверх потолка {} страниц, из очереди {} адресов",
+                swept.dropped, swept.trimmed, swept.queue
+            );
+        }
         Ok(Self {
             index,
             spool,
             embedder: Some(embedder),
             search_wants_model: false,
             embedding: Vec::new(),
+            refresh_turn: true,
             lsh: Lsh::new(),
             directory: LocalDirectory::single(),
             cache: HashMap::new(),
@@ -357,6 +385,20 @@ impl Engine {
         Ok(())
     }
 
+    pub fn queue_may_grow(&self) -> Result<bool, NodeError> {
+        Ok(self.index.queue_may_grow()?)
+    }
+
+    /// Ссылки с уже обойдённой страницы. Пока очередь длинная — не берём.
+    fn take_found_links(&self, urls: &[String]) -> Result<(), NodeError> {
+        if urls.is_empty() || !self.index.queue_may_grow()? {
+            return Ok(());
+        }
+        self.index.enqueue_urls(urls)?;
+        self.index.pull_ahead(urls)?;
+        Ok(())
+    }
+
     pub fn pending_urls(&self, limit: usize) -> Result<Vec<String>, NodeError> {
         Ok(self.index.pending_urls(limit)?)
     }
@@ -400,8 +442,7 @@ impl Engine {
         self.index.mark_visited(visited)?;
         self.remember_priorities(&pages)?;
         self.note_page_anchors(&pages)?;
-        self.index.enqueue_urls(discovered)?;
-        self.index.pull_ahead(discovered)?;
+        self.take_found_links(discovered)?;
         self.index.delete_urls(gone)?;
         self.cache.clear();
         self.park_pages(&pages, false)?;
@@ -419,8 +460,7 @@ impl Engine {
             discovered.extend(page.links.iter().cloned());
         }
         self.remember_priorities(&pages)?;
-        self.index.enqueue_urls(&discovered)?;
-        self.index.pull_ahead(&discovered)?;
+        self.take_found_links(&discovered)?;
         self.index.delete_urls(&gone)?;
         self.cache.clear();
         self.ingest_upsert(pages)
@@ -446,8 +486,7 @@ impl Engine {
         self.index.mark_visited(&visited)?;
         self.remember_priorities(&pages)?;
         self.note_page_anchors(&pages)?;
-        self.index.enqueue_urls(&discovered)?;
-        self.index.pull_ahead(&discovered)?;
+        self.take_found_links(&discovered)?;
         self.index.delete_urls(&gone)?;
         self.cache.clear();
         self.park_pages(&pages, false)?;
@@ -498,10 +537,10 @@ impl Engine {
         if let Some(found) = self.cached_search(query, kind_mask, theme_mask) {
             return Ok(found);
         }
-        let embedder = self
-            .embedder
-            .as_mut()
-            .ok_or_else(|| NodeError::Message("модель занята складом".into()))?;
+        let Some(embedder) = self.embedder.as_mut() else {
+            self.search_wants_model = true;
+            return Err(NodeError::Message("модель занята складом".into()));
+        };
         let vector = embedder.embed_query(query)?;
         self.finish_search(query, kind_mask, theme_mask, vector)
     }
@@ -561,6 +600,8 @@ impl Engine {
                 || !page.indexable
                 || is_broken_url(&page.url)
                 || is_not_found(&page.title, &page.text)
+                || mds_types::is_raw_office_text(&page.title, &page.text)
+                || mds_types::is_channel_noise(&page.url)
             {
                 eprintln!("MDS: страница убрана из индекса {}", page.url);
                 rejected.push(page.url);
@@ -596,7 +637,7 @@ impl Engine {
                 new_hosts += 1;
                 seen_hosts.insert(page.host.clone());
             }
-            passages.push(format!("{}\n{}", page.title, page.text));
+            passages.push(passage_text(&page.title, &page.text));
             candidates.push(page);
         }
         self.index.delete_urls(&rejected)?;
@@ -748,8 +789,16 @@ impl Engine {
         Ok(self.index.remember_volunteer(host)?)
     }
 
+    pub fn remember_volunteer_version(&self, host: &str, version: &str) -> Result<(), NodeError> {
+        Ok(self.index.remember_volunteer_version(host, version)?)
+    }
+
     pub fn volunteers(&self) -> Result<Vec<String>, NodeError> {
         Ok(self.index.volunteers()?)
+    }
+
+    pub fn volunteer_seen(&self) -> Result<Vec<mds_index::VolunteerRow>, NodeError> {
+        Ok(self.index.volunteer_seen()?)
     }
 
     pub fn forget_volunteer(&self, host: &str) -> Result<(), NodeError> {
@@ -836,8 +885,7 @@ impl Engine {
         let links = page.links.clone();
         let url = page.url.clone();
         let hash = page.simhash;
-        self.index.enqueue_urls(&links)?;
-        self.index.pull_ahead(&links)?;
+        self.take_found_links(&links)?;
         if self.index.stored_simhash(&url)? == Some(hash) {
             self.index.note_intake(0, 0, 1, 0)?;
             self.index.refresh_quiet(&url, etag.as_deref(), modified.as_deref())?;
@@ -958,16 +1006,53 @@ impl Engine {
         Ok(self.index.muted_hosts()?)
     }
 
+    pub fn keep_host(&self, host: &str) -> Result<(), NodeError> {
+        Ok(self.index.keep_host(host)?)
+    }
+
+    pub fn unkeep_host(&self, host: &str) -> Result<(), NodeError> {
+        Ok(self.index.unkeep_host(host)?)
+    }
+
+    pub fn keep_hosts(&self) -> Result<Vec<String>, NodeError> {
+        Ok(self.index.keep_hosts()?)
+    }
+
+    pub fn ban_host(&self, host: &str) -> Result<(), NodeError> {
+        Ok(self.index.ban_host(host)?)
+    }
+
+    pub fn unban_host(&self, host: &str) -> Result<(), NodeError> {
+        Ok(self.index.unban_host(host)?)
+    }
+
+    pub fn banned_hosts(&self) -> Result<Vec<String>, NodeError> {
+        Ok(self.index.banned_hosts()?)
+    }
+
+    pub fn inspect_host(&self, host: &str) -> Result<mds_index::HostInspect, NodeError> {
+        Ok(self.index.inspect_host(host)?)
+    }
+
     pub fn recent_queries(&self, limit: usize) -> Result<Vec<QueryStat>, NodeError> {
         Ok(self.index.recent_queries(limit)?)
     }
 
     pub fn note_search(&mut self, elapsed_ms: u128) {
         self.load.note(elapsed_ms);
+        let _ = self.index.note_search_pace(elapsed_ms.min(i64::MAX as u128) as i64);
     }
 
-    pub fn load_snapshot(&mut self) -> (u64, u64) {
+    pub fn load_snapshot(&mut self) -> (u64, u64, u64) {
         self.load.snapshot()
+    }
+
+    pub fn search_pace(&self, limit: usize) -> Result<Vec<mds_index::SearchPaceSlot>, NodeError> {
+        Ok(self.index.search_pace(limit)?)
+    }
+
+    pub fn search_peak_ms(&self, hours: i64) -> Result<i64, NodeError> {
+        Ok(self.index.search_peak_ms(hours)?)
     }
 
     pub fn queue_len(&self) -> Result<usize, NodeError> {
@@ -1032,7 +1117,7 @@ impl Engine {
         }
         let urls: Vec<String> = fetched.iter().map(|page| page.url.clone()).collect();
         let parked = self.park_pages(&fetched, true)?;
-        self.index.enqueue_urls(&discovered)?;
+        self.take_found_links(&discovered)?;
         self.index.mark_visited(&urls)?;
         Ok(parked)
     }
@@ -1082,11 +1167,22 @@ impl Engine {
         Ok(self.spool.len()?)
     }
 
-    /// Забирает до восьми страниц и модель. Векторы считаются снаружи, запись — в `finish_passage_batch`.
+    /// Забирает до четырёх страниц и модель. Векторы считаются снаружи, запись — в `finish_passage_batch`.
     pub fn claim_passage_batch(&mut self) -> Result<PassageClaim, NodeError> {
         if self.search_wants_model {
             return Ok(PassageClaim::Yield);
         }
+        let need_refresh = self.index.passage_kind()?.as_deref() != Some(PASSAGE_KIND);
+        if need_refresh && (self.refresh_turn || self.spool_waiting()? == 0) {
+            match self.claim_refresh_batch()? {
+                PassageClaim::Idle => {}
+                other => {
+                    self.refresh_turn = false;
+                    return Ok(other);
+                }
+            }
+        }
+        self.refresh_turn = true;
         if self.spool_waiting()? == 0 {
             return Ok(PassageClaim::Idle);
         }
@@ -1097,7 +1193,7 @@ impl Engine {
                 continue;
             }
             picked.push(page);
-            if picked.len() == 8 {
+            if picked.len() == 4 {
                 break;
             }
         }
@@ -1154,6 +1250,53 @@ impl Engine {
         self.embedder = Some(batch.embedder);
         let urls: Vec<String> = batch.pages.iter().map(|page| page.url.clone()).collect();
         self.embedding.retain(|url| !urls.iter().any(|done| done == url));
+    }
+
+    fn claim_refresh_batch(&mut self) -> Result<PassageClaim, NodeError> {
+        let after = self.index.passage_after()?;
+        let rows = self.index.pages_for_refresh(after, 4)?;
+        if rows.is_empty() {
+            self.index.set_passage_kind(PASSAGE_KIND)?;
+            eprintln!("MDS: векторы страниц пересчитаны под заголовок и начало");
+            return Ok(PassageClaim::Idle);
+        }
+        let Some(embedder) = self.embedder.take() else {
+            return Ok(PassageClaim::Yield);
+        };
+        let ids: Vec<i64> = rows.iter().map(|row| row.0).collect();
+        let passages: Vec<String> = rows
+            .iter()
+            .map(|row| passage_text(&row.1, &row.2))
+            .collect();
+        Ok(PassageClaim::Refresh(RefreshBatch {
+            embedder,
+            ids,
+            passages,
+        }))
+    }
+
+    pub fn finish_refresh_batch(&mut self, batch: RefreshBatch, vectors: Vec<Vec<f32>>) -> Result<usize, NodeError> {
+        self.embedder = Some(batch.embedder);
+        let mut stored = 0_usize;
+        let mut last = 0_i64;
+        for (id, vector) in batch.ids.into_iter().zip(vectors) {
+            last = id;
+            let quant = quantize(&vector).map_err(|err| NodeError::Message(err.to_string()))?;
+            let bucket = self.lsh.bucket(&vector);
+            self.index.put_vector(id, &quant, bucket)?;
+            stored += 1;
+        }
+        if last > 0 {
+            self.index.set_passage_after(last)?;
+        }
+        let total = self.index.len().unwrap_or(0);
+        eprintln!("MDS: пересчёт смысла до id {last}, страниц {total}");
+        self.cache.clear();
+        Ok(stored)
+    }
+
+    pub fn cancel_refresh_batch(&mut self, batch: RefreshBatch) {
+        self.embedder = Some(batch.embedder);
     }
 
     fn park_pages(&self, pages: &[FetchedPage], force: bool) -> Result<usize, NodeError> {

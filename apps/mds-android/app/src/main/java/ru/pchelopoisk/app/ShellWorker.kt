@@ -3,6 +3,7 @@ package ru.pchelopoisk.app
 import android.content.Context
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
+import android.os.PowerManager
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -29,13 +30,13 @@ class ShellWorker {
                     onStatus("Нет сети. Обход подождёт.")
                     30
                 } else {
-                    onStatus("Пчела читает страницы для улья.")
-                    val (given, pause) = pull(app)
-                    if (given > 0) onStatus("Улью отдано страниц: $given.")
-                    pause
+                    val pull = pull(app)
+                    onStatus(pull.status())
+                    pull.pause
                 }
+                val wish = paceWish(app)
                 var waited = 0
-                while (running && generation.get() == ticket && waited < pause) {
+                while (running && generation.get() == ticket && waited < pause && paceWish(app) == wish) {
                     Thread.sleep(1000)
                     waited += 1
                 }
@@ -48,29 +49,66 @@ class ShellWorker {
         generation.incrementAndGet()
     }
 
-    private fun pull(context: Context): Pair<Int, Int> {
+    private class Pull(val given: Int, val pause: Int, val wish: String, val kind: String) {
+        fun status(): String {
+            val mode = when (wish) {
+                "fast" -> "Быстрее"
+                "server" -> "Как сервер"
+                else -> "Обычный"
+            }
+            val wait = if (pause < 60) "$pause с" else "${pause / 60} мин"
+            val what = when {
+                given > 0 -> "улью отдано $given"
+                kind == "empty" -> "очередь пуста"
+                kind == "wait" -> "улей просит подождать"
+                kind == "closed" -> "страницы не открылись"
+                else -> "улей не ответил"
+            }
+            return "$mode: $what. Следующий заход через $wait."
+        }
+    }
+
+    private fun pull(context: Context): Pull {
+        val power = context.getSystemService(PowerManager::class.java)
+        val lock = power?.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "pchela:crawl")
+        lock?.acquire(60_000L)
+        try {
+            return pullAwake(context)
+        } finally {
+            if (lock?.isHeld == true) lock.release()
+        }
+    }
+
+    private fun pullAwake(context: Context): Pull {
         val id = shellId(context)
         val wish = paceWish(context)
-        val work = open(TrustedNodes.hive() + "/shell/work", id, wish) ?: return 0 to 600
-        val (urls, pause) = try {
-            if (work.responseCode != 200) return 0 to 600
+        val work = open(TrustedNodes.hive() + "/shell/work", id, wish) ?: return Pull(0, 600, wish, "down")
+        val parsed = try {
+            if (work.responseCode != 200) return Pull(0, 600, wish, "down")
             val body = work.inputStream.bufferedReader().readText()
             val root = JSONObject(body)
-            val list = root.optJSONArray("urls") ?: return 0 to 600
+            val list = root.optJSONArray("urls")
             val pause = root.optLong("pause_secs", 600).coerceIn(60, 3600).toInt()
-            (0 until list.length()).map { list.getString(it) } to pause
+            val note = root.optString("note")
+            val urls = if (list == null) emptyList() else (0 until list.length()).map { list.getString(it) }
+            Triple(urls, pause, note)
         } catch (_: Exception) {
-            return 0 to 600
+            return Pull(0, 600, wish, "down")
         } finally {
             work.disconnect()
+        }
+        val (urls, pause, note) = parsed
+        if (urls.isEmpty()) {
+            val kind = if (note == "подождите") "wait" else "empty"
+            return Pull(0, pause, wish, kind)
         }
         val pages = JSONArray()
         for (url in urls) {
             val page = readPage(url) ?: continue
             pages.put(page)
         }
-        if (pages.length() == 0) return 0 to pause
-        val post = open(TrustedNodes.hive() + "/shell/pages", id, wish) ?: return 0 to pause
+        if (pages.length() == 0) return Pull(0, pause, wish, "closed")
+        val post = open(TrustedNodes.hive() + "/shell/pages", id, wish) ?: return Pull(0, pause, wish, "down")
         val given = try {
             post.requestMethod = "POST"
             post.doOutput = true
@@ -82,19 +120,20 @@ class ShellWorker {
         } finally {
             post.disconnect()
         }
-        return given to pause
+        return Pull(given, pause, wish, if (given > 0) "ok" else "down")
     }
 
     private fun readPage(address: String): JSONObject? {
         val connection = (URL(address).openConnection() as HttpURLConnection).apply {
             connectTimeout = 8000
             readTimeout = 15000
-            instanceFollowRedirects = false
+            instanceFollowRedirects = true
             setRequestProperty("User-Agent", "MDS-Bot")
         }
         return try {
             if (connection.responseCode !in 200..299) return null
-            if (connection.url.toString().trimEnd('/') != address.trimEnd('/')) return null
+            val landed = hostOf(connection.url.toString()).removePrefix("www.")
+            if (landed != hostOf(address).removePrefix("www.")) return null
             val bytes = connection.inputStream.use { input ->
                 val buffer = ByteArray(8192)
                 val out = java.io.ByteArrayOutputStream()

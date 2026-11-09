@@ -18,9 +18,9 @@ use mds_types::{
 use mds_update::{read_model_manifest, ReleaseManifest};
 use mds_rank::{page_lane, prefer_geo_radius, query_lane, Lane};
 use mds_web::{
-    hive_card, offer_region, page_add, page_android, page_computer, page_download, page_for_sites, page_help, page_bees, page_hive, page_how, page_indexing, page_llms, page_lost, page_manifesto, page_operator,
-    AddLine,
-    cabinet_sheets, render, render_results, robots_txt, sitemap_xml, stamp_census, BeeLine, CabinetSheets, MapLine, NodeChip,
+    hive_card, offer_region, page_add, page_android, page_computer, page_download, page_for_sites, page_help, page_bees, page_hive, page_how, page_indexing, page_llms, page_lost, page_manifesto,
+    reference_block, AddLine, ReferenceCard,
+    cabinet_frame, cabinet_inner, cabinet_sheets, pair_chart, render, render_results, robots_txt, series_chart, sitemap_xml, stamp_census, ActivityPoint, BeeLine, CabinetSheets, HostCard, MapLine, McpKeyLine, NodeChip,
     OperatorReport, PeerLine, ShellLine, VisitNumbers,
 };
 use mds_wire::{CrawlWork, PeerHello, PeerStatus, PushedPage, SearchHit, SearchRequest, SearchResponse};
@@ -239,6 +239,7 @@ pub async fn serve(engine: Engine, config: ServeConfig) -> Result<(), NodeError>
                 .join("face.token"),
         )?,
     };
+    tokio::spawn(visit_flush_loop(state.visits.clone(), state.engine.clone()));
     if !config.alone {
         remember_map_neighbors(&state);
     }
@@ -371,10 +372,15 @@ fn session_token(cookie: Option<&str>) -> Option<String> {
 #[derive(Clone, Copy)]
 struct PaceHold;
 
-async fn count_visit(State(state): State<AppState>, request: Request, next: Next) -> Response {
+async fn count_visit(
+    State(state): State<AppState>,
+    ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    request: Request,
+    next: Next,
+) -> Response {
     let path = request.uri().path().to_string();
-    let cookie = request
-        .headers()
+    let headers = request.headers().clone();
+    let cookie = headers
         .get(header::COOKIE)
         .and_then(|value| value.to_str().ok())
         .map(str::to_string);
@@ -382,8 +388,11 @@ async fn count_visit(State(state): State<AppState>, request: Request, next: Next
     if response.extensions().get::<PaceHold>().is_some() {
         return response;
     }
+    if peer.ip().is_loopback() {
+        return response;
+    }
     let mark = response.extensions().get::<crate::visits::SearchMark>().copied();
-    let fresh = remember_visit(&state, &path, cookie.as_deref(), mark).await;
+    let fresh = remember_visit(&state, &path, cookie.as_deref(), mark, &headers).await;
     if let Some(token) = fresh {
         if let Ok(value) = HeaderValue::from_str(&format!(
             "mds_visit={token}; HttpOnly; SameSite=Lax; Path=/; Max-Age=1800"
@@ -394,13 +403,30 @@ async fn count_visit(State(state): State<AppState>, request: Request, next: Next
     response
 }
 
+fn visit_purpose(headers: &HeaderMap) -> String {
+    headers
+        .get("sec-purpose")
+        .or_else(|| headers.get("purpose"))
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("")
+        .to_string()
+}
+
 async fn remember_visit(
     state: &AppState,
     path: &str,
     cookie: Option<&str>,
     mark: Option<crate::visits::SearchMark>,
+    headers: &HeaderMap,
 ) -> Option<String> {
     if !person_page(path) {
+        return None;
+    }
+    let ua = headers
+        .get(header::USER_AGENT)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("");
+    if crate::visits::ignore_traffic(ua, &visit_purpose(headers)) {
         return None;
     }
     let (token, fresh) = visit_token(cookie);
@@ -446,7 +472,7 @@ async fn face_meta(
     }
     let path = ask.path.unwrap_or_else(|| "/".into());
     let cookie = headers.get(header::COOKIE).and_then(|value| value.to_str().ok());
-    let visit_cookie = remember_visit(&state, &path, cookie, None).await;
+    let visit_cookie = remember_visit(&state, &path, cookie, None, &headers).await;
     let (sites, pages) = census_cached(&state);
     let notice = mds_update::load_notice(&state.releases);
     let release_version = mds_update::load_newest(&state.releases)
@@ -477,13 +503,18 @@ async fn face_search(
     let visit_cookie = if paint.held {
         None
     } else {
-        remember_visit(&state, "/search", cookie, paint.mark).await
+        remember_visit(&state, "/search", cookie, paint.mark, &headers).await
     };
     let (sites, pages) = census_cached(&state);
     let notice = mds_update::load_notice(&state.releases);
     let (offer_label, offer_href) = match paint.offer {
         Some((label, href)) => (Some(label), Some(href)),
         None => (None, None),
+    };
+    let notes = if !paint.refused && paint.error.is_none() && !paint.query.is_empty() && paint.page <= 1 {
+        reference_notes(&paint.query).await
+    } else {
+        Vec::new()
     };
     Ok(Json(crate::face::FaceSearch {
         query: paint.query,
@@ -507,12 +538,14 @@ async fn face_search(
         notice,
         visit_cookie,
         bees_page: bees_open(&state),
+        notes,
     }))
 }
 
 async fn face_cabinet(
     State(state): State<AppState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
+    OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
 ) -> Result<Json<crate::face::FaceCabinet>, StatusCode> {
     if !face_allowed(&state, peer, &headers) {
@@ -525,9 +558,13 @@ async fn face_cabinet(
             sheets: None,
         }));
     };
-    let Some((report, sheets)) = compose_cabinet(&state, &csrf, "/admin").await else {
+    let sheet = query_sheet(&uri);
+    let Some((report, mut sheets)) = compose_cabinet(&state, &csrf, "/admin", &sheet).await else {
         return Err(StatusCode::INTERNAL_SERVER_ERROR);
     };
+    if sheet == "lists" {
+        fill_inspect(&state, &mut sheets, &query_value(&uri, "host")).await;
+    }
     Ok(Json(crate::face::FaceCabinet {
         login: false,
         report: Some(report),
@@ -549,10 +586,10 @@ async fn wire(State(state): State<AppState>, Query(ask): Query<WireAsk>) -> Json
         return Json(Vec::new());
     };
     if !mds_types::press_rss(&feed) {
-        let engine = state.engine.clone();
+        let ledger = state.ledger.clone();
         let saved = feed.clone();
         let known = tokio::task::spawn_blocking(move || {
-            engine
+            ledger
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner())
                 .has_news_feed(&saved)
@@ -571,10 +608,10 @@ async fn offers(State(state): State<AppState>, Query(ask): Query<WireAsk>) -> Js
     let Some(feed) = mds_types::open_feed(&ask.feed) else {
         return Json(Vec::new());
     };
-    let engine = state.engine.clone();
+    let ledger = state.ledger.clone();
     let saved = feed.clone();
     let known = tokio::task::spawn_blocking(move || {
-        engine
+        ledger
             .lock()
             .unwrap_or_else(|poison| poison.into_inner())
             .has_shop_feed(&saved)
@@ -597,7 +634,7 @@ struct ShellRelease {
 async fn shell_version(State(state): State<AppState>) -> Json<ShellRelease> {
     let ready = state.downloads.join("pchela-android.apk").is_file();
     Json(ShellRelease {
-        version: if ready { "0.1.9" } else { "0.1.0" }.to_string(),
+        version: if ready { "0.1.11" } else { "0.1.0" }.to_string(),
         apk: "/download/pchela-android.apk".to_string(),
     })
 }
@@ -635,7 +672,11 @@ fn shell_header(headers: &HeaderMap) -> Option<String> {
 
 async fn shell_work(State(state): State<AppState>, headers: HeaderMap) -> Json<CrawlWork> {
     let Some(id) = shell_header(&headers) else {
-        return Json(CrawlWork { urls: Vec::new(), pause_secs: 600 });
+        return Json(CrawlWork {
+            urls: Vec::new(),
+            pause_secs: 600,
+            note: "подождите".into(),
+        });
     };
     let engine = state.engine.clone();
     let saved = id.clone();
@@ -672,7 +713,11 @@ async fn shell_work(State(state): State<AppState>, headers: HeaderMap) -> Json<C
         .unwrap_or_else(|poison| poison.into_inner())
         .ready(&id, now, limits)
     {
-        return Json(CrawlWork { urls: Vec::new(), pause_secs });
+        return Json(CrawlWork {
+            urls: Vec::new(),
+            pause_secs,
+            note: "подождите".into(),
+        });
     }
     let hold = (pause_secs as i64).clamp(600, 1800);
     let engine = state.engine.clone();
@@ -697,7 +742,12 @@ async fn shell_work(State(state): State<AppState>, headers: HeaderMap) -> Json<C
         })
         .await;
     }
-    Json(CrawlWork { urls, pause_secs })
+    let note = if urls.is_empty() { "очередь пуста" } else { "" };
+    Json(CrawlWork {
+        urls,
+        pause_secs,
+        note: note.into(),
+    })
 }
 
 async fn shell_pages(
@@ -970,7 +1020,7 @@ async fn peer_status(State(state): State<AppState>) -> Result<Json<PeerStatus>, 
     let report = tokio::task::spawn_blocking(move || {
         let mut guard = engine.lock().unwrap_or_else(|poison| poison.into_inner());
         let (buckets, holds_all) = guard.bucket_report().unwrap_or_default();
-        let (searches, avg_ms) = guard.load_snapshot();
+        let (searches, avg_ms, max_ms) = guard.load_snapshot();
         PeerStatus {
             pages: guard.len().unwrap_or(0) as u64,
             queue: guard.queue_len().unwrap_or(0) as u64,
@@ -978,6 +1028,7 @@ async fn peer_status(State(state): State<AppState>) -> Result<Json<PeerStatus>, 
             holds_all,
             searches_per_minute: searches,
             avg_ms,
+            max_ms,
             db_bytes: guard.db_bytes(),
             region: state.region.clone().unwrap_or_default(),
             role: "full".into(),
@@ -1020,9 +1071,10 @@ async fn peer_join(
         .note_verified(&bee, &host);
     let engine = state.engine.clone();
     let saved = host.clone();
+    let version = hello.version.clone();
     let _ = tokio::task::spawn_blocking(move || {
         let guard = engine.lock().unwrap_or_else(|poison| poison.into_inner());
-        guard.remember_volunteer(&saved)
+        guard.remember_volunteer_version(&saved, &version)
     })
     .await;
     state
@@ -1119,7 +1171,11 @@ async fn peer_work(
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
         .assign(&bee, urls.clone());
-    Ok(Json(CrawlWork { urls, pause_secs }))
+    Ok(Json(CrawlWork {
+        urls,
+        pause_secs,
+        note: String::new(),
+    }))
 }
 
 #[derive(Deserialize)]
@@ -1198,7 +1254,7 @@ async fn operator_act(
         };
         return match door.issue_mcp() {
             Ok(secret) => Html(format!(
-                "<!doctype html><meta charset=\"utf-8\"><title>Ключ MCP</title><body><main><p>Ключ показан один раз. Адрес MCP: {base}/mcp. Снаружи это https://admin.beesearch.ru/mcp.</p><pre>{}</pre><p><a href=\"{base}/operator\">Назад</a></p></main></body>",
+                "<!doctype html><meta charset=\"utf-8\"><title>Ключ MCP</title><body><main><p>Ключ показан один раз. Скопируйте его сейчас. Адрес MCP: {base}/mcp. Снаружи это https://admin.beesearch.ru/mcp. В списке на листе «Дверь» останется номер и дата, сам ключ туда не пишется.</p><pre>{}</pre><p><a href=\"{base}/operator?sheet=door\">К списку ключей</a></p></main></body>",
                 secret
             ))
             .into_response(),
@@ -1209,8 +1265,12 @@ async fn operator_act(
         let Some(door) = &state.door else {
             return StatusCode::NOT_FOUND.into_response();
         };
-        let _ = door.revoke_mcp();
-        return see_other(&format!("{base}/operator"));
+        let id = form_field(&text, "id");
+        let note = match door.revoke_mcp(&id) {
+            Ok(()) => "Ключ отозван. В списке он остаётся, дверь им уже не открыть.",
+            Err(_) => "Такого ключа нет или он уже отозван.",
+        };
+        return cabinet_note_sheet(&state, base, note, "door");
     }
     let action = form_field(&text, "action");
     if action == "shell_pace" {
@@ -1298,12 +1358,14 @@ async fn operator_act(
             .await;
         }
         let line = check.lines.first().map(|line| line.text.clone()).unwrap_or_else(|| "Адрес проверен.".into());
-        return cabinet_note_sheet(&state, base, &line, "index");
+        let sheet = if query_sheet(&uri) == "lists" { "lists" } else { "index" };
+        return cabinet_note_sheet(&state, base, &line, sheet);
     }
     if action == "mute" || action == "unmute" {
         let host = host_field(&form_field(&text, "host"));
         if host.is_empty() || !host.contains('.') {
-            return cabinet_note_sheet(&state, base, "Нужен адрес сайта, например example.ru.", "index");
+            let sheet = if query_sheet(&uri) == "lists" { "lists" } else { "index" };
+            return cabinet_note_sheet(&state, base, "Нужен адрес сайта, например example.ru.", sheet);
         }
         let engine = state.engine.clone();
         let saved = host.clone();
@@ -1325,7 +1387,39 @@ async fn operator_act(
         } else {
             format!("Сайт {host} снова в выдаче этой ноды.")
         };
+        if query_sheet(&uri) == "lists" {
+            return cabinet_note_lists(&state, base, &line, &host);
+        }
         return cabinet_note_sheet(&state, base, &line, "index");
+    }
+    if action == "keep" || action == "unkeep" || action == "ban" || action == "unban" {
+        let host = host_field(&form_field(&text, "host"));
+        if host.is_empty() || !host.contains('.') {
+            return cabinet_note_lists(&state, base, "Нужен адрес сайта, например example.ru.", "");
+        }
+        let engine = state.engine.clone();
+        let saved = host.clone();
+        let op = action.clone();
+        let changed = tokio::task::spawn_blocking(move || {
+            let guard = engine.lock().unwrap_or_else(|poison| poison.into_inner());
+            match op.as_str() {
+                "keep" => guard.keep_host(&saved),
+                "unkeep" => guard.unkeep_host(&saved),
+                "ban" => guard.ban_host(&saved),
+                _ => guard.unban_host(&saved),
+            }
+        })
+        .await;
+        if changed.ok().and_then(|result| result.ok()).is_none() {
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+        let line = match action.as_str() {
+            "keep" => format!("Сайт {host} без потолка в сто страниц. Списком продукта это не становится: только этот улей."),
+            "unkeep" => format!("Сайт {host} снова с потолком в сто страниц, если нет пчелы и он не орган власти."),
+            "ban" => format!("Сайт {host} не обходится. Очередь по нему закрыта. Страницы в базе остаются, из выдачи сами не уходят — для этого «скрыть»."),
+            _ => format!("Сайт {host} снова можно обходить."),
+        };
+        return cabinet_note_lists(&state, base, &line, &host);
     }
     if action == "forget_node" {
         let node = node_base(&form_field(&text, "base"));
@@ -1474,6 +1568,15 @@ fn cabinet_note(state: &AppState, base: &str, note: &str) -> Response {
 fn cabinet_note_sheet(state: &AppState, base: &str, note: &str, sheet: &str) -> Response {
     *state.note.lock().unwrap_or_else(|poison| poison.into_inner()) = note.to_string();
     see_other(&format!("{base}/operator?sheet={sheet}"))
+}
+
+fn cabinet_note_lists(state: &AppState, base: &str, note: &str, host: &str) -> Response {
+    *state.note.lock().unwrap_or_else(|poison| poison.into_inner()) = note.to_string();
+    if host.is_empty() {
+        see_other(&format!("{base}/operator?sheet=lists"))
+    } else {
+        see_other(&format!("{base}/operator?sheet=lists&host={host}"))
+    }
 }
 
 fn host_field(raw: &str) -> String {
@@ -1890,18 +1993,56 @@ async fn spool_loop(engine: Arc<Mutex<Engine>>) {
             crate::engine::PassageClaim::Yield => tokio::time::sleep(Duration::from_millis(20)).await,
             crate::engine::PassageClaim::Again => {}
             crate::engine::PassageClaim::Ready(mut batch) => {
-                let embedded = batch.embed();
-                let eng = engine.clone();
-                let _ = tokio::task::spawn_blocking(move || {
-                    let mut guard = eng.lock().unwrap_or_else(|poison| poison.into_inner());
-                    match embedded {
-                        Ok(vectors) => {
-                            let _ = guard.finish_passage_batch(batch, vectors);
-                        }
-                        Err(_) => guard.cancel_passage_batch(batch),
-                    }
+                let embedded = tokio::task::spawn_blocking(move || {
+                    let result = batch.embed();
+                    (batch, result)
                 })
                 .await;
+                match embedded {
+                    Ok((batch, Ok(vectors))) => {
+                        let eng = engine.clone();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            let mut guard = eng.lock().unwrap_or_else(|poison| poison.into_inner());
+                            let _ = guard.finish_passage_batch(batch, vectors);
+                        })
+                        .await;
+                    }
+                    Ok((batch, Err(_))) => {
+                        let eng = engine.clone();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            let mut guard = eng.lock().unwrap_or_else(|poison| poison.into_inner());
+                            guard.cancel_passage_batch(batch);
+                        })
+                        .await;
+                    }
+                    Err(_) => tokio::time::sleep(Duration::from_millis(400)).await,
+                }
+            }
+            crate::engine::PassageClaim::Refresh(mut batch) => {
+                let embedded = tokio::task::spawn_blocking(move || {
+                    let result = batch.embed();
+                    (batch, result)
+                })
+                .await;
+                match embedded {
+                    Ok((batch, Ok(vectors))) => {
+                        let eng = engine.clone();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            let mut guard = eng.lock().unwrap_or_else(|poison| poison.into_inner());
+                            let _ = guard.finish_refresh_batch(batch, vectors);
+                        })
+                        .await;
+                    }
+                    Ok((batch, Err(_))) => {
+                        let eng = engine.clone();
+                        let _ = tokio::task::spawn_blocking(move || {
+                            let mut guard = eng.lock().unwrap_or_else(|poison| poison.into_inner());
+                            guard.cancel_refresh_batch(batch);
+                        })
+                        .await;
+                    }
+                    Err(_) => tokio::time::sleep(Duration::from_millis(400)).await,
+                }
             }
         }
     }
@@ -1914,7 +2055,7 @@ async fn search(
 ) -> Response {
     let paint = gather_search(&state, &headers, &params).await;
     let show_bees = bees_open(&state);
-    let html = if paint.refused {
+    let mut html = if paint.refused {
         render("", &[], 1, Some("Такой запрос эта нода не ищет."))
     } else if paint.query.is_empty() {
         render_results("", &[], &[], false, 1, None, paint.region.as_deref(), &paint.tab, &paint.theme, paint.lat, paint.lon, paint.radius, show_bees)
@@ -1941,6 +2082,10 @@ async fn search(
         }
         html
     };
+    if !paint.refused && paint.error.is_none() && !paint.query.is_empty() && paint.page <= 1 {
+        let notes = reference_notes(&paint.query).await;
+        html = reference_block(html, &paint.query, &notes);
+    }
     let mut response = if let Some(mark) = paint.mark {
         stamp_search(painted(&state, html).into_response(), mark)
     } else {
@@ -1957,6 +2102,111 @@ async fn search(
     response
 }
 
+struct CachedNotes {
+    at: Instant,
+    notes: Vec<ReferenceCard>,
+}
+
+fn note_cache() -> &'static Mutex<HashMap<String, CachedNotes>> {
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<Mutex<HashMap<String, CachedNotes>>> = OnceLock::new();
+    CACHE.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+async fn reference_notes(query: &str) -> Vec<ReferenceCard> {
+    let key = query.trim().to_lowercase();
+    if key.chars().count() < 2 || key.chars().count() > 80 || key.contains("site:") {
+        return Vec::new();
+    }
+    if let Ok(guard) = note_cache().lock() {
+        if let Some(hit) = guard.get(&key) {
+            if hit.at.elapsed() < Duration::from_secs(600) {
+                return hit.notes.clone();
+            }
+        }
+    }
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(900))
+        .user_agent("MDS-Bot/0.1 (reference lookup)")
+        .build()
+        .unwrap_or_else(|_| reqwest::Client::new());
+    let (ruwiki, wiki) = tokio::join!(
+        wiki_card(&client, "https://ru.ruwiki.ru/w/api.php", "Рувики", "ruwiki.ru", query),
+        wiki_card(&client, "https://ru.wikipedia.org/w/api.php", "Википедия", "wikipedia.org", query),
+    );
+    let mut notes = Vec::new();
+    if let Some(card) = ruwiki {
+        notes.push(card);
+    }
+    if let Some(card) = wiki {
+        notes.push(card);
+    }
+    if let Ok(mut guard) = note_cache().lock() {
+        if guard.len() > 64 {
+            guard.clear();
+        }
+        guard.insert(key, CachedNotes {
+            at: Instant::now(),
+            notes: notes.clone(),
+        });
+    }
+    notes
+}
+
+async fn wiki_card(
+    client: &reqwest::Client,
+    api: &str,
+    source: &str,
+    host_suffix: &str,
+    query: &str,
+) -> Option<ReferenceCard> {
+    let response = client
+        .get(api)
+        .query(&[
+            ("action", "opensearch"),
+            ("search", query),
+            ("limit", "1"),
+            ("namespace", "0"),
+            ("format", "json"),
+        ])
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let body = response.text().await.ok()?;
+    parse_opensearch(&body, source, host_suffix)
+}
+
+fn parse_opensearch(body: &str, source: &str, host_suffix: &str) -> Option<ReferenceCard> {
+    let value: serde_json::Value = serde_json::from_str(body).ok()?;
+    let title = value.get(1)?.get(0)?.as_str()?.trim();
+    if title.is_empty() {
+        return None;
+    }
+    let mut extract = value.get(2).and_then(|item| item.get(0)).and_then(|item| item.as_str()).unwrap_or("").trim().to_string();
+    let url = value.get(3)?.get(0)?.as_str()?.trim();
+    if !url.starts_with("https://") {
+        return None;
+    }
+    let host = host_of_url(url)?;
+    if host != host_suffix && !host.ends_with(&format!(".{host_suffix}")) {
+        return None;
+    }
+    let chars: Vec<char> = extract.chars().collect();
+    if chars.len() > 320 {
+        extract = chars.into_iter().take(320).collect();
+        extract.push('…');
+    }
+    Some(ReferenceCard {
+        source: source.to_string(),
+        title: title.to_string(),
+        extract,
+        url: url.to_string(),
+    })
+}
+
 fn public_shelf(tab: &str, theme: &str) -> (String, String, u32, u32) {
     let mut tab = tab.trim().to_string();
     let mut theme = theme.trim().to_string();
@@ -1969,6 +2219,7 @@ fn public_shelf(tab: &str, theme: &str) -> (String, String, u32, u32) {
         "gov" => "gov".to_string(),
         "jobs" | "job" => "jobs".to_string(),
         "services" | "service" => "services".to_string(),
+        "channel" => "channel".to_string(),
         _ => String::new(),
     };
     if theme_mask(&theme) == 0 {
@@ -2178,7 +2429,7 @@ async fn gather_search(state: &AppState, headers: &HeaderMap, params: &SearchPar
     }
 }
 
-async fn compose_cabinet(state: &AppState, csrf: &str, base: &str) -> Option<(OperatorReport, CabinetSheets)> {
+async fn compose_cabinet(state: &AppState, csrf: &str, base: &str, sheet: &str) -> Option<(OperatorReport, CabinetSheets)> {
     let hosts: Vec<String> = state
         .volunteers
         .lock()
@@ -2190,89 +2441,139 @@ async fn compose_cabinet(state: &AppState, csrf: &str, base: &str) -> Option<(Op
     let ledger = state.ledger.clone();
     let db_path = state.db_path.clone();
     let hosts_for_db = hosts.clone();
+    let sheet_owned = sheet.to_string();
     let rows = tokio::task::spawn_blocking(move || {
-        let avg_ms = {
+        let (avg_ms, max_ms) = if sheet_owned == "node" {
             let mut writing = engine.lock().unwrap_or_else(|poison| poison.into_inner());
-            writing.load_snapshot().1
+            let snap = writing.load_snapshot();
+            (snap.1, snap.2)
+        } else {
+            (0, 0)
         };
         let guard = ledger.lock().unwrap_or_else(|poison| poison.into_inner());
-        let searches = guard.queries_last_minute().unwrap_or(0) as u64;
-        let pace = guard.shell_pace().unwrap_or(mds_index::ShellPace { batch: 2, gap_min: 10, window_max: 4 });
-        let span = |name: &str| guard.shell_span(name).unwrap_or((0, 0));
-        let shells = (span("day"), span("week"), span("month"), span("all"), pace);
-        let bees = hosts_for_db
-            .iter()
-            .map(|host| {
-                let totals = guard.bee_totals(host).unwrap_or(mds_index::BeeTotals {
-                    day: 0, week: 0, month: 0, all: 0, quiet: true,
-                });
-                (host.clone(), totals)
-            })
-            .collect::<Vec<_>>();
-        let sites = guard.census().map(|(sites, _)| sites).unwrap_or(0) as u64;
-        let crawl = guard.crawl_pace().unwrap_or(mds_index::CrawlPace { batch: 4, gap_secs: 10 });
-        let bee_pace = guard.bee_pace().unwrap_or(mds_index::BeePace { batch: 4, gap_secs: 600 });
-        let ceiling = guard.shell_ceiling().unwrap_or(mds_index::ShellCeiling { max_batch: 8, min_gap: 1 });
-        let refresh = guard.refresh_pace().unwrap_or(mds_index::RefreshPace { batch: 1, gap_secs: 120 });
-        let intake_days = guard
-            .intake_days(30)
-            .unwrap_or_default()
-            .into_iter()
-            .map(|day| (day.day, day.new_pages))
-            .collect::<Vec<_>>();
-        let load = guard.load_hours(24).unwrap_or_default();
-        let activity = mds_web::ActivityBook {
-            minutes: map_activity(guard.activity_span("minute", 60).unwrap_or_default()),
-            hours: map_activity(guard.activity_span("hour", 48).unwrap_or_default()),
-            days: map_activity(guard.activity_span("day", 30).unwrap_or_default()),
-            weeks: map_activity(guard.activity_span("week", 16).unwrap_or_default()),
-            months: map_activity(guard.activity_span("month", 12).unwrap_or_default()),
+        let searches = if sheet_owned == "node" {
+            guard.queries_last_minute().unwrap_or(0) as u64
+        } else {
+            0
         };
-        let picture = (
-            sites,
-            guard.intake_sum("new_pages", "day").unwrap_or(0),
-            guard.intake_sum("new_pages", "yesterday").unwrap_or(0),
-            guard.intake_sum("new_pages", "week").unwrap_or(0),
-            guard.intake_sum("new_pages", "month").unwrap_or(0),
-            guard.intake_sum("changed_pages", "day").unwrap_or(0),
-            guard.intake_sum("same_pages", "day").unwrap_or(0),
-            guard.intake_sum("new_hosts", "day").unwrap_or(0),
-            crawl.batch,
-            crawl.gap_secs,
-            bee_pace.batch,
-            bee_pace.gap_secs,
-            ceiling.max_batch,
-            ceiling.min_gap,
-            intake_days,
-            load.iter().map(|hour| (hour.hour.clone(), hour.cpu_pct)).collect::<Vec<_>>(),
-            load.iter().map(|hour| (hour.hour.clone(), hour.ram_pct)).collect::<Vec<_>>(),
-            guard.leased_count().unwrap_or(0).max(0) as u64,
-            guard.refresh_due().unwrap_or(0),
-            refresh.batch,
-            refresh.gap_secs,
-            guard.shell_grants().unwrap_or(60),
-        );
-        let report_head = (
-            guard.len().unwrap_or(0) as u64,
-            guard.queue_len().unwrap_or(0) as u64,
-            std::fs::metadata(&db_path).map(|meta| meta.len()).unwrap_or(0),
-            searches,
-            avg_ms,
-        );
-        guard.recent_queries(50).map(|rows| (report_head, shells, bees, rows, picture, activity))
+        let pace = if sheet_owned == "node" {
+            guard.shell_pace().unwrap_or(mds_index::ShellPace { batch: 2, gap_min: 10, window_max: 4 })
+        } else {
+            mds_index::ShellPace { batch: 2, gap_min: 10, window_max: 4 }
+        };
+        let span = |name: &str| guard.shell_span(name).unwrap_or((0, 0));
+        let shells = if sheet_owned == "node" {
+            (span("day"), span("week"), span("month"), span("all"), pace)
+        } else {
+            ((0, 0), (0, 0), (0, 0), (0, 0), pace)
+        };
+        let mut bees = Vec::new();
+        if sheet_owned == "bees" {
+            let mut bees_by_host = std::collections::HashMap::new();
+            for row in guard.volunteer_seen().unwrap_or_default() {
+                bees_by_host.insert(row.host.clone(), row);
+            }
+            for host in &hosts_for_db {
+                bees_by_host.entry(host.clone()).or_insert(mds_index::VolunteerRow {
+                    host: host.clone(),
+                    seen_at: 0,
+                    version: String::new(),
+                });
+            }
+            bees = bees_by_host
+                .into_iter()
+                .map(|(host, row)| {
+                    let totals = guard.bee_totals(&host).unwrap_or(mds_index::BeeTotals {
+                        day: 0, week: 0, month: 0, all: 0, quiet: true,
+                    });
+                    (host, totals, row.seen_at, row.version)
+                })
+                .collect::<Vec<_>>();
+            bees.sort_by(|left, right| left.0.cmp(&right.0));
+        }
+        let bee_pace = if sheet_owned == "node" || sheet_owned == "bees" {
+            guard.bee_pace().unwrap_or(mds_index::BeePace { batch: 4, gap_secs: 600 })
+        } else {
+            mds_index::BeePace { batch: 4, gap_secs: 600 }
+        };
+        let activity = mds_web::ActivityBook::default();
+        let search_pace = Vec::new();
+        let picture = if sheet_owned == "node" {
+            let sites = guard.census().map(|(sites, _)| sites).unwrap_or(0) as u64;
+            let crawl = guard.crawl_pace().unwrap_or(mds_index::CrawlPace { batch: 4, gap_secs: 10 });
+            let ceiling = guard.shell_ceiling().unwrap_or(mds_index::ShellCeiling { max_batch: 8, min_gap: 1 });
+            let refresh = guard.refresh_pace().unwrap_or(mds_index::RefreshPace { batch: 1, gap_secs: 120 });
+            let intake_days = guard
+                .intake_days(30)
+                .unwrap_or_default()
+                .into_iter()
+                .map(|day| (day.day, day.new_pages))
+                .collect::<Vec<_>>();
+            let load = guard.load_hours(24).unwrap_or_default();
+            (
+                sites,
+                guard.intake_sum("new_pages", "day").unwrap_or(0),
+                guard.intake_sum("new_pages", "yesterday").unwrap_or(0),
+                guard.intake_sum("new_pages", "week").unwrap_or(0),
+                guard.intake_sum("new_pages", "month").unwrap_or(0),
+                guard.intake_sum("changed_pages", "day").unwrap_or(0),
+                guard.intake_sum("same_pages", "day").unwrap_or(0),
+                guard.intake_sum("new_hosts", "day").unwrap_or(0),
+                crawl.batch,
+                crawl.gap_secs,
+                bee_pace.batch,
+                bee_pace.gap_secs,
+                ceiling.max_batch,
+                ceiling.min_gap,
+                intake_days,
+                load.iter().map(|hour| (hour.hour.clone(), hour.cpu_pct)).collect::<Vec<_>>(),
+                load.iter().map(|hour| (hour.hour.clone(), hour.ram_pct)).collect::<Vec<_>>(),
+                guard.leased_count().unwrap_or(0).max(0) as u64,
+                guard.refresh_due().unwrap_or(0),
+                refresh.batch,
+                refresh.gap_secs,
+                guard.shell_grants().unwrap_or(60),
+            )
+        } else {
+            (
+                0, 0, 0, 0, 0, 0, 0, 0, 4, 10, bee_pace.batch, bee_pace.gap_secs, 8, 1,
+                Vec::new(), Vec::new(), Vec::new(), 0, 0, 1, 120, 60,
+            )
+        };
+        let hour_peak_ms = if sheet_owned == "node" {
+            guard.search_peak_ms(3).unwrap_or(0) as u64
+        } else {
+            0
+        };
+        let report_head = if sheet_owned == "node" {
+            (
+                guard.len().unwrap_or(0) as u64,
+                guard.queue_len().unwrap_or(0) as u64,
+                std::fs::metadata(&db_path).map(|meta| meta.len()).unwrap_or(0),
+                searches,
+                avg_ms,
+                max_ms,
+                hour_peak_ms,
+            )
+        } else {
+            (0, 0, 0, 0, 0, 0, 0)
+        };
+        let journal = if sheet_owned == "journal" {
+            guard.recent_queries(50)?
+        } else {
+            Vec::new()
+        };
+        Ok::<_, mds_index::IndexError>((report_head, shells, bees, journal, picture, activity, search_pace))
     })
     .await;
-    let peers = {
+    let peers = if sheet == "node" {
         let swarm = state.swarm.lock().unwrap_or_else(|poison| poison.into_inner());
         swarm
             .cards()
             .iter()
+            .filter(|card| !card.base.is_empty())
             .map(|card| PeerLine {
-                name: if card.base.is_empty() {
-                    card.label.clone()
-                } else {
-                    card.base.clone()
-                },
+                name: card.base.clone(),
                 latency_ms: card.latency_ms,
                 alive: card.alive,
                 buckets: if card.holds_all {
@@ -2283,15 +2584,17 @@ async fn compose_cabinet(state: &AppState, csrf: &str, base: &str) -> Option<(Op
                 pages: card.pages,
             })
             .collect::<Vec<_>>()
+    } else {
+        Vec::new()
     };
     let packed = match rows {
-        Ok(Ok(((pages, queue, db_bytes, searches_per_minute, avg_ms), shells, bees, rows, picture, activity))) => {
+        Ok(Ok(((pages, queue, db_bytes, searches_per_minute, avg_ms, max_ms, hour_peak_ms), shells, bees, rows, picture, activity, search_pace))) => {
             let view: Vec<(String, i64, i64, i64, i64)> = rows
                 .into_iter()
                 .map(|row| (row.text, row.results, row.words, row.meaning, row.adult))
                 .collect();
             let (day, week, month, all, pace) = shells;
-            let sheets = cabinet_view(&state, &csrf, base, &hosts);
+            let sheets = cabinet_view(&state, &csrf, base, &hosts, sheet);
             let note = std::mem::take(&mut *state.note.lock().unwrap_or_else(|poison| poison.into_inner()));
             let report = OperatorReport {
                     pages,
@@ -2299,6 +2602,9 @@ async fn compose_cabinet(state: &AppState, csrf: &str, base: &str) -> Option<(Op
                     db_bytes,
                     searches_per_minute,
                     avg_ms,
+                    max_ms,
+                    hour_peak_ms,
+                    search_pace,
                     peers,
                     shells: ShellLine {
                         day_apps: day.0,
@@ -2318,16 +2624,23 @@ async fn compose_cabinet(state: &AppState, csrf: &str, base: &str) -> Option<(Op
                     },
                     bees: bees
                         .into_iter()
-                        .map(|(host, totals)| BeeLine {
+                        .map(|(host, totals, seen_at, version)| BeeLine {
                             host,
                             day: totals.day,
                             week: totals.week,
                             month: totals.month,
                             all: totals.all,
                             quiet: totals.quiet,
+                            last: bee_last_label(seen_at),
+                            need_update: version.is_empty() || version != mds_update::VERSION,
+                            version,
                         })
                         .collect(),
-                    refused: state.bees.lock().unwrap_or_else(|poison| poison.into_inner()).refused(),
+                    refused: if sheet == "bees" {
+                        state.bees.lock().unwrap_or_else(|poison| poison.into_inner()).refused()
+                    } else {
+                        Vec::new()
+                    },
                     rows: view,
                     note,
                     csrf: csrf.to_string(),
@@ -2353,7 +2666,8 @@ async fn compose_cabinet(state: &AppState, csrf: &str, base: &str) -> Option<(Op
                     refresh_gap: picture.20,
                     span: String::new(),
                     activity,
-                    bees_page: state.engine.lock().unwrap_or_else(|poison| poison.into_inner()).bees_page(),
+                    bees_page: sheet == "node"
+                        && state.engine.lock().unwrap_or_else(|poison| poison.into_inner()).bees_page(),
                 };
             Some((report, sheets))
         }
@@ -2371,14 +2685,121 @@ async fn operator(
     let Some(csrf) = cabinet_csrf(&state, &headers) else {
         return see_other(&format!("{base}/login"));
     };
-    match compose_cabinet(&state, &csrf, base).await {
-        Some((mut report, sheets)) => {
+    let _ = csrf;
+    let sheet = query_sheet(&uri);
+    let span = query_value(&uri, "span");
+    let host = query_value(&uri, "host");
+    let note = std::mem::take(&mut *state.note.lock().unwrap_or_else(|poison| poison.into_inner()));
+    painted(&state, cabinet_frame(base, &sheet, &span, &host, &note)).into_response()
+}
+
+async fn operator_live(
+    State(state): State<AppState>,
+    OriginalUri(uri): OriginalUri,
+    headers: HeaderMap,
+) -> Response {
+    let base = cabinet_base(uri.path());
+    let Some(csrf) = cabinet_csrf(&state, &headers) else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    let sheet = query_sheet(&uri);
+    match compose_cabinet(&state, &csrf, base, &sheet).await {
+        Some((mut report, mut sheets)) => {
             report.span = query_value(&uri, "span");
-            let sheet = query_sheet(&uri);
+            if sheet == "lists" {
+                fill_inspect(&state, &mut sheets, &query_value(&uri, "host")).await;
+            }
             let (stats, rest) = cabinet_sheets(&sheets, &sheet);
-            painted(&state, page_operator(&report, &stats, &rest, &sheet)).into_response()
+            live_html(cabinet_inner(&report, &stats, &rest, &sheet))
         }
-        None => painted(&state, render("", &[], 1, Some("журнал не открылся"))).into_response(),
+        None => live_html("<p class=\"sheet-wait\">Журнал не открылся.</p>".into()),
+    }
+}
+
+async fn operator_chart(
+    State(state): State<AppState>,
+    OriginalUri(uri): OriginalUri,
+    headers: HeaderMap,
+) -> Response {
+    if cabinet_csrf(&state, &headers).is_none() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let name = query_value(&uri, "name");
+    let span = query_value(&uri, "span");
+    let ledger = state.ledger.clone();
+    let html = tokio::task::spawn_blocking(move || chart_html(&ledger, &name, &span))
+        .await
+        .unwrap_or_else(|_| "<p class=\"legend\">График сейчас не открылся.</p>".into());
+    live_html(html)
+}
+
+fn live_html(body: String) -> Response {
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(header::CACHE_CONTROL, "no-store")
+        .body(Body::from(body))
+        .unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
+}
+
+fn chart_html(ledger: &Arc<Mutex<mds_index::Index>>, name: &str, span: &str) -> String {
+    let guard = ledger.lock().unwrap_or_else(|poison| poison.into_inner());
+    match name {
+        "visits" | "searches" => {
+            let days = guard.visit_days(30).unwrap_or_default();
+            let points: Vec<(String, i64)> = days
+                .into_iter()
+                .map(|day| {
+                    let value = if name == "visits" { day.visits } else { day.searches };
+                    (short_day(&day.day), value)
+                })
+                .collect();
+            let title = if name == "visits" { "Заходы" } else { "Поиски" };
+            let color = if name == "visits" { "#1a73e8" } else { "#e6a817" };
+            pair_chart(title, &points, color)
+        }
+        "search" => {
+            let points = map_search(guard.search_pace(60).unwrap_or_default());
+            series_chart("Ответ поиска", "мс", &points, "minute", "#c5221f", |point| point.search_ms)
+        }
+        other => {
+            let (grain, limit) = match span {
+                "hour" => ("hour", 48),
+                "day" => ("day", 30),
+                "week" => ("week", 16),
+                "month" => ("month", 12),
+                _ => ("minute", 60),
+            };
+            let points = map_activity(guard.activity_span(grain, limit).unwrap_or_default());
+            let (title, unit, color, pick): (&str, &str, &str, fn(&ActivityPoint) -> i64) = match other {
+                "hosts" => ("Новые сайты", "", "#e37400", |point| point.new_hosts),
+                "walked" => ("Обход", "", "#188038", |point| point.walked),
+                "phones" => ("Телефоны", "", "#c9a227", |point| point.shell_pages),
+                "cpu" => ("Процессор", "%", "#188038", |point| point.cpu),
+                "ram" => ("Память", "%", "#a142f4", |point| point.ram),
+                _ => ("Новые страницы", "", "#1a73e8", |point| point.new_pages),
+            };
+            series_chart(title, unit, &points, grain, color, pick)
+        }
+    }
+}
+
+fn ru_day(day: &str) -> String {
+    let mut parts = day.split('-');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(year), Some(month), Some(date)) if month.len() == 2 && date.len() == 2 => {
+            format!("{}.{}.{}", date.trim_start_matches('0'), month.trim_start_matches('0'), year)
+        }
+        _ => day.to_string(),
+    }
+}
+
+fn short_day(day: &str) -> String {
+    let mut parts = day.split('-');
+    let _year = parts.next();
+    match (parts.next(), parts.next()) {
+        (Some(month), Some(date)) if !month.is_empty() && !date.is_empty() => format!("{date}.{month}"),
+        _ => day.to_string(),
     }
 }
 
@@ -2640,6 +3061,7 @@ async fn dial_hive(
             pages,
             queue,
             site: String::new(),
+            version: mds_update::VERSION.into(),
         };
         let hello_body = serde_json::to_vec(&hello).unwrap_or_default();
         let _ = client
@@ -2853,7 +3275,16 @@ async fn background_crawl_loop(
         };
 
         if batch.is_empty() {
-            if discover_ct {
+            let may_grow = {
+                let eng = engine.clone();
+                tokio::task::spawn_blocking(move || {
+                    let guard = eng.lock().unwrap_or_else(|p| p.into_inner());
+                    guard.queue_may_grow().unwrap_or(false)
+                })
+                .await
+                .unwrap_or(false)
+            };
+            if discover_ct && may_grow {
                 let q = [ct_queries[ct_round % ct_queries.len()]];
                 ct_round = ct_round.wrapping_add(1);
                 let found = mds_crawl::discover_ct_domains(&q, 25).await;
@@ -2907,10 +3338,33 @@ async fn background_crawl_loop(
     }
 }
 
+async fn visit_flush_loop(book: Arc<Mutex<crate::visits::VisitBook>>, engine: Arc<Mutex<Engine>>) {
+    let mut tick = tokio::time::interval(Duration::from_secs(60));
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        tick.tick().await;
+        let delta = {
+            let mut book = book.lock().unwrap_or_else(|poison| poison.into_inner());
+            book.flush_idle(Instant::now())
+        };
+        if delta == mds_index::VisitDelta::default() {
+            continue;
+        }
+        let engine = engine.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            let guard = engine.lock().unwrap_or_else(|poison| poison.into_inner());
+            guard.add_visit(&delta)
+        })
+        .await;
+    }
+}
+
 fn admin_router(state: AppState) -> Router {
     let door = Router::new()
         .route("/login", get(login_page).post(login_act))
         .route("/logout", post(logout_act))
+        .route("/operator/live", get(operator_live))
+        .route("/operator/chart", get(operator_chart))
         .route("/operator", get(operator).post(operator_act))
         .route("/mcp", post(mcp_act));
     let prefixed = door.clone().route("/", get(admin_entry));
@@ -3042,6 +3496,25 @@ fn query_value(uri: &axum::http::Uri, name: &str) -> String {
         .unwrap_or_default()
 }
 
+fn bee_last_label(seen_at: i64) -> String {
+    if seen_at <= 0 {
+        return String::new();
+    }
+    let Ok(now) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) else {
+        return String::new();
+    };
+    let age = (now.as_secs() as i64).saturating_sub(seen_at);
+    if age < 120 {
+        "сейчас".into()
+    } else if age < 3600 {
+        format!("{} мин. назад", age / 60)
+    } else if age < 86_400 {
+        format!("{} ч. назад", age / 3600)
+    } else {
+        format!("{} дн. назад", age / 86_400)
+    }
+}
+
 fn map_activity(slots: Vec<mds_index::ActivitySlot>) -> Vec<mds_web::ActivityPoint> {
     slots
         .into_iter()
@@ -3053,6 +3526,23 @@ fn map_activity(slots: Vec<mds_index::ActivitySlot>) -> Vec<mds_web::ActivityPoi
             shell_pages: slot.shell_pages,
             cpu: slot.cpu,
             ram: slot.ram,
+            search_ms: 0,
+        })
+        .collect()
+}
+
+fn map_search(slots: Vec<mds_index::SearchPaceSlot>) -> Vec<mds_web::ActivityPoint> {
+    slots
+        .into_iter()
+        .map(|slot| mds_web::ActivityPoint {
+            label: slot.minute,
+            new_pages: 0,
+            new_hosts: 0,
+            walked: 0,
+            shell_pages: 0,
+            cpu: 0,
+            ram: 0,
+            search_ms: slot.max_ms,
         })
         .collect()
 }
@@ -3063,66 +3553,154 @@ fn cabinet_csrf(state: &AppState, headers: &HeaderMap) -> Option<String> {
     door.session(&token)
 }
 
-fn cabinet_view(state: &AppState, csrf: &str, base: &str, bees: &[String]) -> CabinetSheets {
-    let guard = state.ledger.lock().unwrap_or_else(|poison| poison.into_inner());
-    let day = guard.query_counts("day", 20).unwrap_or_default();
-    let week = guard.query_counts("week", 20).unwrap_or_default();
-    let month = guard.query_counts("month", 20).unwrap_or_default();
-    let visits_day = guard.visit_span("day").unwrap_or_default();
-    let visits_week = guard.visit_span("week").unwrap_or_default();
-    let visits_month = guard.visit_span("month").unwrap_or_default();
-    let days = guard.visit_days(30).unwrap_or_default();
-    let pages = guard.list_index(None, None, 0, 20).unwrap_or_default();
-    let kind_counts = guard.kind_counts().unwrap_or_default();
-    let nodes = guard.known_nodes().unwrap_or_default();
-    let guard_muted = guard.muted_hosts().unwrap_or_default();
-    drop(guard);
-    let map = state.map.lock().unwrap_or_else(|poison| poison.into_inner());
-    let (map_version, map_places) = if let Some(map) = map.as_ref() {
-        let places = map
-            .places
-            .iter()
-            .map(|place| MapLine {
-                country: place.place.country.clone(),
-                region: place.place.region.clone(),
-                door: place
-                    .hives
-                    .first()
-                    .map(|door| door.base.clone())
-                    .unwrap_or_else(|| "нет входа".into()),
-            })
-            .collect();
-        (Some(map.version), places)
-    } else {
-        (None, Vec::new())
-    };
-    CabinetSheets {
+fn cabinet_view(state: &AppState, csrf: &str, base: &str, bees: &[String], sheet: &str) -> CabinetSheets {
+    let zero = visit_numbers(mds_index::VisitReport::default());
+    let mut sheets = CabinetSheets {
         version: mds_update::VERSION.into(),
         region_label: state.region.clone().unwrap_or_else(|| "не задан".into()),
         model: state.model.clone(),
-        days: days.into_iter().map(|day| (day.day, day.visits, day.searches)).collect(),
-        visits_day: visit_numbers(visits_day),
-        visits_week: visit_numbers(visits_week),
-        visits_month: visit_numbers(visits_month),
-        queries_day: day,
-        queries_week: week,
-        queries_month: month,
-        index_urls: pages.into_iter().map(|page| page.url).collect(),
-        kind_counts,
-        muted: guard_muted,
-        bee_hosts: bees.to_vec(),
-        nodes: nodes
-            .into_iter()
-            .map(|node| NodeChip {
-                base: node.base,
-                alive: node.alive,
-                latency_ms: node.latency_ms,
-            })
-            .collect(),
-        map_version,
-        map_places,
+        days: Vec::new(),
+        visits_day: zero,
+        visits_week: zero,
+        visits_month: zero,
+        queries_day: Vec::new(),
+        queries_week: Vec::new(),
+        queries_month: Vec::new(),
+        index_urls: Vec::new(),
+        kind_counts: Vec::new(),
+        muted: Vec::new(),
+        keep: Vec::new(),
+        banned: Vec::new(),
+        docs: Vec::new(),
+        inspect: None,
+        bee_hosts: if matches!(sheet, "bees" | "door" | "lists") {
+            bees.to_vec()
+        } else {
+            Vec::new()
+        },
+        nodes: Vec::new(),
+        map_version: None,
+        map_places: Vec::new(),
         csrf: csrf.to_string(),
         base: base.to_string(),
+        visit_day_title: String::new(),
+        visit_week_title: String::new(),
+        visit_month_title: String::new(),
+        mcp_keys: Vec::new(),
+    };
+    if matches!(sheet, "visits" | "queries" | "index" | "lists" | "door") {
+        let guard = state.ledger.lock().unwrap_or_else(|poison| poison.into_inner());
+        match sheet {
+            "visits" => {
+                sheets.visits_day = visit_numbers(guard.visit_span("day").unwrap_or_default());
+                sheets.visits_week = visit_numbers(guard.visit_span("week").unwrap_or_default());
+                sheets.visits_month = visit_numbers(guard.visit_span("month").unwrap_or_default());
+                if let Ok((day, week, month)) = guard.visit_windows() {
+                    sheets.visit_day_title = format!("Сегодня, {}", ru_day(&day));
+                    sheets.visit_week_title = format!("Неделя, {} — {}", ru_day(&week), ru_day(&day));
+                    sheets.visit_month_title = format!("Месяц, с {}", ru_day(&month));
+                }
+            }
+            "queries" => {
+                sheets.queries_day = guard.query_counts("day", 20).unwrap_or_default();
+                sheets.queries_week = guard.query_counts("week", 20).unwrap_or_default();
+                sheets.queries_month = guard.query_counts("month", 20).unwrap_or_default();
+            }
+            "index" => {
+                sheets.index_urls = guard
+                    .list_index(None, None, 0, 20)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|page| page.url)
+                    .collect();
+                sheets.kind_counts = guard.kind_counts().unwrap_or_default();
+                sheets.muted = guard.muted_hosts().unwrap_or_default();
+            }
+            "lists" => {
+                sheets.keep = guard.keep_hosts().unwrap_or_default();
+                sheets.banned = guard.banned_hosts().unwrap_or_default();
+                sheets.muted = guard.muted_hosts().unwrap_or_default();
+                sheets.docs = mds_types::tool_docs_hosts().iter().map(|host| host.to_string()).collect();
+            }
+            "door" => {
+                sheets.nodes = guard
+                    .known_nodes()
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|node| NodeChip {
+                        base: node.base,
+                        alive: node.alive,
+                        latency_ms: node.latency_ms,
+                    })
+                    .collect();
+            }
+            _ => {}
+        }
+    }
+    if sheet == "door" {
+        if let Some(door) = &state.door {
+            sheets.mcp_keys = door
+                .mcp_keys()
+                .into_iter()
+                .map(|key| McpKeyLine {
+                    id: key.id,
+                    issued: crate::admin::format_stamp(key.issued_at),
+                    revoked: key.revoked_at.map(crate::admin::format_stamp),
+                })
+                .collect();
+        }
+        let map = state.map.lock().unwrap_or_else(|poison| poison.into_inner());
+        if let Some(map) = map.as_ref() {
+            sheets.map_version = Some(map.version);
+            sheets.map_places = map
+                .places
+                .iter()
+                .map(|place| MapLine {
+                    country: place.place.country.clone(),
+                    region: place.place.region.clone(),
+                    door: place
+                        .hives
+                        .first()
+                        .map(|door| door.base.clone())
+                        .unwrap_or_else(|| "нет входа".into()),
+                })
+                .collect();
+        }
+    }
+    sheets
+}
+
+async fn fill_inspect(state: &AppState, sheets: &mut CabinetSheets, raw_host: &str) {
+    let host = host_field(raw_host);
+    if host.is_empty() || !host.contains('.') {
+        return;
+    }
+    let engine = state.engine.clone();
+    let looked = host.clone();
+    if let Ok(Ok(card)) = tokio::task::spawn_blocking(move || {
+        engine.lock().unwrap_or_else(|poison| poison.into_inner()).inspect_host(&looked)
+    })
+    .await
+    {
+        sheets.inspect = Some(host_card(card));
+    }
+}
+
+fn host_card(card: mds_index::HostInspect) -> HostCard {
+    HostCard {
+        host: card.host.clone(),
+        pages: card.pages,
+        queued: card.queued,
+        banned: card.banned,
+        muted: card.muted,
+        keep: card.keep,
+        volunteer: card.volunteer,
+        government: card.government,
+        hive: card.hive,
+        tool_docs: card.tool_docs,
+        model_maker: card.model_maker,
+        in_focus: card.in_focus,
+        rule: card.rule().into(),
     }
 }
 
@@ -3504,12 +4082,43 @@ mod tests {
     }
 
     #[test]
+    fn channel_tab_stays_on_the_public_shelf() {
+        let (tab, theme, kind, theme_bits) = public_shelf("channel", "");
+        assert_eq!(tab, "channel");
+        assert_eq!(theme, "");
+        assert_eq!(kind, mds_types::KIND_CHANNEL);
+        assert_eq!(theme_bits, 0);
+        let (tab, theme, kind, theme_bits) = public_shelf("channel", "medicine");
+        assert_eq!(tab, "channel");
+        assert_eq!(theme, "medicine");
+        assert_eq!(kind, mds_types::KIND_CHANNEL);
+        assert_eq!(theme_bits, mds_types::KIND_MEDICINE);
+    }
+
+    #[test]
     fn empty_coordinates_are_not_a_broken_search() {
         assert_eq!(parse_blank_f64(Some("")), None);
         assert_eq!(parse_blank_f64(Some("  ")), None);
         assert_eq!(parse_blank_f64(None), None);
         assert_eq!(parse_blank_f64(Some("55.75")), Some(55.75));
         assert_eq!(parse_blank_f64(Some("тут")), None);
+    }
+
+    #[test]
+    fn phone_modes_stay_inside_the_cabinet_ceiling() {
+        let normal = mds_index::ShellPace { batch: 2, gap_min: 10, window_max: 4 };
+        let ceiling = mds_index::ShellCeiling { max_batch: 8, min_gap: 1 };
+        let hive = pace_for_wish("hive", normal, ceiling);
+        assert_eq!((hive.batch, hive.gap_min), (2, 10));
+        let fast = pace_for_wish("fast", normal, ceiling);
+        assert_eq!((fast.batch, fast.gap_min), (8, 2));
+        let server = pace_for_wish("server", normal, ceiling);
+        assert_eq!((server.batch, server.gap_min), (8, 1));
+        let tight = mds_index::ShellCeiling { max_batch: 4, min_gap: 5 };
+        let held = pace_for_wish("server", normal, tight);
+        assert_eq!((held.batch, held.gap_min), (4, 5));
+        let fast_held = pace_for_wish("fast", normal, tight);
+        assert_eq!((fast_held.batch, fast_held.gap_min), (4, 5));
     }
 }
 

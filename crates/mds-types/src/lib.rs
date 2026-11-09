@@ -5,7 +5,7 @@ mod rss;
 
 pub use contacts::{classify_contact_url, clean_email, clean_phone, contacts_in_text, Contacts};
 pub use kind::{
-    all_kinds, bare_host, host_of_url, in_general, is_channel_host, is_document_url, is_government_host, is_job_board, kind_codes, site_ask, KindSpec, SiteAsk,
+    all_kinds, bare_host, channel_entity_url, host_in_focus, host_keeps_pages, host_of_url, in_general, is_channel_host, is_channel_item, is_channel_noise, is_channel_visit_host, is_document_url, is_government_host, is_hive_host, is_image_page, is_job_board, is_model_front, is_model_inner, is_model_maker_host, is_raw_office_text, is_reference_host, is_tool_docs_host, is_video_channel_host, is_video_page, kind_codes, model_maker_hosts, site_ask, tool_docs_hosts, url_in_focus, KindSpec, SiteAsk,
     is_marketplace_host, is_press_front, is_press_host, is_product_card, is_product_url, is_webshop, kind_from_stored, open_feed, press_feed, press_feeds, press_rss,
     on_shelf, tab_mask, theme_mask, HostFeed, HOST_PAGE_CAP, KIND_ADS, KIND_AI, KIND_AUTO, KIND_BUILD, KIND_CHANNEL, KIND_DOC, KIND_EDU, KIND_GOODS, KIND_GOV, KIND_HAUL, KIND_IMAGE, KIND_JOBS,
     KIND_MEDICINE, KIND_NEWS, KIND_REALTY, KIND_SERVICE, KIND_SHOP, KIND_VIDEO, THEME_BITS,
@@ -20,6 +20,20 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 pub const EMBED_DIMS: usize = 384;
+
+/// Вторая запись той же буквы: е меняется на ё и наоборот. Остальные знаки остаются.
+pub fn swap_yo(token: &str) -> String {
+    token
+        .chars()
+        .map(|ch| match ch {
+            'е' => 'ё',
+            'Е' => 'Ё',
+            'ё' => 'е',
+            'Ё' => 'Е',
+            other => other,
+        })
+        .collect()
+}
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum VectorError {

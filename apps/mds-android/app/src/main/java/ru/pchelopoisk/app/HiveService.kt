@@ -33,10 +33,16 @@ class HiveService : Service() {
             return START_NOT_STICKY
         }
         val built = note("Пчела читает страницы для улья.")
-        if (Build.VERSION.SDK_INT >= 29) {
-            startForeground(NOTE_ID, built, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
-        } else {
-            startForeground(NOTE_ID, built)
+        try {
+            if (Build.VERSION.SDK_INT >= 29) {
+                startForeground(NOTE_ID, built, ServiceInfo.FOREGROUND_SERVICE_TYPE_DATA_SYNC)
+            } else {
+                startForeground(NOTE_ID, built)
+            }
+        } catch (_: Exception) {
+            HiveStatus.say("Телефон не пустил обход в фоне. Разрешите уведомления и снимите ограничение батареи.")
+            stopSelf()
+            return START_NOT_STICKY
         }
         worker.start(this) { text ->
             HiveStatus.say(text)
@@ -54,7 +60,7 @@ class HiveService : Service() {
     private fun note(text: String): Notification {
         val manager = getSystemService(NotificationManager::class.java)
         if (Build.VERSION.SDK_INT >= 26) {
-            val channel = NotificationChannel(CHANNEL, "Помощь улью", NotificationManager.IMPORTANCE_LOW)
+            val channel = NotificationChannel(CHANNEL, "Обход в фоне", NotificationManager.IMPORTANCE_DEFAULT)
             manager.createNotificationChannel(channel)
         }
         val open = PendingIntent.getActivity(
@@ -86,7 +92,7 @@ class HiveService : Service() {
     }
 
     companion object {
-        private const val CHANNEL = "pchela-help"
+        private const val CHANNEL = "pchela-crawl"
         private const val NOTE_ID = 7
         const val STOP = "ru.pchelopoisk.app.STOP_HELP"
 

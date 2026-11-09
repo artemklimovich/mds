@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use argon2::password_hash::{PasswordHash, PasswordHasher, PasswordVerifier, SaltString};
 use argon2::Argon2;
+use serde::{Deserialize, Serialize};
 
 const SESSION_SECONDS: u64 = 12 * 60 * 60;
 
@@ -19,6 +20,16 @@ pub struct Door {
     pub mcp_path: PathBuf,
     sessions: Mutex<HashMap<String, Session>>,
     hits: Mutex<HashMap<String, (u32, u64)>>,
+    book: Mutex<()>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct McpKey {
+    pub id: String,
+    pub hash: String,
+    pub issued_at: u64,
+    #[serde(default)]
+    pub revoked_at: Option<u64>,
 }
 
 pub fn hash_admin_password(password: &str) -> Result<String, String> {
@@ -44,6 +55,7 @@ pub fn door_from_env(mcp_path: PathBuf) -> Option<Door> {
         mcp_path,
         sessions: Mutex::new(HashMap::new()),
         hits: Mutex::new(HashMap::new()),
+        book: Mutex::new(()),
     })
 }
 
@@ -100,29 +112,128 @@ impl Door {
     }
 
     pub fn issue_mcp(&self) -> Result<String, String> {
+        let _guard = self.book.lock().unwrap_or_else(|poison| poison.into_inner());
         let secret = random_hex(32);
         let hash = mds_update::sha256_hex(secret.as_bytes());
-        if let Some(parent) = self.mcp_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
-        }
-        std::fs::write(&self.mcp_path, hash).map_err(|err| err.to_string())?;
+        let id = hash.chars().take(8).collect::<String>();
+        let mut keys = load_keys(&self.mcp_path);
+        keys.push(McpKey {
+            id,
+            hash,
+            issued_at: now_secs(),
+            revoked_at: None,
+        });
+        save_keys(&self.mcp_path, &keys)?;
         Ok(secret)
     }
 
-    pub fn revoke_mcp(&self) -> Result<(), String> {
-        match std::fs::remove_file(&self.mcp_path) {
-            Ok(()) => Ok(()),
-            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
-            Err(err) => Err(err.to_string()),
+    pub fn revoke_mcp(&self, id: &str) -> Result<(), String> {
+        let _guard = self.book.lock().unwrap_or_else(|poison| poison.into_inner());
+        let id = id.trim();
+        if id.is_empty() {
+            return Err("нет номера ключа".into());
         }
+        let mut keys = load_keys(&self.mcp_path);
+        let mut found = false;
+        let now = now_secs();
+        for key in &mut keys {
+            if key.id == id && key.revoked_at.is_none() {
+                key.revoked_at = Some(now);
+                found = true;
+            }
+        }
+        if !found {
+            return Err("такого ключа нет".into());
+        }
+        save_keys(&self.mcp_path, &keys)
+    }
+
+    pub fn mcp_keys(&self) -> Vec<McpKey> {
+        let _guard = self.book.lock().unwrap_or_else(|poison| poison.into_inner());
+        let mut keys = load_keys(&self.mcp_path);
+        keys.reverse();
+        keys
     }
 
     pub fn mcp_ok(&self, bearer: &str) -> bool {
-        let Ok(hash) = std::fs::read_to_string(&self.mcp_path) else {
-            return false;
-        };
-        same(mds_update::sha256_hex(bearer.as_bytes()).as_bytes(), hash.trim().as_bytes())
+        let _guard = self.book.lock().unwrap_or_else(|poison| poison.into_inner());
+        let want = mds_update::sha256_hex(bearer.as_bytes());
+        load_keys(&self.mcp_path).iter().any(|key| {
+            key.revoked_at.is_none() && same(key.hash.as_bytes(), want.as_bytes())
+        })
     }
+}
+
+fn load_keys(path: &Path) -> Vec<McpKey> {
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let text = text.trim();
+    if text.is_empty() {
+        return Vec::new();
+    }
+    if text.starts_with('[') {
+        return serde_json::from_str(text).unwrap_or_default();
+    }
+    if text.len() == 64 && text.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        let issued_at = std::fs::metadata(path)
+            .ok()
+            .and_then(|meta| meta.modified().ok())
+            .and_then(|time| time.duration_since(UNIX_EPOCH).ok())
+            .map(|span| span.as_secs())
+            .unwrap_or_else(now_secs);
+        return vec![McpKey {
+            id: text.chars().take(8).collect(),
+            hash: text.to_ascii_lowercase(),
+            issued_at,
+            revoked_at: None,
+        }];
+    }
+    Vec::new()
+}
+
+fn save_keys(path: &Path, keys: &[McpKey]) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|err| err.to_string())?;
+    }
+    let body = serde_json::to_string_pretty(keys).map_err(|err| err.to_string())?;
+    let tmp = path.with_extension("tmp");
+    std::fs::write(&tmp, body).map_err(|err| err.to_string())?;
+    if path.exists() {
+        std::fs::remove_file(path).map_err(|err| err.to_string())?;
+    }
+    std::fs::rename(&tmp, path).map_err(|err| err.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
+/// Москва, UTC+3. Ключ и дата выдачи без адреса человека.
+pub fn format_stamp(secs: u64) -> String {
+    let secs = secs.saturating_add(3 * 3600);
+    let days = (secs / 86_400) as i64;
+    let rem = (secs % 86_400) as u32;
+    let hour = rem / 3600;
+    let minute = (rem % 3600) / 60;
+    let (year, month, day) = civil_from_days(days);
+    format!("{day:02}.{month:02}.{year} {hour:02}:{minute:02}")
+}
+
+fn civil_from_days(days_since_epoch: i64) -> (i32, u32, u32) {
+    let z = days_since_epoch + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = (z - era * 146_097) as u32;
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
+    (y as i32, m, d)
 }
 
 fn password_matches(password: &str, encoded: &str) -> bool {
@@ -230,6 +341,7 @@ mod tests {
             mcp_path: PathBuf::from("unused"),
             sessions: Mutex::new(HashMap::new()),
             hits: Mutex::new(HashMap::new()),
+            book: Mutex::new(()),
         };
         assert!(door.login("keeper", "correct horse").is_some());
         assert!(door.login("keeper", "wrong").is_none());
@@ -244,9 +356,60 @@ mod tests {
             mcp_path: PathBuf::from("unused"),
             sessions: Mutex::new(HashMap::new()),
             hits: Mutex::new(HashMap::new()),
+            book: Mutex::new(()),
         };
         assert!(door.allow("login", 2, 60));
         assert!(door.allow("login", 2, 60));
         assert!(!door.allow("login", 2, 60));
+    }
+
+    fn test_door(path: PathBuf) -> Door {
+        Door {
+            user: "keeper".into(),
+            password_hash: hash_admin_password("secret").unwrap(),
+            mcp_path: path,
+            sessions: Mutex::new(HashMap::new()),
+            hits: Mutex::new(HashMap::new()),
+            book: Mutex::new(()),
+        }
+    }
+
+    #[test]
+    fn issued_keys_keep_history_and_revoke_one() {
+        let dir = std::env::temp_dir().join(format!("mds-mcp-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let door = test_door(dir.join("mcp.hash"));
+        let first = door.issue_mcp().unwrap();
+        let second = door.issue_mcp().unwrap();
+        assert!(door.mcp_ok(&first));
+        assert!(door.mcp_ok(&second));
+        let keys = door.mcp_keys();
+        assert_eq!(keys.len(), 2);
+        assert!(keys.iter().all(|key| key.revoked_at.is_none()));
+        door.revoke_mcp(&keys[0].id).unwrap();
+        assert!(!door.mcp_ok(&second));
+        assert!(door.mcp_ok(&first));
+        let keys = door.mcp_keys();
+        assert_eq!(keys.iter().filter(|key| key.revoked_at.is_some()).count(), 1);
+        assert!(format_stamp(0).starts_with("01.01.1970 03:"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn old_single_hash_file_still_opens() {
+        let dir = std::env::temp_dir().join(format!("mds-mcp-old-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("mcp.hash");
+        let secret = random_hex(32);
+        let hash = mds_update::sha256_hex(secret.as_bytes());
+        std::fs::write(&path, &hash).unwrap();
+        let door = test_door(path);
+        assert!(door.mcp_ok(&secret));
+        let keys = door.mcp_keys();
+        assert_eq!(keys.len(), 1);
+        assert_eq!(keys[0].id, hash.chars().take(8).collect::<String>());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

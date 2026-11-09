@@ -219,6 +219,17 @@ impl Crawler {
         if parsed.scheme() != "http" && parsed.scheme() != "https" {
             return failed(0);
         }
+        if mds_types::is_document_url(url) || mds_types::is_channel_noise(url) {
+            return ProbeHit {
+                status: 0,
+                etag: None,
+                modified: None,
+                page: None,
+                gone: false,
+                failed: false,
+                skipped: true,
+            };
+        }
         let origin = origin_of(&parsed);
         let host = parsed.host_str().unwrap_or("").to_ascii_lowercase();
         let mut side = VecDeque::new();
@@ -347,7 +358,7 @@ impl Crawler {
                 self.note_gone(&url);
                 continue;
             };
-            if is_broken_url(&url) {
+            if is_broken_url(&url) || mds_types::is_document_url(&url) || mds_types::is_channel_noise(&url) {
                 self.note_gone(&url);
                 continue;
             }
@@ -519,7 +530,7 @@ impl Crawler {
             if queue.len() >= self.policy.max_pages.saturating_mul(4) {
                 break;
             }
-            if is_broken_url(link) {
+            if is_broken_url(link) || mds_types::is_document_url(link) || mds_types::is_channel_noise(link) {
                 continue;
             }
             if let Ok(linked) = Url::parse(link) {
@@ -737,7 +748,7 @@ pub fn page_from_html(url: &str, host: &str, html: &str) -> FetchedPage {
     };
     let classified = kind::classify_html(&stored_url, host, &title, &text, html);
     kind::drop_marketplace_cards(&mut links);
-    links.retain(|url| !mds_types::is_document_url(url));
+    links.retain(|url| !mds_types::is_document_url(url) && !mds_types::is_channel_noise(url));
     named.retain(|(link, _)| links.iter().any(|kept| kept == link));
     let anchors = named
         .into_iter()
@@ -1254,7 +1265,7 @@ mod tests {
                     (
                         "200 OK",
                         "application/javascript",
-                        r#"const routes = ["/pricing", "/assets/logo.png"]; const hero = "Разработка современных SPA приложений и децентрализованный поиск SPABUNDLETOKEN";"#
+                        r#"const routes = ["/pricing", "/assets/logo.png"]; const hero = "Это страница про разработку современных приложений для пасеки и децентрализованный поиск по улью и мёду SPABUNDLETOKEN";"#
                             .to_string(),
                     )
                 } else if request.contains("GET /pricing") {

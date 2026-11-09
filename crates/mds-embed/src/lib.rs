@@ -8,6 +8,11 @@ use mds_types::EMBED_DIMS;
 use mds_update::{load_model_manifest, ModelManifest};
 use thiserror::Error;
 
+/// Какой текст кладётся в вектор. Смена значения запускает фоновый пересчёт страниц.
+pub const PASSAGE_KIND: &str = "title2-lead";
+const CLIP_CHARS: usize = 2500;
+const LEAD_CHARS: usize = 2200;
+
 #[derive(Debug, Error)]
 pub enum EmbedError {
     #[error("модель эмбеддингов: {0}")]
@@ -200,16 +205,79 @@ mod tests {
         assert!(!dir.join("swarm").join("model.onnx").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
+
+    #[test]
+    fn passage_keeps_the_title_and_the_lead() {
+        let title = "Пасека в Лотошино";
+        let text = "Липовый мёд с собственной пасеки.\n\nКонтакты и реквизиты и длинный подвал про доставку по всей стране и карту сайта.";
+        let passage = passage_text(title, text);
+        assert!(passage.starts_with("Пасека в Лотошино\nПасека в Лотошино\n"));
+        assert!(passage.contains("Липовый мёд"));
+        let far = "х".repeat(3000);
+        let clipped = passage_text("Завод", &format!("Начало изделия.\n{far}хвост каталога"));
+        assert!(clipped.contains("Начало изделия"));
+        assert!(!clipped.contains("хвост каталога"));
+        assert!(clipped.chars().count() <= CLIP_CHARS);
+    }
+
+    #[test]
+    fn clip_counts_characters_not_bytes() {
+        let text: String = std::iter::repeat('я').take(2400).collect();
+        assert_eq!(clip(&text).chars().count(), 2400);
+        let long: String = std::iter::repeat('я').take(4000).collect();
+        assert_eq!(clip(&long).chars().count(), CLIP_CHARS);
+    }
+}
+
+/// Заголовок дважды и начало страницы. Низ и подвал в вектор не входят.
+pub fn passage_text(title: &str, text: &str) -> String {
+    let title = squash(title);
+    let lead = take_chars(&squash(text), LEAD_CHARS);
+    let raw = if title.is_empty() {
+        lead
+    } else if lead.is_empty() {
+        format!("{title}\n{title}")
+    } else {
+        format!("{title}\n{title}\n\n{lead}")
+    };
+    take_chars(&raw, CLIP_CHARS)
+}
+
+fn squash(text: &str) -> String {
+    let mut out = String::new();
+    for line in text.lines() {
+        let line = line.split_whitespace().collect::<Vec<_>>().join(" ");
+        if line.is_empty() {
+            continue;
+        }
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(&line);
+    }
+    out
+}
+
+fn take_chars(text: &str, max: usize) -> String {
+    let mut count = 0;
+    for (i, _) in text.char_indices() {
+        if count == max {
+            return text[..i].trim().to_string();
+        }
+        count += 1;
+    }
+    text.trim().to_string()
 }
 
 fn clip(text: &str) -> &str {
-    const MAX: usize = 1200;
-    if text.len() <= MAX {
-        return text;
-    }
-    let mut end = MAX;
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
+    let mut count = 0;
+    let mut end = text.len();
+    for (i, _) in text.char_indices() {
+        if count == CLIP_CHARS {
+            end = i;
+            break;
+        }
+        count += 1;
     }
     text[..end].trim()
 }

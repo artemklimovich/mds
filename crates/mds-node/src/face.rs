@@ -9,9 +9,9 @@ use axum::routing::{get, post};
 use axum::Router;
 use mds_types::Hit;
 use mds_web::{
-    cabinet_sheets, offer_region, page_add, page_android, page_computer, page_download, page_for_sites, page_help, page_hive, page_how, page_lost,
-    page_indexing, page_llms, page_manifesto, page_operator, render, render_results, stamp_census, stamp_notice, page_bees,
-    CabinetSheets, OperatorReport,
+    offer_region, page_add, page_android, page_computer, page_download, page_for_sites, page_help, page_hive, page_how, page_lost,
+    page_indexing, page_llms, page_manifesto, reference_block, render, render_results, stamp_census, stamp_notice, page_bees,
+    CabinetSheets, OperatorReport, ReferenceCard,
 };
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -68,6 +68,8 @@ pub struct FaceSearch {
     pub notice: Option<String>,
     pub visit_cookie: Option<String>,
     pub bees_page: bool,
+    #[serde(default)]
+    pub notes: Vec<ReferenceCard>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -133,6 +135,8 @@ pub async fn serve_face(config: FaceConfig) -> Result<(), NodeError> {
     let app = Router::new()
         .route("/", get(home_page))
         .route("/search", get(search_page))
+        .route("/wire", get(proxy_hive))
+        .route("/offers", get(proxy_hive))
         .route("/manifesto", get(manifesto_page))
         .route("/how", get(how_page))
         .route("/help", get(help_page))
@@ -148,7 +152,9 @@ pub async fn serve_face(config: FaceConfig) -> Result<(), NodeError> {
         .route("/admin", get(admin_entry))
         .route("/admin/", get(admin_entry))
         .route("/admin/login", get(login_page).post(proxy_admin))
-        .route("/admin/operator", get(cabinet_page).post(proxy_admin))
+        .route("/admin/operator", get(proxy_admin).post(proxy_admin))
+        .route("/admin/operator/live", get(proxy_admin))
+        .route("/admin/operator/chart", get(proxy_admin))
         .route("/admin/logout", post(proxy_admin))
         .route("/admin/mcp", post(proxy_admin))
         .fallback(lost_page)
@@ -193,11 +199,13 @@ fn with_visit(mut response: Response, cookie: &Option<String>) -> Response {
 }
 
 async fn meta_for(state: &FaceState, headers: &HeaderMap, path: &str) -> Result<FaceMeta, StatusCode> {
-    let response = state
+    let mut request = state
         .client
         .get(format!("{}/internal/face/meta", state.hive))
         .header("x-mds-face", &state.token)
-        .header(header::COOKIE, cookie_of(headers))
+        .header(header::COOKIE, cookie_of(headers));
+    request = with_traffic(request, headers);
+    let response = request
         .query(&[("path", path)])
         .send()
         .await
@@ -219,6 +227,19 @@ fn cookie_of(headers: &HeaderMap) -> String {
         .and_then(|value| value.to_str().ok())
         .unwrap_or("")
         .to_string()
+}
+
+fn with_traffic(mut request: reqwest::RequestBuilder, headers: &HeaderMap) -> reqwest::RequestBuilder {
+    if let Some(ua) = headers.get(header::USER_AGENT).and_then(|value| value.to_str().ok()) {
+        request = request.header(header::USER_AGENT, ua);
+    }
+    if let Some(purpose) = headers.get("purpose").and_then(|value| value.to_str().ok()) {
+        request = request.header("purpose", purpose);
+    }
+    if let Some(purpose) = headers.get("sec-purpose").and_then(|value| value.to_str().ok()) {
+        request = request.header("sec-purpose", purpose);
+    }
+    request
 }
 
 async fn home_page(State(state): State<FaceState>, headers: HeaderMap) -> Result<Response, StatusCode> {
@@ -244,11 +265,13 @@ async fn search_page(
 }
 
 async fn paint_search(state: &FaceState, headers: &HeaderMap, query: &str) -> Result<Response, StatusCode> {
-    let response = state
+    let mut request = state
         .client
         .get(format!("{}/internal/face/search?{query}", state.hive))
         .header("x-mds-face", &state.token)
-        .header(header::COOKIE, cookie_of(headers))
+        .header(header::COOKIE, cookie_of(headers));
+    request = with_traffic(request, headers);
+    let response = request
         .send()
         .await
         .map_err(|_| StatusCode::BAD_GATEWAY)?;
@@ -294,6 +317,9 @@ async fn paint_search(state: &FaceState, headers: &HeaderMap, query: &str) -> Re
         );
         if let (Some(label), Some(href)) = (&paint.offer_label, &paint.offer_href) {
             html = offer_region(html, label, href);
+        }
+        if !paint.refused && paint.error.is_none() && !paint.query.is_empty() && paint.page <= 1 {
+            html = reference_block(html, &paint.query, &paint.notes);
         }
         html
     };
@@ -381,54 +407,6 @@ async fn admin_entry() -> Response {
 
 async fn login_page() -> Html<String> {
     Html(crate::admin::login_page(false, "/admin"))
-}
-
-async fn cabinet_page(State(state): State<FaceState>, headers: HeaderMap, request: Request) -> Result<Response, StatusCode> {
-    let response = state
-        .client
-        .get(format!("{}/internal/face/cabinet", state.hive))
-        .header("x-mds-face", &state.token)
-        .header(header::COOKIE, cookie_of(&headers))
-        .send()
-        .await
-        .map_err(|_| StatusCode::BAD_GATEWAY)?;
-    if !response.status().is_success() {
-        return Err(StatusCode::BAD_GATEWAY);
-    }
-    let pack: FaceCabinet = read_json(response).await?;
-    if pack.login {
-        return Ok(Response::builder()
-            .status(StatusCode::SEE_OTHER)
-            .header(header::LOCATION, "/admin/login")
-            .body(Body::empty())
-            .unwrap_or_else(|_| StatusCode::NO_CONTENT.into_response()));
-    }
-    let Some(mut report) = pack.report else {
-        return Err(StatusCode::BAD_GATEWAY);
-    };
-    let Some(sheets) = pack.sheets else {
-        return Err(StatusCode::BAD_GATEWAY);
-    };
-    let query = request.uri().query();
-    let sheet = query
-        .and_then(|query| {
-            query.split('&').find_map(|part| {
-                let (key, value) = part.split_once('=')?;
-                if key == "sheet" { Some(value.to_string()) } else { None }
-            })
-        })
-        .unwrap_or_else(|| "node".into());
-    report.span = query
-        .and_then(|query| {
-            query.split('&').find_map(|part| {
-                let (key, value) = part.split_once('=')?;
-                if key == "span" { Some(value.to_string()) } else { None }
-            })
-        })
-        .unwrap_or_default();
-    let (stats, rest) = cabinet_sheets(&sheets, &sheet);
-    let html = stamp_census(page_operator(&report, &stats, &rest, &sheet), report.sites as usize, report.pages as usize);
-    Ok(mark_face(Html(html).into_response()))
 }
 
 async fn proxy_hive(State(state): State<FaceState>, request: Request) -> Result<Response, StatusCode> {

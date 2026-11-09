@@ -9,8 +9,8 @@ android {
         applicationId = "ru.pchelopoisk.app"
         minSdk = 26
         targetSdk = 34
-        versionCode = 10
-        versionName = "0.1.9"
+        versionCode = 12
+        versionName = "0.1.11"
     }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

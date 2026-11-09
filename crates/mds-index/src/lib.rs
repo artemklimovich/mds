@@ -1,10 +1,10 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use mds_crawl::{is_broken_url, is_near_duplicate, is_not_found, strip_boilerplate, tidy_url, FetchedPage};
 use mds_types::{
-    all_kinds, bare_host, host_of_url, is_channel_host, is_marketplace_host, is_press_front, is_press_host, is_product_card, kind_from_stored, cosine,
-    QuantVector, EMBED_DIMS, HOST_PAGE_CAP, KIND_CHANNEL, KIND_NEWS, KIND_VIDEO, THEME_BITS,
+    all_kinds, bare_host, channel_entity_url, contacts_in_text, host_in_focus, host_keeps_pages, host_of_url, is_channel_host, is_channel_item, is_channel_noise, is_document_url, is_government_host, is_hive_host, is_image_page, is_marketplace_host, is_model_inner, is_model_maker_host, is_press_front, is_press_host, is_product_card, is_raw_office_text, is_tool_docs_host, is_video_page, kind_from_stored, cosine, swap_yo, url_in_focus,
+    QuantVector, EMBED_DIMS, HOST_PAGE_CAP, KIND_CHANNEL, KIND_IMAGE, KIND_NEWS, KIND_VIDEO, THEME_BITS,
 };
 
 fn news_shelf(kind_mask: u32) -> u32 {
@@ -62,6 +62,13 @@ pub struct CrawlPace {
     pub gap_secs: i64,
 }
 
+/// Пока очередь длиннее, новые ссылки с обхода и CT не берём — разбираем уже найденное.
+pub const QUEUE_GROW_CAP: i64 = 50_000;
+
+pub fn queue_may_grow_len(len: i64) -> bool {
+    len < QUEUE_GROW_CAP
+}
+
 /// Сколько чужих адресов пчела получает за заход.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BeePace {
@@ -111,6 +118,14 @@ pub struct ActivitySlot {
     pub ram: i64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SearchPaceSlot {
+    pub minute: String,
+    pub count: i64,
+    pub avg_ms: i64,
+    pub max_ms: i64,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BeeTotals {
     pub day: i64,
@@ -118,6 +133,13 @@ pub struct BeeTotals {
     pub month: i64,
     pub all: i64,
     pub quiet: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VolunteerRow {
+    pub host: String,
+    pub seen_at: i64,
+    pub version: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -242,6 +264,46 @@ pub struct WordMatch {
     pub rank: usize,
 }
 
+pub struct FocusSweep {
+    pub dropped: usize,
+    pub trimmed: usize,
+    pub queue: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct HostInspect {
+    pub host: String,
+    pub pages: i64,
+    pub queued: i64,
+    pub banned: bool,
+    pub muted: bool,
+    pub keep: bool,
+    pub volunteer: bool,
+    pub government: bool,
+    pub hive: bool,
+    pub tool_docs: bool,
+    pub model_maker: bool,
+    pub in_focus: bool,
+}
+
+impl HostInspect {
+    pub fn rule(&self) -> &'static str {
+        if self.banned {
+            "не обходить"
+        } else if !self.in_focus {
+            "вне фокуса, в очередь не ставится"
+        } else if self.volunteer || self.government || self.hive || self.tool_docs || self.keep {
+            "без потолка"
+        } else if self.model_maker {
+            "только главная"
+        } else if mds_types::is_channel_visit_host(&self.host) {
+            "карточки каналов, без потолка"
+        } else {
+            "потолок 100 страниц"
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct VectorMatch {
     pub id: i64,
@@ -299,11 +361,13 @@ impl Index {
         ensure_queue_lease(&conn)?;
         ensure_queue_worth(&conn)?;
         ensure_refresh_columns(&conn)?;
+        ensure_volunteer_version(&conn)?;
         ensure_anchor_table(&conn)?;
         ensure_revision(&conn)?;
         let index = Self { conn };
         index.seed_revisions()?;
         index.seed_refresh()?;
+        let _ = index.drain_model_inner_queue();
         if index.meta_get("boot_scan")?.as_deref() != Some("1") {
             let _ = index.fill_kinds()?;
             let (labeled, total) = index.fill_regions()?;
@@ -311,6 +375,17 @@ impl Index {
                 eprintln!("MDS: регион подписан у {labeled} страниц из {total}");
             }
             let _ = index.meta_set("boot_scan", "1");
+        }
+        if index.meta_get("kind_pass")?.as_deref() != Some("132") {
+            let labeled = index.fill_kinds()?;
+            if labeled > 0 {
+                eprintln!("MDS: метки пересчитаны у {labeled} страниц");
+            }
+            let harvested = index.harvest_channel_entities()?;
+            if harvested > 0 {
+                eprintln!("MDS: в очередь каналов поставлено {harvested}");
+            }
+            let _ = index.meta_set("kind_pass", "132");
         }
         Ok(index)
     }
@@ -574,9 +649,49 @@ impl Index {
     }
 
     pub fn search_words(&self, query: &str, limit: usize, kind_mask: u32, theme_mask: u32) -> Result<Vec<WordMatch>, IndexError> {
-        let Some(match_query) = fts_query(query) else {
+        let tokens = content_tokens(query);
+        if tokens.is_empty() || limit == 0 {
             return Ok(Vec::new());
-        };
+        }
+        let mut queries = Vec::new();
+        if let Some(near) = fts_near(&tokens, false) {
+            queries.push(near);
+        }
+        if let Some(near) = fts_near(&tokens, true) {
+            queries.push(near);
+        }
+        let exact = fts_and(&tokens, false);
+        let loose = fts_and(&tokens, true);
+        queries.push(exact);
+        if loose != *queries.last().expect("exact") {
+            queries.push(loose);
+        }
+        let mut seen = HashSet::new();
+        let mut ids = Vec::new();
+        for match_query in queries {
+            if ids.len() >= limit {
+                break;
+            }
+            for id in self.word_ids(&match_query, limit, kind_mask, theme_mask)? {
+                if seen.insert(id) {
+                    ids.push(id);
+                    if ids.len() >= limit {
+                        break;
+                    }
+                }
+            }
+        }
+        Ok(ids
+            .into_iter()
+            .enumerate()
+            .map(|(offset, id)| WordMatch {
+                id,
+                rank: offset + 1,
+            })
+            .collect())
+    }
+
+    fn word_ids(&self, match_query: &str, limit: usize, kind_mask: u32, theme_mask: u32) -> Result<Vec<i64>, IndexError> {
         let mut stmt = self.conn.prepare(
             "SELECT pages.id
              FROM pages_fts
@@ -600,11 +715,8 @@ impl Index {
             |row| row.get::<_, i64>(0),
         )?;
         let mut out = Vec::new();
-        for (offset, id) in rows.enumerate() {
-            out.push(WordMatch {
-                id: id?,
-                rank: offset + 1,
-            });
+        for id in rows {
+            out.push(id?);
         }
         Ok(out)
     }
@@ -696,21 +808,33 @@ impl Index {
             if trimmed.is_empty() || is_broken_url(&trimmed) {
                 continue;
             }
+            if is_document_url(&trimmed) || is_channel_noise(&trimmed) {
+                continue;
+            }
             let Some(host) = host_of_url(&trimmed) else {
                 continue;
             };
             let bare = bare_host(&host);
+            if !url_in_focus(&trimmed) {
+                continue;
+            }
             if is_marketplace_host(&bare) && is_product_card(&trimmed) {
                 continue;
             }
             if is_press_host(&bare) && !is_press_front(&trimmed) {
                 continue;
             }
-            let volunteer = self.is_volunteer_host(&bare)?;
-            if self.has_picks(&bare)? && !volunteer && !self.is_pick(&bare, &trimmed)? {
+            if is_model_inner(&trimmed) {
                 continue;
             }
-            if !volunteer {
+            if self.is_banned_host(&bare)? {
+                continue;
+            }
+            let open = self.host_open(&bare)? || is_channel_host(&bare);
+            if self.has_picks(&bare)? && !open && !self.is_pick(&bare, &trimmed)? {
+                continue;
+            }
+            if !open {
                 let load = if let Some(load) = pressure.get(&bare).copied() {
                     load
                 } else {
@@ -993,7 +1117,7 @@ impl Index {
         Ok(())
     }
 
-    fn is_volunteer_host(&self, bare: &str) -> Result<bool, IndexError> {
+    pub fn is_volunteer_host(&self, bare: &str) -> Result<bool, IndexError> {
         let found: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM volunteers WHERE host = ?1 OR host = ?2",
             params![bare, format!("www.{bare}")],
@@ -1002,7 +1126,8 @@ impl Index {
         Ok(found > 0)
     }
 
-    fn host_pressure(&self, bare: &str) -> Result<i64, IndexError> {
+    pub fn host_counts(&self, host: &str) -> Result<(i64, i64), IndexError> {
+        let bare = bare_host(host);
         let www = format!("www.{bare}");
         let pages: i64 = self.conn.query_row(
             "SELECT COUNT(*) FROM pages WHERE host = ?1 OR host = ?2",
@@ -1026,17 +1151,26 @@ impl Index {
             ],
             |row| row.get(0),
         )?;
+        Ok((pages, queued))
+    }
+
+    fn host_pressure(&self, bare: &str) -> Result<i64, IndexError> {
+        let (pages, queued) = self.host_counts(bare)?;
         Ok(pages + queued)
     }
 
     pub fn enqueue_next(&self, urls: &[String]) -> Result<(), IndexError> {
         for url in urls {
             let trimmed = url.trim();
-            if trimmed.is_empty() || is_broken_url(trimmed) {
+            if trimmed.is_empty() || is_broken_url(trimmed) || is_document_url(trimmed) || is_channel_noise(trimmed) {
                 continue;
             }
             if let Some(host) = host_of_url(trimmed) {
-                if is_press_host(&host) && !is_press_front(trimmed) {
+                if !url_in_focus(trimmed)
+                    || self.is_banned_host(&host)?
+                    || (is_press_host(&host) && !is_press_front(trimmed))
+                    || is_model_inner(trimmed)
+                {
                     continue;
                 }
             }
@@ -1069,6 +1203,162 @@ impl Index {
                 self.delete_id(id)?;
                 removed += 1;
             }
+        }
+        Ok(removed)
+    }
+
+    pub fn sweep_focus(&self) -> Result<FocusSweep, IndexError> {
+        let volunteers = self.volunteer_names()?;
+        let pages = {
+            let mut stmt = self.conn.prepare("SELECT id, host, url FROM pages").map_err(|source| IndexError::Sqlite {
+                context: "focus",
+                source,
+            })?;
+            let mapped = stmt.query_map([], |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?)))?;
+            mapped.collect::<Result<Vec<_>, _>>().map_err(|source| IndexError::Sqlite {
+                context: "focus",
+                source,
+            })?
+        };
+        let mut dropped = Vec::new();
+        let mut grouped: HashMap<String, Vec<(i64, usize)>> = HashMap::new();
+        for (id, host, url) in pages {
+            if !url_in_focus(&url) {
+                dropped.push(id);
+                continue;
+            }
+            grouped.entry(bare_host(&host)).or_default().push((id, url.len()));
+        }
+        let mut trimmed = Vec::new();
+        let mut full = HashSet::new();
+        for (host, mut rows) in grouped {
+            let bee = volunteers.contains(&host) || volunteers.contains(&format!("www.{host}"));
+            let keep = bee || host_keeps_pages(&host) || self.is_keep_host(&host).unwrap_or(false) || is_channel_host(&host);
+            if !keep && rows.len() as i64 >= HOST_PAGE_CAP {
+                full.insert(host.clone());
+            }
+            if keep || rows.len() as i64 <= HOST_PAGE_CAP {
+                continue;
+            }
+            rows.sort_by_key(|(id, len)| (*len, *id));
+            trimmed.extend(rows.into_iter().skip(HOST_PAGE_CAP as usize).map(|(id, _)| id));
+        }
+        let page_ids: Vec<i64> = dropped.iter().copied().chain(trimmed.iter().copied()).collect();
+        if !page_ids.is_empty() {
+            let tx = self.conn.unchecked_transaction().map_err(|source| IndexError::Sqlite {
+                context: "focus",
+                source,
+            })?;
+            {
+                let mut fts = tx.prepare("DELETE FROM pages_fts WHERE rowid = ?1").map_err(|source| IndexError::Sqlite {
+                    context: "focus",
+                    source,
+                })?;
+                let mut page = tx.prepare("DELETE FROM pages WHERE id = ?1").map_err(|source| IndexError::Sqlite {
+                    context: "focus",
+                    source,
+                })?;
+                for id in &page_ids {
+                    fts.execute([id]).map_err(|source| IndexError::Sqlite {
+                        context: "focus",
+                        source,
+                    })?;
+                    page.execute([id]).map_err(|source| IndexError::Sqlite {
+                        context: "focus",
+                        source,
+                    })?;
+                }
+            }
+            tx.commit().map_err(|source| IndexError::Sqlite {
+                context: "focus",
+                source,
+            })?;
+        }
+        let queue = self.sweep_foreign_queue(&full)?;
+        Ok(FocusSweep {
+            dropped: dropped.len(),
+            trimmed: trimmed.len(),
+            queue,
+        })
+    }
+
+    fn volunteer_names(&self) -> Result<HashSet<String>, IndexError> {
+        let mut stmt = self.conn.prepare("SELECT host FROM volunteers").map_err(|source| IndexError::Sqlite {
+            context: "focus",
+            source,
+        })?;
+        let rows = stmt
+            .query_map([], |row| row.get::<_, String>(0))
+            .map_err(|source| IndexError::Sqlite {
+                context: "focus",
+                source,
+            })?;
+        let mut names = HashSet::new();
+        for row in rows {
+            names.insert(bare_host(&row.map_err(|source| IndexError::Sqlite {
+                context: "focus",
+                source,
+            })?));
+        }
+        Ok(names)
+    }
+
+    fn sweep_foreign_queue(&self, full: &HashSet<String>) -> Result<usize, IndexError> {
+        let urls = {
+            let mut stmt = self.conn.prepare("SELECT url FROM crawl_queue").map_err(|source| IndexError::Sqlite {
+                context: "focus_queue",
+                source,
+            })?;
+            let mapped = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            mapped.collect::<Result<Vec<_>, _>>().map_err(|source| IndexError::Sqlite {
+                context: "focus_queue",
+                source,
+            })?
+        };
+        let mut hosts = HashSet::new();
+        let mut drop_urls = Vec::new();
+        for url in urls {
+            let Some(host) = host_of_url(&url) else {
+                continue;
+            };
+            let bare = bare_host(&host);
+            if mds_types::is_channel_visit_host(&bare) {
+                if is_channel_item(&url) || !url_in_focus(&url) {
+                    drop_urls.push(url);
+                }
+                continue;
+            }
+            if !host_in_focus(&bare) || full.contains(&bare) {
+                hosts.insert(host);
+            }
+        }
+        let mut extra = 0_usize;
+        for url in &drop_urls {
+            extra += self
+                .conn
+                .execute("DELETE FROM crawl_queue WHERE url = ?1", [url])
+                .map_err(|source| IndexError::Sqlite {
+                    context: "focus_queue",
+                    source,
+                })?;
+        }
+        let mut removed = extra;
+        for host in hosts {
+            removed += self
+                .conn
+                .execute(
+                    "DELETE FROM crawl_queue WHERE url LIKE ?1 OR url LIKE ?2 OR url = ?3 OR url = ?4",
+                    params![
+                        format!("https://{host}/%"),
+                        format!("http://{host}/%"),
+                        format!("https://{host}"),
+                        format!("http://{host}"),
+                    ],
+                )
+                .map_err(|source| IndexError::Sqlite {
+                    context: "focus_queue",
+                    source,
+                })?;
         }
         Ok(removed)
     }
@@ -1219,32 +1509,69 @@ impl Index {
     }
 
     /// Забирает свободные адреса и держит их, пока получатель не вернёт страницу или срок не выйдет.
+    /// С одного хоста не больше двух за заход, чтобы очередь гиганта не забивала весь обход.
     pub fn claim_urls(&self, limit: usize, hold_secs: i64) -> Result<Vec<String>, IndexError> {
         if limit == 0 {
             return Ok(Vec::new());
         }
         let hold = hold_secs.clamp(1, 14 * 24 * 3600);
-        let tx = self.conn.unchecked_transaction().map_err(|source| IndexError::Sqlite {
-            context: "lease",
-            source,
-        })?;
-        let urls = {
-            let mut stmt = tx.prepare(
-                "SELECT url FROM crawl_queue WHERE visited = 0 AND worth < 5 AND lease_until < strftime('%s','now') ORDER BY worth ASC, added_at ASC LIMIT ?1",
-            ).map_err(|source| IndexError::Sqlite {
-                context: "lease",
-                source,
-            })?;
-            let rows = stmt.query_map(params![limit as i64], |row| row.get::<_, String>(0))?;
+        let pool = (limit * 8).clamp(limit, 192);
+        let candidates = {
+            let mut stmt = self.conn.prepare(
+                "SELECT url FROM (
+                    SELECT url, worth, added_at,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY CASE
+                                WHEN instr(replace(replace(lower(url), 'https://', ''), 'http://', ''), '/') > 0
+                                THEN substr(
+                                    replace(replace(lower(url), 'https://', ''), 'http://', ''),
+                                    1,
+                                    instr(replace(replace(lower(url), 'https://', ''), 'http://', ''), '/') - 1
+                                )
+                                ELSE replace(replace(lower(url), 'https://', ''), 'http://', '')
+                            END
+                            ORDER BY worth ASC, added_at ASC
+                        ) AS rn
+                    FROM crawl_queue
+                    WHERE visited = 0 AND worth < 5 AND lease_until < strftime('%s','now')
+                )
+                WHERE rn <= 2
+                ORDER BY worth ASC, added_at ASC
+                LIMIT ?1",
+            )?;
+            let rows = stmt.query_map(params![pool as i64], |row| row.get::<_, String>(0))?;
             let mut out = Vec::new();
             for row in rows {
                 out.push(row?);
             }
             out
         };
-        for url in &urls {
+        let mut chosen = Vec::new();
+        let mut drop = Vec::new();
+        let mut per_host: HashMap<String, usize> = HashMap::new();
+        for url in candidates {
+            if chosen.len() >= limit {
+                break;
+            }
+            let host = host_of_url(&url).map(|host| bare_host(&host)).unwrap_or_default();
+            if per_host.get(&host).copied().unwrap_or(0) >= 2 {
+                continue;
+            }
+            if !self.queue_should_fetch(&url)? {
+                drop.push(url);
+                continue;
+            }
+            *per_host.entry(host).or_insert(0) += 1;
+            chosen.push(url);
+        }
+        self.mark_visited(&drop)?;
+        let tx = self.conn.unchecked_transaction().map_err(|source| IndexError::Sqlite {
+            context: "lease",
+            source,
+        })?;
+        for url in &chosen {
             tx.execute(
-                "UPDATE crawl_queue SET lease_until = strftime('%s','now') + ?1 WHERE url = ?2",
+                "UPDATE crawl_queue SET lease_until = strftime('%s','now') + ?1 WHERE url = ?2 AND visited = 0",
                 params![hold, url],
             )?;
         }
@@ -1252,7 +1579,22 @@ impl Index {
             context: "lease",
             source,
         })?;
-        Ok(urls)
+        Ok(chosen)
+    }
+
+    fn queue_should_fetch(&self, url: &str) -> Result<bool, IndexError> {
+        let exists: i64 = self.conn.query_row(
+            "SELECT COUNT(*) FROM pages WHERE url = ?1",
+            [url],
+            |row| row.get(0),
+        )?;
+        if exists > 0 {
+            return Ok(false);
+        }
+        let Some(host) = host_of_url(url) else {
+            return Ok(false);
+        };
+        self.may_store(&host, url)
     }
 
     pub fn release_lease(&self, urls: &[String]) -> Result<(), IndexError> {
@@ -1530,6 +1872,19 @@ impl Index {
         }).map_err(IndexError::from)
     }
 
+    pub fn visit_windows(&self) -> Result<(String, String, String), IndexError> {
+        self.conn
+            .query_row(
+                "SELECT
+                    date('now','localtime'),
+                    date('now','localtime','-' || ((cast(strftime('%w','now','localtime') as integer) + 6) % 7) || ' days'),
+                    date('now','localtime','start of month')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .map_err(IndexError::from)
+    }
+
     pub fn visit_days(&self, limit: usize) -> Result<Vec<VisitDay>, IndexError> {
         let limit = limit.clamp(1, 60) as i64;
         let mut stmt = self.conn.prepare(
@@ -1636,15 +1991,17 @@ impl Index {
         ) {
             out.merge(&mds_types::contacts_in_text(&format!("{title}\n{text}")));
             let bare = mds_types::bare_host(&host);
-            if !bare.is_empty() {
+            if !bare.is_empty() && !is_channel_host(&bare) {
                 if let Some(hc) = read_host_contacts(&self.conn, &bare) {
                     out.merge(&hc);
                 }
             }
         } else if let Some(host) = mds_types::host_of_url(url) {
             let bare = mds_types::bare_host(&host);
-            if let Some(hc) = read_host_contacts(&self.conn, &bare) {
-                out.merge(&hc);
+            if !is_channel_host(&bare) {
+                if let Some(hc) = read_host_contacts(&self.conn, &bare) {
+                    out.merge(&hc);
+                }
             }
         }
         out
@@ -1754,7 +2111,7 @@ impl Index {
             };
 
             let mut contacts = mds_types::contacts_in_text(&format!("{title}\n{text}"));
-            if !bare.is_empty() {
+            if !bare.is_empty() && !is_channel_host(&bare) {
                 if let Some(hc) = read_host_contacts(&self.conn, &bare) {
                     contacts.merge(&hc);
                 }
@@ -1860,6 +2217,10 @@ impl Index {
         Ok(count as usize)
     }
 
+    pub fn queue_may_grow(&self) -> Result<bool, IndexError> {
+        Ok(queue_may_grow_len(self.queue_len()? as i64))
+    }
+
     pub fn bucket_report(&self) -> Result<(Vec<u16>, bool), IndexError> {
         let distinct: i64 = self.conn.query_row(
             "SELECT COUNT(DISTINCT semantic_bucket) FROM pages",
@@ -1904,21 +2265,38 @@ impl Index {
     }
 
     pub fn remember_volunteer(&self, host: &str) -> Result<(), IndexError> {
+        self.remember_volunteer_version(host, "")
+    }
+
+    pub fn remember_volunteer_version(&self, host: &str, version: &str) -> Result<(), IndexError> {
         let host = host.trim().to_ascii_lowercase();
         if host.is_empty() {
             return Ok(());
         }
+        let version = version.trim();
         self.conn.execute(
-            "INSERT INTO volunteers (host, seen_at) VALUES (?1, strftime('%s','now'))
-             ON CONFLICT(host) DO UPDATE SET seen_at = excluded.seen_at",
-            [host],
+            "INSERT INTO volunteers (host, seen_at, version) VALUES (?1, strftime('%s','now'), ?2)
+             ON CONFLICT(host) DO UPDATE SET
+                seen_at = excluded.seen_at,
+                version = CASE WHEN excluded.version = '' THEN volunteers.version ELSE excluded.version END",
+            params![host, version],
         )?;
         Ok(())
     }
 
     pub fn volunteers(&self) -> Result<Vec<String>, IndexError> {
-        let mut stmt = self.conn.prepare("SELECT host FROM volunteers ORDER BY host")?;
-        let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+        Ok(self.volunteer_seen()?.into_iter().map(|row| row.host).collect())
+    }
+
+    pub fn volunteer_seen(&self) -> Result<Vec<VolunteerRow>, IndexError> {
+        let mut stmt = self.conn.prepare("SELECT host, seen_at, COALESCE(version, '') FROM volunteers ORDER BY host")?;
+        let rows = stmt.query_map([], |row| {
+            Ok(VolunteerRow {
+                host: row.get(0)?,
+                seen_at: row.get(1)?,
+                version: row.get(2)?,
+            })
+        })?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row?);
@@ -1930,6 +2308,47 @@ impl Index {
         let host = bare_host(host);
         self.conn.execute("DELETE FROM volunteers WHERE host = ?1", [host])?;
         Ok(())
+    }
+
+    fn drain_model_inner_queue(&self) -> Result<usize, IndexError> {
+        if self.meta_get("model_front_q2")?.as_deref() == Some("1") {
+            return Ok(0);
+        }
+        let queued = {
+            let mut stmt = self.conn.prepare("SELECT url FROM crawl_queue WHERE visited = 0")?;
+            let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
+            let mut out = Vec::new();
+            for row in rows {
+                out.push(row?);
+            }
+            out
+        };
+        let mut drop = Vec::new();
+        for url in queued {
+            if host_of_url(&url).is_none() {
+                continue;
+            }
+            if is_model_inner(&url) {
+                drop.push(url);
+            }
+        }
+        let n = drop.len();
+        if !drop.is_empty() {
+            let tx = self.conn.unchecked_transaction().map_err(|source| IndexError::Sqlite {
+                context: "queue",
+                source,
+            })?;
+            for url in &drop {
+                tx.execute("UPDATE crawl_queue SET visited = 1 WHERE url = ?1", [url])?;
+            }
+            tx.commit().map_err(|source| IndexError::Sqlite {
+                context: "queue",
+                source,
+            })?;
+            eprintln!("MDS: из очереди убраны внутренние адреса моделей, {n}");
+        }
+        self.meta_set("model_front_q2", "1")?;
+        Ok(n)
     }
 
     pub fn note_shell(&self, id: &str) -> Result<(), IndexError> {
@@ -2216,6 +2635,55 @@ impl Index {
             [],
         )?;
         Ok(())
+    }
+
+    pub fn note_search_pace(&self, elapsed_ms: i64) -> Result<(), IndexError> {
+        let elapsed_ms = elapsed_ms.max(0);
+        self.conn.execute(
+            "INSERT INTO search_minute (minute, count, avg_ms, max_ms)
+             VALUES (strftime('%Y-%m-%d %H:%M','now','localtime'), 1, ?1, ?1)
+             ON CONFLICT(minute) DO UPDATE SET
+                avg_ms = (avg_ms * count + excluded.avg_ms) / (count + 1),
+                max_ms = MAX(max_ms, excluded.max_ms),
+                count = count + 1",
+            [elapsed_ms],
+        )?;
+        self.conn.execute(
+            "DELETE FROM search_minute WHERE minute < strftime('%Y-%m-%d %H:%M','now','localtime','-3 hours')",
+            [],
+        )?;
+        Ok(())
+    }
+
+    pub fn search_pace(&self, limit: usize) -> Result<Vec<SearchPaceSlot>, IndexError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT minute, count, avg_ms, max_ms FROM search_minute ORDER BY minute DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map([limit as i64], |row| {
+            Ok(SearchPaceSlot {
+                minute: row.get(0)?,
+                count: row.get(1)?,
+                avg_ms: row.get(2)?,
+                max_ms: row.get(3)?,
+            })
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        out.reverse();
+        Ok(out)
+    }
+
+    pub fn search_peak_ms(&self, hours: i64) -> Result<i64, IndexError> {
+        let hours = hours.clamp(1, 24);
+        let peak: i64 = self.conn.query_row(
+            "SELECT COALESCE(MAX(max_ms), 0) FROM search_minute
+             WHERE minute >= strftime('%Y-%m-%d %H:%M','now','localtime', ?1)",
+            [format!("-{hours} hours")],
+            |row| row.get(0),
+        )?;
+        Ok(peak)
     }
 
     pub fn load_hours(&self, limit: usize) -> Result<Vec<LoadHour>, IndexError> {
@@ -2563,6 +3031,62 @@ impl Index {
         Ok(())
     }
 
+    pub fn passage_kind(&self) -> Result<Option<String>, IndexError> {
+        self.meta_get("passage_kind")
+    }
+
+    pub fn set_passage_kind(&self, kind: &str) -> Result<(), IndexError> {
+        self.meta_set("passage_kind", kind)
+    }
+
+    pub fn passage_after(&self) -> Result<i64, IndexError> {
+        Ok(self
+            .meta_get("passage_after")?
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(0))
+    }
+
+    pub fn set_passage_after(&self, id: i64) -> Result<(), IndexError> {
+        self.meta_set("passage_after", &id.to_string())
+    }
+
+    pub fn pages_for_refresh(&self, after: i64, limit: usize) -> Result<Vec<(i64, String, String)>, IndexError> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id, title, text FROM pages WHERE id > ?1 ORDER BY id LIMIT ?2",
+        )?;
+        let rows = stmt.query_map(params![after, limit as i64], |row| {
+            Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?, row.get::<_, String>(2)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn put_vector(
+        &mut self,
+        id: i64,
+        vector: &QuantVector,
+        semantic_bucket: u16,
+    ) -> Result<(), IndexError> {
+        if vector.values.len() != EMBED_DIMS {
+            return Err(IndexError::Vector(format!(
+                "ожидалось {EMBED_DIMS}, получено {}",
+                vector.values.len()
+            )));
+        }
+        let blob = vector.values.iter().map(|v| *v as u8).collect::<Vec<_>>();
+        let tx = self.conn.transaction()?;
+        let revision = next_revision(&tx)?;
+        tx.execute(
+            "UPDATE pages SET scale = ?1, vector = ?2, semantic_bucket = ?3, revision = ?4 WHERE id = ?5",
+            params![vector.scale, blob, semantic_bucket as i64, revision, id],
+        )?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn refuse_host(&self, host: &str) -> Result<(), IndexError> {
         let host = bare_host(host);
         if host.is_empty() {
@@ -2604,13 +3128,126 @@ impl Index {
     }
 
     pub fn muted_hosts(&self) -> Result<Vec<String>, IndexError> {
-        let mut stmt = self.conn.prepare("SELECT host FROM muted_hosts ORDER BY host")?;
+        self.table_hosts("muted_hosts")
+    }
+
+    pub fn keep_host(&self, host: &str) -> Result<(), IndexError> {
+        self.insert_host("keep_hosts", host)
+    }
+
+    pub fn unkeep_host(&self, host: &str) -> Result<(), IndexError> {
+        self.delete_host("keep_hosts", host)
+    }
+
+    pub fn keep_hosts(&self) -> Result<Vec<String>, IndexError> {
+        self.table_hosts("keep_hosts")
+    }
+
+    pub fn is_keep_host(&self, host: &str) -> Result<bool, IndexError> {
+        self.host_in_table("keep_hosts", host)
+    }
+
+    pub fn ban_host(&self, host: &str) -> Result<(), IndexError> {
+        self.insert_host("banned_hosts", host)?;
+        let host = bare_host(host);
+        if host.is_empty() {
+            return Ok(());
+        }
+        for prefix in ["https://", "http://"] {
+            for name in [&host, &format!("www.{host}")] {
+                self.conn.execute(
+                    "UPDATE crawl_queue SET visited = 1 WHERE visited = 0 AND (url = ?1 OR url LIKE ?2)",
+                    params![format!("{prefix}{name}/"), format!("{prefix}{name}/%")],
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn unban_host(&self, host: &str) -> Result<(), IndexError> {
+        self.delete_host("banned_hosts", host)
+    }
+
+    pub fn banned_hosts(&self) -> Result<Vec<String>, IndexError> {
+        self.table_hosts("banned_hosts")
+    }
+
+    pub fn is_banned_host(&self, host: &str) -> Result<bool, IndexError> {
+        self.host_in_table("banned_hosts", host)
+    }
+
+    pub fn is_muted_host(&self, host: &str) -> Result<bool, IndexError> {
+        self.host_in_table("muted_hosts", host)
+    }
+
+    pub fn inspect_host(&self, host: &str) -> Result<HostInspect, IndexError> {
+        let host = if let Some(found) = host_of_url(host) {
+            bare_host(&found)
+        } else {
+            bare_host(host.split(['/', '?', '#']).next().unwrap_or(""))
+        };
+        let (pages, queued) = self.host_counts(&host)?;
+        let tool_docs = is_tool_docs_host(&host);
+        Ok(HostInspect {
+            host: host.clone(),
+            pages,
+            queued,
+            banned: self.is_banned_host(&host)?,
+            muted: self.is_muted_host(&host)?,
+            keep: self.is_keep_host(&host)?,
+            volunteer: self.is_volunteer_host(&host)?,
+            government: is_government_host(&host),
+            hive: is_hive_host(&host),
+            tool_docs,
+            model_maker: is_model_maker_host(&host) && !tool_docs,
+            in_focus: host_in_focus(&host) || mds_types::is_channel_visit_host(&host),
+        })
+    }
+
+    fn host_open(&self, host: &str) -> Result<bool, IndexError> {
+        let bare = bare_host(host);
+        Ok(self.is_volunteer_host(&bare)? || host_keeps_pages(&bare) || self.is_keep_host(&bare)?)
+    }
+
+    fn insert_host(&self, table: &str, host: &str) -> Result<(), IndexError> {
+        let host = bare_host(host);
+        if host.is_empty() {
+            return Ok(());
+        }
+        self.conn.execute(
+            &format!("INSERT OR IGNORE INTO {table} (host) VALUES (?1)"),
+            [host],
+        )?;
+        Ok(())
+    }
+
+    fn delete_host(&self, table: &str, host: &str) -> Result<(), IndexError> {
+        let host = bare_host(host);
+        self.conn.execute(&format!("DELETE FROM {table} WHERE host = ?1"), [host])?;
+        Ok(())
+    }
+
+    fn table_hosts(&self, table: &str) -> Result<Vec<String>, IndexError> {
+        let mut stmt = self.conn.prepare(&format!("SELECT host FROM {table} ORDER BY host"))?;
         let rows = stmt.query_map([], |row| row.get::<_, String>(0))?;
         let mut out = Vec::new();
         for row in rows {
             out.push(row?);
         }
         Ok(out)
+    }
+
+    fn host_in_table(&self, table: &str, host: &str) -> Result<bool, IndexError> {
+        let host = bare_host(host);
+        if host.is_empty() {
+            return Ok(false);
+        }
+        let n: i64 = self.conn.query_row(
+            &format!("SELECT COUNT(*) FROM {table} WHERE host = ?1 OR host = ?2"),
+            params![host, format!("www.{host}")],
+            |row| row.get(0),
+        )?;
+        Ok(n > 0)
     }
 }
 
@@ -2952,6 +3589,21 @@ fn ensure_queue_lease(conn: &Connection) -> Result<(), IndexError> {
     Ok(())
 }
 
+fn ensure_volunteer_version(conn: &Connection) -> Result<(), IndexError> {
+    if table_column_exists(conn, "volunteers", "version")? {
+        return Ok(());
+    }
+    conn.execute(
+        "ALTER TABLE volunteers ADD COLUMN version TEXT NOT NULL DEFAULT ''",
+        [],
+    )
+    .map_err(|source| IndexError::Sqlite {
+        context: "volunteer",
+        source,
+    })?;
+    Ok(())
+}
+
 fn ensure_refresh_columns(conn: &Connection) -> Result<(), IndexError> {
     for (name, ddl) in [
         ("etag", "ALTER TABLE pages ADD COLUMN etag TEXT"),
@@ -3001,13 +3653,25 @@ impl Index {
                 labeled += 1;
                 continue;
             }
+            if is_model_inner(&url) || is_channel_noise(&url) || is_raw_office_text(&title, &text) {
+                self.delete_id(id)?;
+                labeled += 1;
+                continue;
+            }
             let fresh = kind_from_stored(&url, &title, &text);
-            let kind = if is_channel_host(&host) {
-                (stored | KIND_VIDEO | KIND_CHANNEL) & !KIND_NEWS
-            } else if is_press_host(&host) {
+            let kind = if is_press_host(&host) {
                 KIND_NEWS
+            } else if is_channel_host(&host) {
+                fresh
             } else {
-                stored | fresh
+                let mut kind = fresh;
+                if is_image_page(&url) {
+                    kind |= stored & KIND_IMAGE;
+                }
+                if is_video_page(&url) {
+                    kind |= stored & KIND_VIDEO;
+                }
+                kind
             };
             if kind == stored || (stored == 0 && kind == 0) {
                 continue;
@@ -3023,16 +3687,69 @@ impl Index {
         };
         for url in queued {
             let host = host_of_url(&url).unwrap_or_default();
-            if is_press_host(&host) && !is_press_front(&url) {
+            if (is_press_host(&host) && !is_press_front(&url))
+                || is_model_inner(&url)
+                || is_channel_noise(&url)
+                || is_document_url(&url)
+            {
                 self.conn.execute("DELETE FROM crawl_queue WHERE url = ?1", [&url])?;
             }
         }
         Ok(labeled)
     }
 
+    fn harvest_channel_entities(&self) -> Result<usize, IndexError> {
+        let mut stmt = self.conn.prepare("SELECT title, text FROM pages")?;
+        let rows = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))?;
+        let mut urls = Vec::new();
+        let mut seen = HashSet::new();
+        for row in rows {
+            let (title, text) = row?;
+            let blob = format!("{title}\n{text}");
+            let contacts = contacts_in_text(&blob);
+            for link in contacts.messengers.iter().chain(contacts.socials.iter()) {
+                if let Some(entity) = channel_entity_url(link) {
+                    if seen.insert(entity.clone()) {
+                        urls.push(entity);
+                    }
+                }
+            }
+            for token in blob.split_whitespace() {
+                let token = token.trim_matches(|c: char| matches!(c, ',' | ';' | ')' | '(' | '"' | '\''));
+                if let Some(entity) = channel_entity_url(token) {
+                    if seen.insert(entity.clone()) {
+                        urls.push(entity);
+                    }
+                }
+            }
+        }
+        drop(stmt);
+        if let Ok(mut stmt) = self.conn.prepare("SELECT messengers, socials FROM host_contacts") {
+            if let Ok(rows) = stmt.query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))) {
+                for row in rows.flatten() {
+                    let (messengers, socials) = row;
+                    for field in [messengers, socials] {
+                        for part in field.split([',', ' ', '\n']) {
+                            if let Some(entity) = channel_entity_url(part.trim()) {
+                                if seen.insert(entity.clone()) {
+                                    urls.push(entity);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        let n = urls.len();
+        if !urls.is_empty() {
+            self.enqueue_urls(&urls)?;
+        }
+        Ok(n)
+    }
+
     pub fn accepts_more(&self, host: &str) -> Result<bool, IndexError> {
         let bare = bare_host(host);
-        if self.is_volunteer_host(&bare)? {
+        if self.host_open(&bare)? || is_channel_host(&bare) {
             return Ok(true);
         }
         Ok(self.host_pressure(&bare)? < HOST_PAGE_CAP)
@@ -3040,7 +3757,19 @@ impl Index {
 
     pub fn may_store(&self, host: &str, url: &str) -> Result<bool, IndexError> {
         let bare = bare_host(host);
+        if self.is_banned_host(&bare)? {
+            return Ok(false);
+        }
+        if !url_in_focus(url) {
+            return Ok(false);
+        }
+        if is_channel_item(url) {
+            return Ok(false);
+        }
         if is_press_host(&bare) && !is_press_front(url) {
+            return Ok(false);
+        }
+        if is_model_inner(url) {
             return Ok(false);
         }
         if is_marketplace_host(&bare) && is_product_card(url) {
@@ -3054,7 +3783,7 @@ impl Index {
         if exists > 0 {
             return Ok(true);
         }
-        if self.is_volunteer_host(&bare)? {
+        if self.host_open(&bare)? || is_channel_host(&bare) {
             return Ok(true);
         }
         if self.has_picks(&bare)? {
@@ -3163,6 +3892,12 @@ fn init_schema(conn: &Connection) -> Result<(), IndexError> {
         CREATE TABLE IF NOT EXISTS muted_hosts (
             host TEXT PRIMARY KEY
         );
+        CREATE TABLE IF NOT EXISTS keep_hosts (
+            host TEXT PRIMARY KEY
+        );
+        CREATE TABLE IF NOT EXISTS banned_hosts (
+            host TEXT PRIMARY KEY
+        );
         CREATE TABLE IF NOT EXISTS webshops (
             host TEXT PRIMARY KEY
         );
@@ -3226,6 +3961,12 @@ fn init_schema(conn: &Connection) -> Result<(), IndexError> {
             minute TEXT PRIMARY KEY,
             cpu_pct INTEGER NOT NULL,
             ram_pct INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS search_minute (
+            minute TEXT PRIMARY KEY,
+            count INTEGER NOT NULL,
+            avg_ms INTEGER NOT NULL,
+            max_ms INTEGER NOT NULL
         );",
     )
     .map_err(|source| IndexError::Sqlite {
@@ -3278,16 +4019,60 @@ where
 }
 
 pub fn fts_query(query: &str) -> Option<String> {
-    let tokens: Vec<String> = query
-        .split(|c: char| !c.is_alphanumeric())
-        .filter(|token| token.chars().count() >= 2)
-        .map(|token| format!("\"{token}\""))
-        .collect();
+    let tokens = content_tokens(query);
     if tokens.is_empty() {
         None
     } else {
-        Some(tokens.join(" AND "))
+        Some(fts_and(&tokens, false))
     }
+}
+
+fn content_tokens(query: &str) -> Vec<String> {
+    query
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|token| token.chars().count() >= 2)
+        .map(|token| token.to_string())
+        .collect()
+}
+
+fn fts_atom(token: &str) -> String {
+    format!("\"{token}\"")
+}
+
+fn fts_and(tokens: &[String], fold: bool) -> String {
+    tokens
+        .iter()
+        .map(|token| {
+            let other = swap_yo(token);
+            if fold && other != *token {
+                format!("({} OR {})", fts_atom(token), fts_atom(&other))
+            } else {
+                fts_atom(token)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(" AND ")
+}
+
+fn fts_near(tokens: &[String], fold: bool) -> Option<String> {
+    if tokens.len() < 2 {
+        return None;
+    }
+    let mut parts = Vec::new();
+    let mut changed = false;
+    for token in tokens {
+        let swapped = swap_yo(token);
+        if fold && swapped != *token {
+            changed = true;
+            parts.push(fts_atom(&swapped));
+        } else {
+            parts.push(fts_atom(token));
+        }
+    }
+    if fold && !changed {
+        return None;
+    }
+    Some(format!("NEAR({}, 8)", parts.join(" ")))
 }
 
 #[cfg(test)]
@@ -3298,7 +4083,7 @@ mod tests {
     fn page(url: &str, title: &str, text: &str) -> FetchedPage {
         FetchedPage {
             url: url.into(),
-            host: "shop.example".into(),
+            host: "shop.ru".into(),
             title: title.into(),
             text: text.into(),
             simhash: 1,
@@ -3326,7 +4111,7 @@ mod tests {
         index
             .insert(
                 &page(
-                    "https://shop.example/bolt",
+                    "https://shop.ru/bolt",
                     "Крепёж",
                     "Стальной крепёж MDSBOLT42 для каркаса",
                 ),
@@ -3343,17 +4128,40 @@ mod tests {
         assert_eq!(vec_hits.len(), 1);
         let far = index.search_vectors(&vector, Some(6), 10, 0, 0).unwrap();
         assert!(far.is_empty());
+        let mut other = vec![0.0_f32; EMBED_DIMS];
+        other[1] = 1.0;
+        let other_quant = quantize(&other).unwrap();
         index
-            .enqueue_urls(&["https://shop.example/a".into(), "https://shop.example/b".into()])
+            .insert(
+                &page(
+                    "https://shop.ru/other",
+                    "Другое",
+                    "Соседняя страница без крепежа",
+                ),
+                &other_quant,
+                &[3; 16],
+                6,
+            )
+            .unwrap();
+        let all = index.search_vectors(&vector, None, 10, 0, 0).unwrap();
+        assert_eq!(all[0].id, vec_hits[0].id);
+        assert!(all.iter().any(|hit| hit.cosine < 0.2));
+        let rows = index.pages_for_refresh(0, 10).unwrap();
+        assert_eq!(rows.len(), 2);
+        index.put_vector(rows[1].0, &quant, 1).unwrap();
+        let moved = index.search_vectors(&vector, Some(1), 10, 0, 0).unwrap();
+        assert_eq!(moved.len(), 2);
+        index
+            .enqueue_urls(&["https://shop.ru/a".into(), "https://shop.ru/b".into()])
             .unwrap();
         index
-            .mark_visited(&["https://shop.example/a".into()])
+            .mark_visited(&["https://shop.ru/a".into()])
             .unwrap();
         let pending = index.pending_urls(10).unwrap();
-        assert_eq!(pending, vec!["https://shop.example/b".to_string()]);
-        index.enqueue_next(&["https://shop.example/new".into()]).unwrap();
+        assert_eq!(pending, vec!["https://shop.ru/b".to_string()]);
+        index.enqueue_next(&["https://shop.ru/new".into()]).unwrap();
         let pending = index.pending_urls(10).unwrap();
-        assert_eq!(pending[0], "https://shop.example/new");
+        assert_eq!(pending[0], "https://shop.ru/new");
     }
 
     #[test]
@@ -3361,26 +4169,152 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("mds-index-cap-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let index = Index::open(&dir.join("cap.db")).unwrap();
-        let urls: Vec<String> = (0..101).map(|n| format!("https://plant.example/p{n}")).collect();
+        let urls: Vec<String> = (0..101).map(|n| format!("https://plant.ru/p{n}")).collect();
         index.enqueue_urls(&urls).unwrap();
         assert_eq!(index.queue_len().unwrap(), 100);
-        index.remember_volunteer("plant.example").unwrap();
-        index.enqueue_urls(&["https://plant.example/p100".into()]).unwrap();
+        index.remember_volunteer("plant.ru").unwrap();
+        index.enqueue_urls(&["https://plant.ru/p100".into()]).unwrap();
         assert_eq!(index.queue_len().unwrap(), 101);
-        index.note_webshop("shop.example").unwrap();
+        index.note_webshop("shop.ru").unwrap();
         index
             .enqueue_urls(&[
-                "https://shop.example/product/bolt".into(),
-                "https://shop.example/about".into(),
+                "https://shop.ru/product/bolt".into(),
+                "https://shop.ru/about".into(),
                 "https://www.ozon.ru/product/phone".into(),
                 "https://www.ozon.ru/category/phones".into(),
             ])
             .unwrap();
         let pending = index.pending_urls(200).unwrap();
-        assert!(pending.iter().any(|url| url.contains("shop.example/product/")));
+        assert!(pending.iter().any(|url| url.contains("shop.ru/product/")));
         assert!(pending.iter().any(|url| url.ends_with("/about")));
         assert!(pending.iter().any(|url| url.contains("/category/")));
         assert!(!pending.iter().any(|url| url.contains("ozon.ru/product/")));
+    }
+
+    #[test]
+    fn government_and_hive_pages_are_not_capped() {
+        let dir = std::env::temp_dir().join(format!("mds-index-gov-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let index = Index::open(&dir.join("gov.db")).unwrap();
+        let gov: Vec<String> = (0..101).map(|n| format!("https://fas.gov.ru/news/{n}")).collect();
+        index.enqueue_urls(&gov).unwrap();
+        assert_eq!(index.queue_len().unwrap(), 101);
+        let hive: Vec<String> = (0..101).map(|n| format!("https://beesearch.ru/p{n}")).collect();
+        index.enqueue_urls(&hive).unwrap();
+        assert_eq!(index.queue_len().unwrap(), 202);
+        let plant: Vec<String> = (0..101).map(|n| format!("https://plant.ru/p{n}")).collect();
+        index.enqueue_urls(&plant).unwrap();
+        assert_eq!(index.queue_len().unwrap(), 302);
+        let docs: Vec<String> = (0..101).map(|n| format!("https://docs.openclaw.ai/plugins/{n}")).collect();
+        index.enqueue_urls(&docs).unwrap();
+        assert_eq!(index.queue_len().unwrap(), 403);
+        let claude: Vec<String> = (0..101).map(|n| format!("https://docs.anthropic.com/en/api/{n}")).collect();
+        index.enqueue_urls(&claude).unwrap();
+        assert_eq!(index.queue_len().unwrap(), 504);
+        index
+            .enqueue_urls(&["https://chatgpt.com/c/secret".into(), "https://developers.sber.ru/docs/ru/gigachat/api/main".into()])
+            .unwrap();
+        let pending = index.pending_urls(600).unwrap();
+        assert!(!pending.iter().any(|url| url.contains("chatgpt.com/c/")));
+        assert!(pending.iter().any(|url| url.contains("developers.sber.ru")));
+    }
+
+    #[test]
+    fn channel_entities_skip_the_host_cap_and_items_stay_out() {
+        let dir = std::env::temp_dir().join(format!("mds-index-ch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let index = Index::open(&dir.join("ch.db")).unwrap();
+        let urls: Vec<String> = (0..101).map(|n| format!("https://max.ru/channel{n}")).collect();
+        index.enqueue_urls(&urls).unwrap();
+        assert_eq!(index.queue_len().unwrap(), 101);
+        index
+            .enqueue_urls(&[
+                "https://t.me/clinic_msk".into(),
+                "https://t.me/c/1".into(),
+                "https://rutube.ru/video/abc".into(),
+                "https://rutube.ru/u/stident/".into(),
+                "https://max.ru/".into(),
+            ])
+            .unwrap();
+        let pending = index.pending_urls(300).unwrap();
+        assert!(pending.iter().any(|url| url.contains("t.me/clinic_msk")));
+        assert!(!pending.iter().any(|url| url.contains("t.me/c/")));
+        assert!(!pending.iter().any(|url| url.contains("/video/")));
+        assert!(pending.iter().any(|url| url.contains("rutube.ru/u/stident")));
+        assert!(!pending.iter().any(|url| url == "https://max.ru" || url.ends_with("://max.ru/")));
+    }
+
+    #[test]
+    fn kind_pass_drops_channel_items_and_harvests_entities() {
+        let dir = std::env::temp_dir().join(format!("mds-index-ch2-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = dir.join("ch2.db");
+        let mut index = Index::open(&db).unwrap();
+        let mut vector = vec![0.0_f32; EMBED_DIMS];
+        vector[0] = 1.0;
+        let quant = quantize(&vector).unwrap();
+        let hash = [0_u8; 16];
+        let mut video = page(
+            "https://rutube.ru/video/abc/",
+            "ролик",
+            "смотреть видео",
+        );
+        video.host = "rutube.ru".into();
+        let mut chan = page(
+            "https://rutube.ru/u/stident/",
+            "S.T.I. Dent",
+            "канал стоматологической практики",
+        );
+        chan.host = "rutube.ru".into();
+        let mut site = page(
+            "https://klinika.ru/",
+            "Клиника",
+            "Пишите https://t.me/clinic_msk и https://max.ru/clinic_bot",
+        );
+        site.host = "klinika.ru".into();
+        index.insert(&video, &quant, &hash, 0).unwrap();
+        index.insert(&chan, &quant, &hash, 0).unwrap();
+        index.insert(&site, &quant, &hash, 0).unwrap();
+        index.meta_set("kind_pass", "130").unwrap();
+        drop(index);
+        let index = Index::open(&db).unwrap();
+        assert_eq!(index.len().unwrap(), 2);
+        let pending = index.pending_urls(20).unwrap();
+        assert!(pending.iter().any(|url| url.contains("t.me/clinic_msk")));
+        assert!(pending.iter().any(|url| url.contains("max.ru/clinic_bot")));
+        assert!(!pending.iter().any(|url| url.contains("/video/")));
+    }
+
+    #[test]
+    fn operator_keep_lifts_the_cap_and_ban_skips_the_queue() {
+        let dir = std::env::temp_dir().join(format!("mds-index-lists-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let index = Index::open(&dir.join("lists.db")).unwrap();
+        index.keep_host("plant.ru").unwrap();
+        let plant: Vec<String> = (0..101).map(|n| format!("https://plant.ru/p{n}")).collect();
+        index.enqueue_urls(&plant).unwrap();
+        assert_eq!(index.queue_len().unwrap(), 101);
+        index.ban_host("spam.ru").unwrap();
+        index
+            .enqueue_urls(&["https://spam.ru/a".into(), "https://plant.ru/p102".into()])
+            .unwrap();
+        let pending = index.pending_urls(200).unwrap();
+        assert!(!pending.iter().any(|url| url.contains("spam.ru")));
+        assert!(pending.iter().any(|url| url.ends_with("/p102")));
+        let kept = index.inspect_host("https://www.plant.ru/a").unwrap();
+        assert_eq!(kept.host, "plant.ru");
+        assert!(kept.keep);
+        assert!(kept.queued >= 101);
+        assert_eq!(kept.rule(), "без потолка");
+        let banned = index.inspect_host("spam.ru").unwrap();
+        assert!(banned.banned);
+        assert_eq!(banned.rule(), "не обходить");
+        let docs = index.inspect_host("docs.coze.com").unwrap();
+        assert!(docs.tool_docs);
+        assert_eq!(docs.rule(), "без потолка");
+        let maker = index.inspect_host("openai.com").unwrap();
+        assert!(maker.model_maker);
+        assert_eq!(maker.rule(), "только главная");
     }
 
     #[test]
@@ -3388,14 +4322,14 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("mds-index-picks-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let index = Index::open(&dir.join("picks.db")).unwrap();
-        index.enqueue_urls(&["https://zavod.example/random".into()]).unwrap();
+        index.enqueue_urls(&["https://zavod.ru/random".into()]).unwrap();
         index
-            .set_priority("www.zavod.example", &["https://zavod.example/keep".into()])
+            .set_priority("www.zavod.ru", &["https://zavod.ru/keep".into()])
             .unwrap();
         let pending = index.pending_urls(20).unwrap();
         assert!(pending.iter().any(|url| url.ends_with("/keep")));
         assert!(!pending.iter().any(|url| url.ends_with("/random")));
-        index.enqueue_urls(&["https://zavod.example/other".into()]).unwrap();
+        index.enqueue_urls(&["https://zavod.ru/other".into()]).unwrap();
         let pending = index.pending_urls(20).unwrap();
         assert!(!pending.iter().any(|url| url.ends_with("/other")));
     }
@@ -3435,6 +4369,10 @@ mod tests {
         let today = index.visit_span("day").unwrap();
         assert_eq!(today.visits, 2);
         assert_eq!(today.searches, 1);
+        let (day, week, month) = index.visit_windows().unwrap();
+        assert_eq!(day.len(), 10);
+        assert!(week <= day);
+        assert!(month <= day);
     }
 
     #[test]
@@ -3480,6 +4418,13 @@ mod tests {
         assert_eq!(index.shell_ceiling().unwrap(), ShellCeiling { max_batch: 8, min_gap: 1 });
         index.note_load(10, 40).unwrap();
         index.note_load(30, 60).unwrap();
+        index.note_search_pace(120).unwrap();
+        index.note_search_pace(400).unwrap();
+        let pace = index.search_pace(5).unwrap();
+        assert_eq!(pace.len(), 1);
+        assert_eq!(pace[0].count, 2);
+        assert_eq!(pace[0].max_ms, 400);
+        assert_eq!(index.search_peak_ms(3).unwrap(), 400);
         let load = index.load_hours(2).unwrap();
         assert_eq!(load.len(), 1);
         assert_eq!(load[0].cpu_pct, 20);
@@ -3513,7 +4458,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let index = Index::open(&dir.join("lease.db")).unwrap();
         index
-            .enqueue_urls(&["https://one.example/a".into(), "https://two.example/b".into()])
+            .enqueue_urls(&["https://one.ru/a".into(), "https://two.ru/b".into()])
             .unwrap();
         let first = index.claim_urls(1, 600).unwrap();
         let second = index.claim_urls(1, 600).unwrap();
@@ -3525,6 +4470,50 @@ mod tests {
         index.enqueue_next(&first).unwrap();
         let again = index.claim_urls(1, 600).unwrap();
         assert_eq!(again, first);
+    }
+
+    #[test]
+    fn claim_takes_two_from_a_giant_and_lets_small_hosts_in() {
+        let dir = std::env::temp_dir().join(format!("mds-index-fair-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let index = Index::open(&dir.join("fair.db")).unwrap();
+        let mut urls = Vec::new();
+        for i in 0..20 {
+            urls.push(format!("https://giant.ru/{i}"));
+        }
+        for i in 0..8 {
+            urls.push(format!("https://plant{i}.ru/about"));
+        }
+        index.enqueue_urls(&urls).unwrap();
+        let claimed = index.claim_urls(8, 600).unwrap();
+        assert_eq!(claimed.len(), 8);
+        let giant = claimed.iter().filter(|url| url.contains("giant.ru")).count();
+        assert_eq!(giant, 2);
+        let plants = claimed.iter().filter(|url| url.contains("plant")).count();
+        assert_eq!(plants, 6);
+    }
+
+    #[test]
+    fn model_chat_stays_out_of_the_queue() {
+        let dir = std::env::temp_dir().join(format!("mds-index-model-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let index = Index::open(&dir.join("model.db")).unwrap();
+        index
+            .enqueue_urls(&[
+                "https://chatgpt.com/".into(),
+                "https://chatgpt.com/c/abc".into(),
+                "https://chatgpt.com/?hints=search&q=Read%20from%20https://docs.openclaw.ai/index.md".into(),
+                "https://claude.ai/chat/1".into(),
+                "https://claude.ai/new?q=Read%20from%20https://docs.openclaw.ai/index.md".into(),
+            ])
+            .unwrap();
+        let pending = index.pending_urls(10).unwrap();
+        assert_eq!(pending, vec!["https://chatgpt.com/".to_string()]);
+        index.remember_volunteer_version("dartalab.ru", "0.1.1").unwrap();
+        let row = &index.volunteer_seen().unwrap()[0];
+        assert_eq!(row.host, "dartalab.ru");
+        assert_eq!(row.version, "0.1.1");
+        assert!(row.seen_at > 0);
     }
 
     #[test]
@@ -3568,25 +4557,25 @@ mod tests {
         let mut vector = vec![0.0_f32; EMBED_DIMS];
         vector[0] = 1.0;
         let quant = quantize(&vector).unwrap();
-        let mut known = page("https://good.example/", "Известный", "Уже лежит в индексе");
-        known.host = "good.example".into();
+        let mut known = page("https://good.ru/", "Известный", "Уже лежит в индексе");
+        known.host = "good.ru".into();
         index.insert(&known, &quant, &[2; 16], 1).unwrap();
         index
-            .enqueue_urls(&["https://good.example/next".into(), "https://cold.example/a".into()])
+            .enqueue_urls(&["https://good.ru/next".into(), "https://cold.ru/a".into()])
             .unwrap();
-        index.note_host_quiet("mute.example").unwrap();
-        index.enqueue_urls(&["https://mute.example/z".into()]).unwrap();
-        index.enqueue_next(&["https://now.example/top".into()]).unwrap();
+        index.note_host_quiet("mute.ru").unwrap();
+        index.enqueue_urls(&["https://mute.ru/z".into()]).unwrap();
+        index.enqueue_next(&["https://now.ru/top".into()]).unwrap();
         let urls = index.claim_urls(3, 600).unwrap();
         assert_eq!(
             urls,
             vec![
-                "https://now.example/top".to_string(),
-                "https://good.example/next".to_string(),
-                "https://cold.example/a".to_string(),
+                "https://now.ru/top".to_string(),
+                "https://good.ru/next".to_string(),
+                "https://cold.ru/a".to_string(),
             ]
         );
-        assert_eq!(index.pending_urls(10).unwrap(), vec!["https://mute.example/z".to_string()]);
+        assert_eq!(index.pending_urls(10).unwrap(), vec!["https://mute.ru/z".to_string()]);
     }
 
     #[test]
@@ -3597,8 +4586,8 @@ mod tests {
         let mut vector = vec![0.0_f32; EMBED_DIMS];
         vector[0] = 1.0;
         let quant = quantize(&vector).unwrap();
-        let stored = page("https://shop.example/jar", "Банка", "Стеклянная тара с пасеки");
-        index.remember_anchor("https://shop.example/jar", "мёд").unwrap();
+        let stored = page("https://shop.ru/jar", "Банка", "Стеклянная тара с пасеки");
+        index.remember_anchor("https://shop.ru/jar", "мёд").unwrap();
         index.insert(&stored, &quant, &[4; 16], 1).unwrap();
         let hits = index.search_words("мёд", 10, 0, 0).unwrap();
         assert_eq!(hits.len(), 1);
@@ -3657,10 +4646,96 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("mds-index-ahead-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let index = Index::open(&dir.join("ahead.db")).unwrap();
-        index.enqueue_urls(&["https://old.example/a".into()]).unwrap();
-        index.enqueue_urls(&["https://new.example/b".into()]).unwrap();
-        index.pull_ahead(&["https://new.example/b".into()]).unwrap();
+        index.enqueue_urls(&["https://old.ru/a".into()]).unwrap();
+        index.enqueue_urls(&["https://new.ru/b".into()]).unwrap();
+        index.pull_ahead(&["https://new.ru/b".into()]).unwrap();
         let pending = index.pending_urls(2).unwrap();
-        assert_eq!(pending[0], "https://new.example/b");
+        assert_eq!(pending[0], "https://new.ru/b");
+    }
+
+    #[test]
+    fn a_nearby_phrase_outranks_the_same_words_apart_and_the_yo_spelling() {
+        let dir = std::env::temp_dir().join(format!("mds-index-phrase-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut index = Index::open(&dir.join("phrase.db")).unwrap();
+        let mut vector = vec![0.0_f32; EMBED_DIMS];
+        vector[0] = 1.0;
+        let quant = quantize(&vector).unwrap();
+        let near = page("https://paseka.ru/honey", "Липовый мёд", "Липовый мёд с пасеки в Лотошине");
+        let swapped = page("https://paseka.ru/med", "Липовый мед", "В продаже липовый мед оптом");
+        let far = page(
+            "https://paseka.ru/far",
+            "Каталог",
+            &format!("Липовый {} мёд", "раздел ".repeat(20)),
+        );
+        index.insert(&near, &quant, &[3; 16], 1).unwrap();
+        index.insert(&swapped, &quant, &[3; 16], 1).unwrap();
+        index.insert(&far, &quant, &[3; 16], 1).unwrap();
+        let hits = index.search_words("мёд липовый", 10, 0, 0).unwrap();
+        assert_eq!(hits.len(), 3);
+        assert_eq!(hits[0].id, index_id(&index, "https://paseka.ru/honey"));
+        assert_eq!(hits[1].id, index_id(&index, "https://paseka.ru/med"));
+        assert_eq!(hits[2].id, index_id(&index, "https://paseka.ru/far"));
+    }
+
+    #[test]
+    fn focus_drops_foreign_pages_and_keeps_a_model_maker() {
+        let dir = std::env::temp_dir().join(format!("mds-index-focus-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut index = Index::open(&dir.join("focus.db")).unwrap();
+        let mut vector = vec![0.0_f32; EMBED_DIMS];
+        vector[0] = 1.0;
+        let quant = quantize(&vector).unwrap();
+        let mut docs = page("https://docs.example.co.uk/readme", "Git", "Developer documentation");
+        docs.host = "docs.example.co.uk".into();
+        let mut maker = page("https://openai.com/api", "API", "Модель и сервис");
+        maker.host = "openai.com".into();
+        let mut local = page("https://paseka.ru/", "Пасека", "Мёд");
+        local.host = "paseka.ru".into();
+        index.insert(&docs, &quant, &[3; 16], 1).unwrap();
+        index.insert(&maker, &quant, &[3; 16], 1).unwrap();
+        index.insert(&local, &quant, &[3; 16], 1).unwrap();
+        index
+            .conn
+            .execute(
+                "INSERT INTO crawl_queue (url, visited, added_at, worth) VALUES ('https://docs.example.co.uk/a', 0, 1, 0)",
+                [],
+            )
+            .unwrap();
+        index
+            .conn
+            .execute(
+                "INSERT INTO crawl_queue (url, visited, added_at, worth) VALUES ('https://paseka.ru/a', 0, 1, 0)",
+                [],
+            )
+            .unwrap();
+        let swept = index.sweep_focus().unwrap();
+        assert_eq!(swept.dropped, 1);
+        assert_eq!(index.len().unwrap(), 2);
+        assert!(index.search_words("Developer", 10, 0, 0).unwrap().is_empty());
+        assert_eq!(index.pending_urls(10).unwrap(), vec!["https://paseka.ru/a".to_string()]);
+    }
+
+    fn index_id(index: &Index, url: &str) -> i64 {
+        index
+            .conn
+            .query_row("SELECT id FROM pages WHERE url = ?1", [url], |row| row.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn a_long_queue_does_not_grow() {
+        assert!(queue_may_grow_len(0));
+        assert!(queue_may_grow_len(49_999));
+        assert!(!queue_may_grow_len(50_000));
+        assert!(!queue_may_grow_len(725_000));
+    }
+
+    #[test]
+    fn an_empty_index_may_grow_the_queue() {
+        let dir = std::env::temp_dir().join(format!("mds-index-grow-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let index = Index::open(&dir.join("grow.db")).unwrap();
+        assert!(index.queue_may_grow().unwrap());
     }
 }

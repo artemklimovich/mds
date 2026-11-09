@@ -296,6 +296,7 @@ pub fn classify_contact_url(raw: &str) -> Option<(bool, String)> {
             }
             None
         }
+        "max.ru" => crate::kind::channel_entity_url(trimmed).map(|url| (true, url)),
         _ => None,
     }
 }
@@ -423,6 +424,8 @@ mod tests {
             vec!["https://t.me/zavod_stroy", "https://wa.me/79991234567"]
         );
         assert_eq!(c.socials, vec!["https://vk.com/zavod_stroy"]);
+        let max = contacts_in_text("Пишите https://max.ru/zavod_stroy");
+        assert_eq!(max.messengers, vec!["https://max.ru/zavod_stroy"]);
     }
 
     #[test]

@@ -41,7 +41,18 @@ fn tools() -> Value {
         { "name": "kind_counts", "description": "Все метки системы (публичные и скрытые) и число страниц по каждой метке", "inputSchema": { "type": "object" } },
         { "name": "node_status", "description": "Состояние этой ноды", "inputSchema": { "type": "object" } },
         { "name": "visit_stats", "description": "Заходы, время, отказы и ошибки поиска без адресов людей", "inputSchema": { "type": "object" } },
-        { "name": "network_map", "description": "Подписанная карта сети", "inputSchema": { "type": "object" } }
+        { "name": "network_map", "description": "Подписанная карта сети", "inputSchema": { "type": "object" } },
+        { "name": "host_inspect", "description": "Проверка домена на этой ноде: какое правило, есть ли бан/скрытие/потолок, сколько страниц в индексе и в очереди.", "inputSchema": { "type": "object", "properties": { "host": { "type": "string" } }, "required": ["host"] } },
+        { "name": "node_lists", "description": "Списки этой ноды: без потолка, не обходить, скрыть из выдачи, справка моделей и SDK из кода, темп обхода и пчёл.", "inputSchema": { "type": "object" } },
+        { "name": "keep_host", "description": "Снять потолок в сто страниц для сайта на этой ноде. Правилом продукта не становится.", "inputSchema": { "type": "object", "properties": { "host": { "type": "string" } }, "required": ["host"] } },
+        { "name": "unkeep_host", "description": "Вернуть потолок в сто страниц, если нет пчелы и сайт не орган власти и не справка.", "inputSchema": { "type": "object", "properties": { "host": { "type": "string" } }, "required": ["host"] } },
+        { "name": "ban_host", "description": "Не обходить сайт. Очередь по нему закрывается. Страницы в базе остаются.", "inputSchema": { "type": "object", "properties": { "host": { "type": "string" } }, "required": ["host"] } },
+        { "name": "unban_host", "description": "Снова обходить сайт.", "inputSchema": { "type": "object", "properties": { "host": { "type": "string" } }, "required": ["host"] } },
+        { "name": "mute_host", "description": "Скрыть сайт из выдачи этой ноды. Другие ульи список не видят.", "inputSchema": { "type": "object", "properties": { "host": { "type": "string" } }, "required": ["host"] } },
+        { "name": "unmute_host", "description": "Вернуть сайт в выдачу этой ноды.", "inputSchema": { "type": "object", "properties": { "host": { "type": "string" } }, "required": ["host"] } },
+        { "name": "enqueue_url", "description": "Поставить один адрес в очередь этой ноды. Потолок не снимает. Правила фокуса и бана те же, что у обхода.", "inputSchema": { "type": "object", "properties": { "url": { "type": "string" } }, "required": ["url"] } },
+        { "name": "set_crawl_pace", "description": "Скорость обхода улья: batch 1–24, gap_secs 2–300. Следующий заход уже с этими числами.", "inputSchema": { "type": "object", "properties": { "batch": { "type": "integer" }, "gap_secs": { "type": "integer" } } } },
+        { "name": "set_bee_pace", "description": "Скорость выдачи чужих адресов пчёлам: batch 1–24, gap_secs 60–3600.", "inputSchema": { "type": "object", "properties": { "batch": { "type": "integer" }, "gap_secs": { "type": "integer" } } } }
     ])
 }
 
@@ -269,20 +280,132 @@ fn call(engine: &mut Engine, map: Option<&mds_wire::NetworkMap>, params: &Value)
             .to_string())
         }
         "node_status" => {
-            let (searches, avg_ms) = engine.load_snapshot();
+            let (searches, avg_ms, max_ms) = engine.load_snapshot();
             Ok(json!({
                 "pages": engine.len().unwrap_or(0),
                 "queue": engine.queue_len().unwrap_or(0),
+                "queue_grows": engine.queue_may_grow().unwrap_or(false),
+                "queue_grow_cap": mds_index::QUEUE_GROW_CAP,
                 "db_bytes": engine.db_bytes(),
                 "searches_per_minute": searches,
                 "avg_ms": avg_ms,
+                "max_ms": max_ms,
+                "hour_peak_ms": engine.search_peak_ms(3).unwrap_or(0),
                 "version": mds_update::VERSION
             })
             .to_string())
         }
         "network_map" => Ok(serde_json::to_string(&map).unwrap_or_else(|_| "null".into())),
+        "host_inspect" => {
+            let host = host_arg(&args)?;
+            let card = engine.inspect_host(&host).map_err(|err| err.to_string())?;
+            Ok(inspect_json(&card).to_string())
+        }
+        "node_lists" => {
+            let keep = engine.keep_hosts().map_err(|err| err.to_string())?;
+            let banned = engine.banned_hosts().map_err(|err| err.to_string())?;
+            let muted = engine.muted_hosts().map_err(|err| err.to_string())?;
+            let crawl = engine.crawl_pace().map_err(|err| err.to_string())?;
+            let bees = engine.bee_pace().map_err(|err| err.to_string())?;
+            Ok(json!({
+                "keep": keep,
+                "banned": banned,
+                "muted": muted,
+                "docs": mds_types::tool_docs_hosts(),
+                "makers": mds_types::model_maker_hosts(),
+                "crawl": { "batch": crawl.batch, "gap_secs": crawl.gap_secs },
+                "queue_grows": engine.queue_may_grow().unwrap_or(false),
+                "queue_grow_cap": mds_index::QUEUE_GROW_CAP,
+                "bees": { "batch": bees.batch, "gap_secs": bees.gap_secs }
+            })
+            .to_string())
+        }
+        "keep_host" => host_write(engine, &args, |engine, host| engine.keep_host(host)),
+        "unkeep_host" => host_write(engine, &args, |engine, host| engine.unkeep_host(host)),
+        "ban_host" => host_write(engine, &args, |engine, host| engine.ban_host(host)),
+        "unban_host" => host_write(engine, &args, |engine, host| engine.unban_host(host)),
+        "mute_host" => host_write(engine, &args, |engine, host| engine.mute_host(host)),
+        "unmute_host" => host_write(engine, &args, |engine, host| engine.unmute_host(host)),
+        "enqueue_url" => {
+            let url = args.get("url").and_then(|value| value.as_str()).unwrap_or("").trim();
+            if url.is_empty() || url.len() > 500 {
+                return Err("нужен url не длиннее 500 знаков".into());
+            }
+            if !(url.starts_with("https://") || url.starts_with("http://")) {
+                return Err("url должен начинаться с https:// или http://".into());
+            }
+            engine
+                .enqueue_next(&[url.to_string()])
+                .map_err(|err| err.to_string())?;
+            Ok(json!({ "queued": url }).to_string())
+        }
+        "set_crawl_pace" => {
+            let batch = int_arg(&args, "batch", 4);
+            let gap = int_arg(&args, "gap_secs", int_arg(&args, "gap", 10));
+            engine.set_crawl_pace(batch, gap).map_err(|err| err.to_string())?;
+            let pace = engine.crawl_pace().map_err(|err| err.to_string())?;
+            Ok(json!({ "batch": pace.batch, "gap_secs": pace.gap_secs }).to_string())
+        }
+        "set_bee_pace" => {
+            let batch = int_arg(&args, "batch", 4);
+            let gap = int_arg(&args, "gap_secs", int_arg(&args, "gap", 600));
+            engine.set_bee_pace(batch, gap).map_err(|err| err.to_string())?;
+            let pace = engine.bee_pace().map_err(|err| err.to_string())?;
+            Ok(json!({ "batch": pace.batch, "gap_secs": pace.gap_secs }).to_string())
+        }
         _ => Err("инструмент не известен".into()),
     }
+}
+
+fn host_arg(args: &Value) -> Result<String, String> {
+    let raw = args.get("host").and_then(|value| value.as_str()).unwrap_or("").trim();
+    if raw.is_empty() {
+        return Err("нужен host".into());
+    }
+    let host = if let Some(host) = mds_types::host_of_url(raw) {
+        mds_types::bare_host(&host)
+    } else {
+        mds_types::bare_host(raw.split(['/', '?', '#']).next().unwrap_or(""))
+    };
+    if host.is_empty() || !host.contains('.') {
+        return Err("нужен адрес сайта, например example.ru".into());
+    }
+    Ok(host)
+}
+
+fn int_arg(args: &Value, name: &str, fallback: i64) -> i64 {
+    args.get(name)
+        .and_then(|value| value.as_i64().or_else(|| value.as_u64().map(|n| n as i64)))
+        .unwrap_or(fallback)
+}
+
+fn inspect_json(card: &mds_index::HostInspect) -> Value {
+    json!({
+        "host": card.host,
+        "pages": card.pages,
+        "queued": card.queued,
+        "banned": card.banned,
+        "muted": card.muted,
+        "keep": card.keep,
+        "volunteer": card.volunteer,
+        "government": card.government,
+        "hive": card.hive,
+        "tool_docs": card.tool_docs,
+        "model_maker": card.model_maker,
+        "in_focus": card.in_focus,
+        "rule": card.rule()
+    })
+}
+
+fn host_write(
+    engine: &mut Engine,
+    args: &Value,
+    op: impl FnOnce(&mut Engine, &str) -> Result<(), crate::NodeError>,
+) -> Result<String, String> {
+    let host = host_arg(args)?;
+    op(engine, &host).map_err(|err| err.to_string())?;
+    let card = engine.inspect_host(&host).map_err(|err| err.to_string())?;
+    Ok(inspect_json(&card).to_string())
 }
 
 fn visit_json(report: mds_index::VisitReport) -> Value {
@@ -301,4 +424,39 @@ fn visit_json(report: mds_index::VisitReport) -> Value {
 
 fn rpc_error(id: Option<Value>, code: i32, message: &str) -> String {
     json!({ "jsonrpc": "2.0", "id": id, "error": { "code": code, "message": message } }).to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tools_list_has_inspect_and_write_methods() {
+        let list = tools().to_string();
+        for name in [
+            "host_inspect",
+            "node_lists",
+            "keep_host",
+            "unkeep_host",
+            "ban_host",
+            "unban_host",
+            "mute_host",
+            "unmute_host",
+            "enqueue_url",
+            "set_crawl_pace",
+            "set_bee_pace",
+        ] {
+            assert!(list.contains(name), "нет {name}");
+        }
+    }
+
+    #[test]
+    fn host_arg_takes_url_or_bare_domain() {
+        assert_eq!(
+            host_arg(&json!({ "host": "https://www.Plant.ru/page" })).unwrap(),
+            "plant.ru"
+        );
+        assert_eq!(host_arg(&json!({ "host": "docs.coze.com" })).unwrap(), "docs.coze.com");
+        assert!(host_arg(&json!({ "host": "нет" })).is_err());
+    }
 }

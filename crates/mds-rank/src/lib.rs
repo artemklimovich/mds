@@ -67,6 +67,7 @@ struct Fused {
     score: f32,
     via_words: bool,
     via_meaning: bool,
+    phrase: bool,
 }
 
 /// Оставляет одну ссылку из почти одинакового текста. Сначала страница сайта с пчелой, иначе та, что выше по счёту.
@@ -189,6 +190,7 @@ pub fn fuse(query: &str, words: &[WordMatch], vectors: &[VectorMatch], pages: &[
             score: 0.0,
             via_words: false,
             via_meaning: false,
+            phrase: false,
         });
         entry.score += 1.0 / (RRF_K + hit.rank as f32);
         entry.via_words = true;
@@ -233,14 +235,17 @@ pub fn fuse(query: &str, words: &[WordMatch], vectors: &[VectorMatch], pages: &[
             score: 0.0,
             via_words: false,
             via_meaning: false,
+            phrase: false,
         });
         entry.score += 1.0 / (RRF_K + hit.rank as f32);
         entry.via_meaning = true;
     }
 
+    let tokens = query_tokens(query);
     let mut ranked: Vec<Fused> = scores.into_values().collect();
     for item in &mut ranked {
         if let Some(page) = pages.iter().find(|page| page.id == item.id) {
+            item.phrase = stands_together(page, &tokens);
             if commercial && is_marketplace(&page.host) {
                 item.score *= 0.5;
             }
@@ -249,7 +254,12 @@ pub fn fuse(query: &str, words: &[WordMatch], vectors: &[VectorMatch], pages: &[
             }
         }
     }
-    ranked.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+    ranked.sort_by(|a, b| {
+        b.phrase
+            .cmp(&a.phrase)
+            .then(b.via_words.cmp(&a.via_words))
+            .then(b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal))
+    });
     ranked
         .into_iter()
         .filter_map(|item| {
@@ -280,6 +290,49 @@ pub fn fuse(query: &str, words: &[WordMatch], vectors: &[VectorMatch], pages: &[
             })
         })
         .collect()
+}
+
+fn query_tokens(query: &str) -> Vec<String> {
+    query
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|token| token.chars().count() >= 2)
+        .map(|token| token.to_string())
+        .collect()
+}
+
+fn stands_together(page: &PageRow, tokens: &[String]) -> bool {
+    if tokens.len() < 2 {
+        return false;
+    }
+    let words: Vec<String> = format!("{} {}", page.title, page.text)
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|word| !word.is_empty())
+        .map(|word| word.to_string())
+        .collect();
+    let span = tokens.len() + 6;
+    for start in 0..words.len() {
+        let mut cursor = start;
+        let mut matched = true;
+        for token in tokens {
+            let alt = mds_types::swap_yo(token);
+            let Some(pos) = words[cursor..].iter().position(|word| word == token || word == &alt) else {
+                matched = false;
+                break;
+            };
+            let at = cursor + pos;
+            if at >= start + span {
+                matched = false;
+                break;
+            }
+            cursor = at + 1;
+        }
+        if matched {
+            return true;
+        }
+    }
+    false
 }
 
 fn query_subject_stems(query: &str) -> Vec<String> {
@@ -505,6 +558,41 @@ mod tests {
         let hits = vec![hit_of(&honey, 3.0), hit_of(&about, 2.0)];
         let left = drop_near_copies(hits, &[honey, about], &[]);
         assert_eq!(left.len(), 2);
+    }
+
+    #[test]
+    fn phrase_stays_above_a_meaning_neighbor() {
+        let mut phrase = page(1, "paseka.ru");
+        phrase.title = "Липовый мёд".into();
+        phrase.text = "Липовый мёд с пасеки в Лотошине".into();
+        let mut neighbor = page(2, "moex.com");
+        neighbor.title = "Индексы".into();
+        neighbor.text = "Биржевые индексы и торговля".into();
+        let words = vec![WordMatch { id: 1, rank: 8 }];
+        let vectors = vec![VectorMatch {
+            id: 2,
+            rank: 1,
+            cosine: 0.91,
+        }];
+        let hits = fuse("мёд липовый", &words, &vectors, &[phrase, neighbor]);
+        assert_eq!(hits[0].url, "https://paseka.ru/item");
+    }
+
+    #[test]
+    fn a_word_hit_stays_above_meaning_only() {
+        let mut clinic = page(1, "clinic.ru");
+        clinic.text = "Ветклиника принимает кошек по записи".into();
+        let mut diet = page(2, "diet.ru");
+        diet.text = "Диета и калории на неделю".into();
+        let words = vec![WordMatch { id: 1, rank: 4 }];
+        let vectors = vec![VectorMatch {
+            id: 2,
+            rank: 1,
+            cosine: 0.9,
+        }];
+        let hits = fuse("как лечить собаку", &words, &vectors, &[clinic, diet]);
+        assert_eq!(hits[0].url, "https://clinic.ru/item");
+        assert_eq!(hits[1].url, "https://diet.ru/item");
     }
 
     #[test]

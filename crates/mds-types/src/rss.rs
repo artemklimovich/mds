@@ -1,21 +1,30 @@
-/// Заголовки из RSS 2.0. Лента в индекс не пишется: это разбор текста, который уже прочитан.
+/// Заголовки из RSS 2.0 или Atom. Лента в индекс не пишется: это разбор текста, который уже прочитан.
 pub fn rss_headlines(xml: &str, limit: usize) -> Vec<(String, String)> {
+    let mut out = collect_blocks(xml, "item", "</item>", limit);
+    if out.is_empty() {
+        out = collect_blocks(xml, "entry", "</entry>", limit);
+    }
+    out
+}
+
+fn collect_blocks(xml: &str, open: &str, close: &str, limit: usize) -> Vec<(String, String)> {
     let mut out = Vec::new();
     if limit == 0 {
         return out;
     }
     let lower = xml.to_ascii_lowercase();
+    let needle = format!("<{open}");
     let mut from = 0;
     while out.len() < limit {
-        let Some(rel) = lower[from..].find("<item") else {
+        let Some(rel) = lower[from..].find(&needle) else {
             break;
         };
         let start = from + rel;
-        let Some(end_rel) = lower[start..].find("</item>") else {
+        let Some(end_rel) = lower[start..].find(close) else {
             break;
         };
         let block = &xml[start..start + end_rel];
-        from = start + end_rel + "</item>".len();
+        from = start + end_rel + close.len();
         let title = tag_text(block, "title");
         let link = item_link(block);
         if title.is_empty() || !(link.starts_with("https://") || link.starts_with("http://")) {
@@ -162,5 +171,17 @@ mod tests {
         assert_eq!(lines[0].0, "Мёд & пасека");
         assert_eq!(lines[0].1, "https://example.ru/news/1");
         assert_eq!(lines[1].1, "https://example.ru/news/2");
+    }
+
+    #[test]
+    fn atom_entries_are_headlines_too() {
+        let xml = r#"<?xml version="1.0"?><feed xmlns="http://www.w3.org/2005/Atom">
+        <title>Новости</title>
+        <entry><title>Слушание</title><link href="https://fas.gov.ru/news/1"/></entry>
+        </feed>"#;
+        let lines = rss_headlines(xml, 8);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].0, "Слушание");
+        assert_eq!(lines[0].1, "https://fas.gov.ru/news/1");
     }
 }

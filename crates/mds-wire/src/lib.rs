@@ -97,6 +97,8 @@ pub struct PeerHello {
     pub queue: u32,
     #[serde(default)]
     pub site: String,
+    #[serde(default)]
+    pub version: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -107,6 +109,8 @@ pub struct PeerStatus {
     pub holds_all: bool,
     pub searches_per_minute: u64,
     pub avg_ms: u64,
+    #[serde(default)]
+    pub max_ms: u64,
     pub db_bytes: u64,
     #[serde(default)]
     pub region: String,
@@ -122,6 +126,9 @@ pub struct CrawlWork {
     /// Сколько секунд приложению ждать до следующего захода. Старые приложения поле пропускают.
     #[serde(default)]
     pub pause_secs: u64,
+    /// Короткая причина пустой выдачи. Старые приложения поле пропускают.
+    #[serde(default)]
+    pub note: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

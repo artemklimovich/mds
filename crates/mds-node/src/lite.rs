@@ -266,6 +266,7 @@ async fn work_foreign(client: &reqwest::Client, config: &LiteConfig, hive: &str)
     let work: mds_wire::CrawlWork = serde_json::from_slice(&bytes).unwrap_or(mds_wire::CrawlWork {
         urls: Vec::new(),
         pause_secs: 60,
+        note: String::new(),
     });
     let pause = work.pause_secs.max(60);
     if work.urls.is_empty() {
@@ -342,6 +343,7 @@ async fn join(client: &reqwest::Client, config: &LiteConfig, hive: &str) -> Resu
         pages: 0,
         queue: 0,
         site: config.site.clone(),
+        version: mds_update::VERSION.into(),
     };
     let hello_body = serde_json::to_vec(&hello).map_err(|err| NodeError::Message(err.to_string()))?;
     let response = client
